@@ -1,0 +1,52 @@
+name: Update from QAIL Release
+
+on:
+  repository_dispatch:
+    types: [new-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'QAIL version to update to'
+        required: true
+        default: 'v0.11.0'
+
+jobs:
+  update:
+    name: Update QAIL lib version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update build.zig.zon
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Updating to version: $VERSION"
+          
+          # Update the URL in build.zig.zon to point to new release
+          sed -i "s|qail/releases/download/v[0-9.]*|qail/releases/download/$VERSION|g" build.zig.zon
+          
+          # Note: Hash will need to be computed after first run
+          cat build.zig.zon
+
+      - name: Commit and tag
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add build.zig.zon
+          git commit -m "Update to QAIL $VERSION" || echo "No changes to commit"
+          git tag "$VERSION" || echo "Tag already exists"
+          git push origin main --tags || echo "Push failed"

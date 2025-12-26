@@ -11,30 +11,40 @@
 
 **2x faster than pg.zig!** Pipeline mode gives 14x speedup.
 
-## Installation
+## Quick Start
 
-1. **Build the Rust library first:**
 ```bash
-# Clone main QAIL repo
-git clone https://github.com/qail-rs/qail
-cd qail
-cargo build --release -p qail-php
-# Copy lib to qail-zig
-cp target/release/libqail_php.a /path/to/qail-zig/lib/
+# Clone and build - library downloads automatically!
+git clone https://github.com/qail-rs/qail-zig
+cd qail-zig
+zig build -Doptimize=ReleaseFast
+
+# Run benchmarks
+./zig-out/bin/qail-zig-bench
+./zig-out/bin/qail-zig-bench-io
 ```
 
-2. **Add to your `build.zig.zon`:**
+The build script **automatically downloads** the correct `libqail.a` for your platform from GitHub releases.
+
+## Usage in Your Project
+
+1. Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .qail = .{
         .url = "https://github.com/qail-rs/qail-zig/archive/refs/heads/main.tar.gz",
-        .hash = "...",
+        .hash = "...",  // zig build will tell you this
     },
 },
 ```
 
-## Usage
+2. In your `build.zig`:
+```zig
+const qail = b.dependency("qail", .{});
+exe.root_module.addImport("qail", qail.module("qail"));
+```
 
+3. Use in code:
 ```zig
 const qail = @import("qail");
 
@@ -45,21 +55,27 @@ pub fn main() !void {
     
     // Send query.data to PostgreSQL socket
     _ = try socket.write(query.data);
-    
-    // Pipeline mode - encode 1000 queries at once!
-    var limits: [1000]i64 = undefined;
-    var batch = qail.encodeBatch("users", "id,name", &limits);
-    defer batch.deinit();
 }
 ```
 
 ## Features
 
+- ✅ **Zero setup** - library downloads automatically
 - ✅ Zero-overhead FFI to Rust core
 - ✅ Pipeline/batch mode (1000 queries in 1 round-trip)
 - ✅ Type-safe AST queries
 - ✅ No SQL injection possible
 - ✅ 68% of native Rust performance
+
+## Platforms
+
+| Platform | Status |
+|----------|--------|
+| macOS arm64 | ✅ |
+| macOS x64 | ✅ |
+| Linux x64 | ✅ |
+| Linux arm64 | ✅ |
+| Windows x64 | ✅ |
 
 ## License
 
