@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const QAIL_VERSION = "0.10.1";
+const QAIL_VERSION = "0.10.2";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
