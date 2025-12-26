@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const QAIL_VERSION = "0.10.1";
-const GITHUB_RELEASE_BASE = "https://github.com/qail-rs/qail/releases/download/v" ++ QAIL_VERSION ++ "/";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -11,11 +10,8 @@ pub fn build(b: *std.Build) void {
     // Ensure lib directory exists
     std.fs.cwd().makeDir("lib") catch {};
 
-    // Get the correct library name for this platform (compile-time for native)
-    const lib_local_name = "libqail_php.a";
-    const lib_path = "lib/" ++ lib_local_name;
-
-    // Check if library exists, if not show download instructions
+    // Check if library exists
+    const lib_path = "lib/libqail_php.a";
     const lib_exists = blk: {
         std.fs.cwd().access(lib_path, .{}) catch {
             break :blk false;
@@ -26,7 +22,6 @@ pub fn build(b: *std.Build) void {
     if (!lib_exists) {
         // Determine remote name based on target
         const remote_name = getRemoteName(target);
-        const download_url = GITHUB_RELEASE_BASE ++ remote_name;
 
         std.debug.print("\n", .{});
         std.debug.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
@@ -34,7 +29,7 @@ pub fn build(b: *std.Build) void {
         std.debug.print("╚══════════════════════════════════════════════════════════════╝\n", .{});
         std.debug.print("\n", .{});
         std.debug.print("📥 Run this command to download:\n\n", .{});
-        std.debug.print("   curl -sL '{s}' | gunzip > {s}\n\n", .{ download_url, lib_path });
+        std.debug.print("   curl -sL 'https://github.com/qail-rs/qail/releases/download/v{s}/{s}' | gunzip > {s}\n\n", .{ QAIL_VERSION, remote_name, lib_path });
         std.debug.print("Or build from source:\n\n", .{});
         std.debug.print("   git clone https://github.com/qail-rs/qail\n", .{});
         std.debug.print("   cd qail && cargo build --release -p qail-php\n", .{});
