@@ -11,11 +11,11 @@ pub fn build(b: *std.Build) void {
     // Ensure lib directory exists
     std.fs.cwd().makeDir("lib") catch {};
 
-    // Get the correct library name for this platform
-    const lib_info = getLibInfo(target);
-    const lib_path = "lib/" ++ lib_info.local_name;
+    // Get the correct library name for this platform (compile-time for native)
+    const lib_local_name = "libqail_php.a";
+    const lib_path = "lib/" ++ lib_local_name;
 
-    // Check if library exists, if not download it
+    // Check if library exists, if not show download instructions
     const lib_exists = blk: {
         std.fs.cwd().access(lib_path, .{}) catch {
             break :blk false;
@@ -24,30 +24,22 @@ pub fn build(b: *std.Build) void {
     };
 
     if (!lib_exists) {
+        // Determine remote name based on target
+        const remote_name = getRemoteName(target);
+        const download_url = GITHUB_RELEASE_BASE ++ remote_name;
+
         std.debug.print("\n", .{});
         std.debug.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
-        std.debug.print("║  📦 QAIL Library not found - downloading...                   ║\n", .{});
+        std.debug.print("║  📦 QAIL Library not found                                    ║\n", .{});
         std.debug.print("╚══════════════════════════════════════════════════════════════╝\n", .{});
         std.debug.print("\n", .{});
-
-        const download_url = GITHUB_RELEASE_BASE ++ lib_info.remote_name;
-        std.debug.print("📥 Downloading: {s}\n", .{download_url});
-        std.debug.print("📁 To: {s}\n\n", .{lib_path});
-
-        // Download using curl (most reliable cross-platform)
-        downloadLib(b.allocator, download_url, lib_path, lib_info.is_gzipped) catch |err| {
-            std.debug.print("\n❌ Download failed: {any}\n", .{err});
-            std.debug.print("\n📋 Manual installation:\n", .{});
-            std.debug.print("   1. Download from: {s}\n", .{download_url});
-            std.debug.print("   2. Extract to: {s}\n", .{lib_path});
-            std.debug.print("\n   Or build from source:\n", .{});
-            std.debug.print("   git clone https://github.com/qail-rs/qail\n", .{});
-            std.debug.print("   cd qail && cargo build --release -p qail-php\n", .{});
-            std.debug.print("   cp target/release/libqail_php.a {s}\n\n", .{lib_path});
-            @panic("Library download failed");
-        };
-
-        std.debug.print("✅ Downloaded successfully!\n\n", .{});
+        std.debug.print("📥 Run this command to download:\n\n", .{});
+        std.debug.print("   curl -sL '{s}' | gunzip > {s}\n\n", .{ download_url, lib_path });
+        std.debug.print("Or build from source:\n\n", .{});
+        std.debug.print("   git clone https://github.com/qail-rs/qail\n", .{});
+        std.debug.print("   cd qail && cargo build --release -p qail-php\n", .{});
+        std.debug.print("   cp target/release/libqail_php.a {s}\n\n", .{lib_path});
+        @panic("Library not found. Please download using the command above.");
     }
 
     // Main benchmark executable
@@ -98,54 +90,18 @@ pub fn build(b: *std.Build) void {
     run_io_step.dependOn(&run_io.step);
 }
 
-const LibInfo = struct {
-    local_name: []const u8,
-    remote_name: []const u8,
-    is_gzipped: bool,
-};
-
-fn getLibInfo(target: std.Build.ResolvedTarget) LibInfo {
+fn getRemoteName(target: std.Build.ResolvedTarget) []const u8 {
     const arch = target.result.cpu.arch;
     const os = target.result.os.tag;
 
     if (os == .macos) {
-        if (arch == .aarch64) {
-            return .{ .local_name = "libqail_php.a", .remote_name = "libqail-darwin-arm64.a.gz", .is_gzipped = true };
-        }
-        return .{ .local_name = "libqail_php.a", .remote_name = "libqail-darwin-x64.a.gz", .is_gzipped = true };
+        if (arch == .aarch64) return "libqail-darwin-arm64.a.gz";
+        return "libqail-darwin-x64.a.gz";
     } else if (os == .linux) {
-        if (arch == .aarch64) {
-            return .{ .local_name = "libqail_php.a", .remote_name = "libqail-linux-arm64.a.gz", .is_gzipped = true };
-        }
-        return .{ .local_name = "libqail_php.a", .remote_name = "libqail-linux-x64.a.gz", .is_gzipped = true };
+        if (arch == .aarch64) return "libqail-linux-arm64.a.gz";
+        return "libqail-linux-x64.a.gz";
     } else if (os == .windows) {
-        return .{ .local_name = "qail_php.lib", .remote_name = "libqail-win-x64.lib.zip", .is_gzipped = false };
+        return "libqail-win-x64.lib.zip";
     }
-
-    // Fallback to linux x64
-    return .{ .local_name = "libqail_php.a", .remote_name = "libqail-linux-x64.a.gz", .is_gzipped = true };
-}
-
-fn downloadLib(allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8, is_gzipped: bool) !void {
-    // Use curl for downloading (available on all platforms)
-    if (is_gzipped) {
-        // curl | gunzip > file
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{ "sh", "-c", std.fmt.allocPrint(allocator, "curl -sL '{s}' | gunzip > '{s}'", .{ url, dest_path }) catch unreachable },
-        });
-        _ = result;
-    } else {
-        // curl -o file
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{ "curl", "-sL", "-o", dest_path, url },
-        });
-        _ = result;
-    }
-
-    // Verify download succeeded
-    std.fs.cwd().access(dest_path, .{}) catch {
-        return error.DownloadFailed;
-    };
+    return "libqail-linux-x64.a.gz";
 }
