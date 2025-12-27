@@ -1,0 +1,195 @@
+//! PostgreSQL Driver
+//!
+//! Main driver struct for executing QAIL AST queries.
+
+const std = @import("std");
+const ast = @import("../ast/mod.zig");
+const protocol = @import("../protocol/mod.zig");
+const conn_mod = @import("connection.zig");
+const row_mod = @import("row.zig");
+
+const QailCmd = ast.QailCmd;
+const AstEncoder = protocol.AstEncoder;
+const Decoder = protocol.Decoder;
+const BackendMessage = protocol.BackendMessage;
+const FieldDescription = protocol.wire.FieldDescription;
+const Connection = conn_mod.Connection;
+const PgRow = row_mod.PgRow;
+
+/// PostgreSQL driver - executes QAIL AST queries
+pub const PgDriver = struct {
+    conn: Connection,
+    allocator: std.mem.Allocator,
+    encoder: AstEncoder,
+
+    pub fn init(conn: Connection, allocator: std.mem.Allocator) PgDriver {
+        return .{
+            .conn = conn,
+            .allocator = allocator,
+            .encoder = AstEncoder.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *PgDriver) void {
+        self.encoder.deinit();
+        self.conn.close();
+    }
+
+    /// Connect to PostgreSQL
+    pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, database: []const u8) !PgDriver {
+        var conn = try Connection.connect(allocator, host, port);
+        errdefer conn.close();
+
+        try conn.startup(user, database, null);
+
+        return PgDriver.init(conn, allocator);
+    }
+
+    /// Connect with password
+    pub fn connectWithPassword(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, database: []const u8, password: []const u8) !PgDriver {
+        var conn = try Connection.connect(allocator, host, port);
+        errdefer conn.close();
+
+        try conn.startup(user, database, password);
+
+        return PgDriver.init(conn, allocator);
+    }
+
+    // ==================== AST-Native Query Execution ====================
+
+    /// Execute a QAIL AST command and fetch all rows
+    pub fn fetchAll(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
+        // Encode AST to wire protocol
+        try self.encoder.encodeQuery(cmd);
+        try self.conn.send(self.encoder.getWritten());
+
+        // Collect results
+        var rows: std.ArrayList(PgRow) = .{};
+        errdefer {
+            for (rows.items) |*row| {
+                row.deinit();
+            }
+            rows.deinit(self.allocator);
+        }
+
+        var field_descriptions: []FieldDescription = &.{};
+        var field_names: [][]const u8 = &.{};
+
+        // Read responses
+        while (true) {
+            const msg = try self.conn.readMessage();
+
+            switch (msg.msg_type) {
+                .parse_complete, .bind_complete => {},
+                .row_description => {
+                    var decoder = Decoder.init(msg.payload);
+                    field_descriptions = try decoder.parseRowDescription(self.allocator);
+
+                    // Extract field names
+                    field_names = try self.allocator.alloc([]const u8, field_descriptions.len);
+                    for (field_descriptions, 0..) |fd, i| {
+                        field_names[i] = fd.name;
+                    }
+                },
+                .data_row => {
+                    var decoder = Decoder.init(msg.payload);
+                    const columns = try decoder.parseDataRow(self.allocator);
+
+                    try rows.append(self.allocator, PgRow{
+                        .columns = columns,
+                        .field_names = field_names,
+                        .allocator = self.allocator,
+                    });
+                },
+                .command_complete => {},
+                .ready_for_query => break,
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    return error.QueryError;
+                },
+                .no_data => {},
+                else => {},
+            }
+        }
+
+        return try rows.toOwnedSlice(self.allocator);
+    }
+
+    /// Execute a QAIL AST command and fetch one row
+    pub fn fetchOne(self: *PgDriver, cmd: *const QailCmd) !?PgRow {
+        const rows = try self.fetchAll(cmd);
+        defer {
+            for (rows[1..]) |*row| {
+                row.deinit();
+            }
+            self.allocator.free(rows);
+        }
+
+        if (rows.len == 0) return null;
+        return rows[0];
+    }
+
+    /// Execute a QAIL AST command (for mutations) - returns affected row count
+    pub fn execute(self: *PgDriver, cmd: *const QailCmd) !u64 {
+        try self.encoder.encodeQuery(cmd);
+        try self.conn.send(self.encoder.getWritten());
+
+        var affected_rows: u64 = 0;
+
+        while (true) {
+            const msg = try self.conn.readMessage();
+
+            switch (msg.msg_type) {
+                .parse_complete, .bind_complete => {},
+                .command_complete => {
+                    var decoder = Decoder.init(msg.payload);
+                    const tag = try decoder.parseCommandComplete();
+
+                    // Parse affected rows from tag like "UPDATE 5"
+                    var parts = std.mem.splitBackwardsScalar(u8, tag, ' ');
+                    if (parts.next()) |last| {
+                        affected_rows = std.fmt.parseInt(u64, last, 10) catch 0;
+                    }
+                },
+                .ready_for_query => break,
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Execute error: {s}\n", .{err.message orelse "unknown"});
+                    return error.ExecuteError;
+                },
+                else => {},
+            }
+        }
+
+        return affected_rows;
+    }
+
+    // ==================== Transaction Control ====================
+
+    /// Begin a transaction
+    pub fn begin(self: *PgDriver) !void {
+        const cmd = QailCmd.raw("BEGIN");
+        _ = try self.execute(&cmd);
+    }
+
+    /// Commit the transaction
+    pub fn commit(self: *PgDriver) !void {
+        const cmd = QailCmd.raw("COMMIT");
+        _ = try self.execute(&cmd);
+    }
+
+    /// Rollback the transaction
+    pub fn rollback(self: *PgDriver) !void {
+        const cmd = QailCmd.raw("ROLLBACK");
+        _ = try self.execute(&cmd);
+    }
+};
+
+// Tests
+test "pgdriver struct" {
+    // Just test the struct can be referenced
+    _ = PgDriver;
+}

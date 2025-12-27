@@ -6,11 +6,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "README.md",
     },
-    .dependencies = .{
-        .pg_zig = .{
-            .url = "https://github.com/karlseguin/pg.zig/archive/refs/heads/master.tar.gz",
-            .hash = "pg-0.0.0-Wp_7gag6BgD_QAZrPhNNEGpnUZR_LEkKT40Ura3p-4yX",
-        },
-    },
+    .dependencies = .{},
 }

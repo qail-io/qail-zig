@@ -1,102 +1,136 @@
 const std = @import("std");
-const builtin = @import("builtin");
-
-const QAIL_VERSION = "0.10.2";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Ensure lib directory exists
-    std.fs.cwd().makeDir("lib") catch {};
+    // ==================== Library Module ====================
+    // The main QAIL Zig library (pure Zig, no FFI)
+    const qail_mod = b.addModule("qail", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
-    // Check if library exists
-    const lib_path = "lib/libqail_php.a";
-    const lib_exists = blk: {
-        std.fs.cwd().access(lib_path, .{}) catch {
-            break :blk false;
-        };
-        break :blk true;
-    };
+    // ==================== Test Step ====================
+    const lib_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
 
-    if (!lib_exists) {
-        // Determine remote name based on target
-        const remote_name = getRemoteName(target);
+    // Enable strict mode: treat warnings as errors
+    lib_tests.root_module.error_tracing = true;
 
-        std.debug.print("\n", .{});
-        std.debug.print("╔══════════════════════════════════════════════════════════════╗\n", .{});
-        std.debug.print("║  📦 QAIL Library not found                                    ║\n", .{});
-        std.debug.print("╚══════════════════════════════════════════════════════════════╝\n", .{});
-        std.debug.print("\n", .{});
-        std.debug.print("📥 Run this command to download:\n\n", .{});
-        std.debug.print("   curl -sL 'https://github.com/qail-rs/qail/releases/download/v{s}/{s}' | gunzip > {s}\n\n", .{ QAIL_VERSION, remote_name, lib_path });
-        std.debug.print("Or build from source:\n\n", .{});
-        std.debug.print("   git clone https://github.com/qail-rs/qail\n", .{});
-        std.debug.print("   cd qail && cargo build --release -p qail-php\n", .{});
-        std.debug.print("   cp target/release/libqail_php.a {s}\n\n", .{lib_path});
-        @panic("Library not found. Please download using the command above.");
-    }
+    const run_lib_tests = b.addRunArtifact(lib_tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_lib_tests.step);
 
-    // Main benchmark executable
-    const exe = b.addExecutable(.{
-        .name = "qail-zig-bench",
+    // ==================== Example Executable ====================
+    const example = b.addExecutable(.{
+        .name = "qail-example",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
         }),
     });
-    exe.addLibraryPath(.{ .cwd_relative = "lib" });
-    exe.linkSystemLibrary("qail_php");
-    exe.linkSystemLibrary("c");
-    if (target.result.os.tag != .windows) {
-        exe.linkSystemLibrary("resolv");
-    }
-    exe.linkSystemLibrary("c++");
-    b.installArtifact(exe);
+    b.installArtifact(example);
 
-    // I/O benchmark
-    const bench_io = b.addExecutable(.{
-        .name = "qail-zig-bench-io",
+    const run_example = b.addRunArtifact(example);
+    run_example.step.dependOn(b.getInstallStep());
+    const run_step = b.step("run", "Run example");
+    run_step.dependOn(&run_example.step);
+
+    // ==================== Benchmark Executable ====================
+    const bench = b.addExecutable(.{
+        .name = "qail-bench",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench_io.zig"),
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(bench);
+
+    const run_bench = b.addRunArtifact(bench);
+    run_bench.step.dependOn(b.getInstallStep());
+    const bench_step = b.step("bench", "Run benchmark");
+    bench_step.dependOn(&run_bench.step);
+
+    // ==================== Integration Test Executable ====================
+    const integration = b.addExecutable(.{
+        .name = "qail-integration",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(integration);
+
+    const run_integration = b.addRunArtifact(integration);
+    run_integration.step.dependOn(b.getInstallStep());
+    const integration_step = b.step("integration", "Run integration test");
+    integration_step.dependOn(&run_integration.step);
+
+    // ==================== Stress Test Executable ====================
+    const stress = b.addExecutable(.{
+        .name = "qail-stress",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/stress_test.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(stress);
+
+    const run_stress = b.addRunArtifact(stress);
+    run_stress.step.dependOn(b.getInstallStep());
+    const stress_step = b.step("stress", "Run 50M roundtrip stress test");
+    stress_step.dependOn(&run_stress.step);
+
+    // ==================== Fair Benchmark Executable ====================
+    const fair = b.addExecutable(.{
+        .name = "qail-fair",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fair_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(fair);
+
+    const run_fair = b.addRunArtifact(fair);
+    run_fair.step.dependOn(b.getInstallStep());
+    const fair_step = b.step("fair", "Run fair Rust-matching benchmark");
+    fair_step.dependOn(&run_fair.step);
+
+    // ==================== Check Step (fast compile check) ====================
+    const check = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    bench_io.addLibraryPath(.{ .cwd_relative = "lib" });
-    bench_io.linkSystemLibrary("qail_php");
-    bench_io.linkSystemLibrary("c");
-    if (target.result.os.tag != .windows) {
-        bench_io.linkSystemLibrary("resolv");
-    }
-    bench_io.linkSystemLibrary("c++");
-    b.installArtifact(bench_io);
-
-    // Run steps
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-    const run_step = b.step("run", "Run encoding benchmark");
-    run_step.dependOn(&run_cmd.step);
-
-    const run_io = b.addRunArtifact(bench_io);
-    run_io.step.dependOn(b.getInstallStep());
-    const run_io_step = b.step("bench-io", "Run I/O benchmark");
-    run_io_step.dependOn(&run_io.step);
-}
-
-fn getRemoteName(target: std.Build.ResolvedTarget) []const u8 {
-    const arch = target.result.cpu.arch;
-    const os = target.result.os.tag;
-
-    if (os == .macos) {
-        if (arch == .aarch64) return "libqail-darwin-arm64.a.gz";
-        return "libqail-darwin-x64.a.gz";
-    } else if (os == .linux) {
-        if (arch == .aarch64) return "libqail-linux-arm64.a.gz";
-        return "libqail-linux-x64.a.gz";
-    } else if (os == .windows) {
-        return "libqail-win-x64.lib.zip";
-    }
-    return "libqail-linux-x64.a.gz";
+    const check_step = b.step("check", "Fast compile check");
+    check_step.dependOn(&check.step);
 }

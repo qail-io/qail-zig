@@ -1,4 +1,7 @@
-target
-.zig-cache
-zig-out
-lib/
+.zig-cache/
+zig-out/
+.DS_Store
+*.o
+*.a
+*.so
+*.dylib
