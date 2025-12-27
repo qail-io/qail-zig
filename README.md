@@ -45,37 +45,54 @@
 ## Installation
 
 ### Requirements
-- Zig 0.15.1 or later
-- PostgreSQL server
+- Zig 0.15.2 or later ([download](https://ziglang.org/download/))
+- PostgreSQL 14+ server
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/meastblue/qail-zig.git
+# Clone the repository
+git clone https://github.com/qail-io/qail-zig.git
 cd qail-zig
-zig build
-```
 
-### Run Tests
-```bash
-zig build test
-```
+# Build in release mode
+zig build -Doptimize=ReleaseFast
 
-### Run Example
-```bash
+# Build and run the example
 zig build run
 ```
 
-### Run Benchmarks
+### PostgreSQL Setup
+
 ```bash
-# Encoding benchmark (no DB)
-zig build bench
+# Ensure PostgreSQL is running
+pg_isready
 
-# Full roundtrip stress test
-zig build stress
+# Create a test database (optional)
+createdb qail_test
+```
 
-# Fair comparison (matches Rust config)
-zig build fair
+### Run Tests
+
+```bash
+# Unit tests (no database required)
+zig build test
+
+# Integration tests (requires PostgreSQL)
+zig build qail-integration
+```
+
+### Run Benchmarks
+
+```bash
+# Encoding benchmark (no database required)
+zig build bench -Doptimize=ReleaseFast
+
+# Pipeline stress test (requires PostgreSQL)
+zig build stress -Doptimize=ReleaseFast
+
+# 50M fair benchmark (matches Rust config)
+zig build fair -Doptimize=ReleaseFast
 ```
 
 ## Quick Start
