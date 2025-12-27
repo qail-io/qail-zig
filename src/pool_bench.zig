@@ -137,13 +137,11 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
     for (0..batches) |_| {
         encoder.reset();
 
-        // Encode batch of 100 queries
+        // Encode batch of 100 queries - use TEXT parameters
+        const text_params = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
         for (0..QUERIES_PER_BATCH) |i| {
-            const limit_val: i32 = @intCast((i % 10) + 1);
-            var limit_buf: [4]u8 = undefined;
-            std.mem.writeInt(i32, &limit_buf, limit_val, .big);
-
-            encoder.appendBind("", stmt_name, &[_]?[]const u8{&limit_buf}) catch continue;
+            const param_idx = i % 10;
+            encoder.appendBind("", stmt_name, &[_]?[]const u8{text_params[param_idx]}) catch continue;
             encoder.appendExecute("", 0) catch continue;
         }
         encoder.appendSync() catch continue;

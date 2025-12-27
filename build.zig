@@ -142,6 +142,44 @@ pub fn build(b: *std.Build) void {
     const pool_step = b.step("pool", "Run pool benchmark (matches Rust)");
     pool_step.dependOn(&run_pool.step);
 
+    // ==================== Error Test Executable ====================
+    const error_test = b.addExecutable(.{
+        .name = "qail-error-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/error_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(error_test);
+
+    const run_error_test = b.addRunArtifact(error_test);
+    run_error_test.step.dependOn(b.getInstallStep());
+    const error_test_step = b.step("error-test", "Test error detection (SELECT 1/0)");
+    error_test_step.dependOn(&run_error_test.step);
+
+    // ==================== Verification Benchmark ====================
+    const verify_bench = b.addExecutable(.{
+        .name = "qail-verify",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_verify.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(verify_bench);
+
+    const run_verify = b.addRunArtifact(verify_bench);
+    run_verify.step.dependOn(b.getInstallStep());
+    const verify_step = b.step("verify", "Verify response sizes (audit partial reads)");
+    verify_step.dependOn(&run_verify.step);
+
     // ==================== Multi-Connection Benchmark ====================
     const multi_bench = b.addExecutable(.{
         .name = "qail-multi",

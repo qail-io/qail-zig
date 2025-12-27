@@ -1,6 +1,6 @@
-//! QAIL-Zig PostgreSQL I/O Benchmark (FIXED v2)
+//! QAIL-Zig PostgreSQL I/O Benchmark (FIXED v3)
 //!
-//! Simple approach: read until socket has no more data.
+//! Properly waits for ALL responses by counting 'Z' (ReadyForQuery) messages.
 
 const std = @import("std");
 const qail = @import("qail.zig");
@@ -99,12 +99,24 @@ pub fn main() !void {
 
         _ = try stream.write(query.data);
 
-        // Read all responses - expect ~5KB per batch (100 small results)
+        // FIXED: Count 'Z' (ReadyForQuery) messages to ensure ALL responses received
+        var ready_count: usize = 0;
         var total: usize = 0;
-        while (total < 2000) { // Reasonable min for 100 queries
-            const n = try stream.read(&read_buf);
+        while (ready_count < BATCH_SIZE) {
+            const n = try stream.read(read_buf[total..]);
             if (n == 0) break;
+
+            // Scan the new bytes for 'Z' (ReadyForQuery message type)
+            for (read_buf[total .. total + n]) |b| {
+                if (b == 'Z') ready_count += 1;
+            }
             total += n;
+
+            // Ring buffer reset if getting full
+            if (total > 60000) {
+                total = 0;
+                // Note: ready_count persists - we've already counted those Z's
+            }
         }
     }
 

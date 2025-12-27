@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.3.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.3.0)
 
-> 🚀 **323K queries/second** on M3 MacBook - Pure Zig, zero FFI, zero GC
+> 🚀 **1M+ queries/second** with pooling, **316K** single connection - Pure Zig, zero FFI, zero GC
 
 ## What's New in v0.3.0
 
@@ -20,7 +20,7 @@
 
 - **Pure Zig**: No C dependencies, no FFI, no Rust - just Zig
 - **AST-Native**: Build queries with type-safe AST, not string concatenation
-- **Fast**: 323K q/s on M3 with pipelining and prepared statements
+- **Fast**: 1M+ q/s pooled, 316K single connection with pipelining
 - **Simple**: One `zig build` and you're done
 - **Lightweight**: ~4,000 lines of code
 
@@ -29,40 +29,19 @@
 ### Pool Benchmark (150M queries, 10 workers)
 Query: `SELECT id, name FROM harbors LIMIT $1`
 
-| Driver | Queries/Second | Time |
-|--------|----------------|------|
-| **qail-zig** | **9,270,000** | 16.2s |
-| qail-pg (Rust) | 921,000 | 162.9s |
+| Driver | Queries/Second | Rows Parsed |
+|--------|----------------|-------------|
+| **qail-zig** | **1,016,729** | 825M |
+| qail-pg (Rust) | 1,200,000 | - |
 
-**⚡ Zig is 10x faster with pipelined batching!**
+Both drivers perform comparably with proper response parsing.
 
 ### Single Connection (50M queries, pipeline)
 
-| Platform | Driver | Queries/Second | Winner |
-|----------|--------|----------------|--------|
-| **M3 MacBook** | qail-zig | **323,143** | ⚡ Zig +10% |
-| **M3 MacBook** | qail-pg (Rust) | 294,239 | |
-| **Linux EPYC** | qail-pg (Rust) | **198,000** | 🦀 Rust +13% |
-| **Linux EPYC** | qail-zig | 175,000 | |
-
-### Key Insights
-- **Pool benchmark**: Zig's sync batching massively outperforms Rust's async
-- **M3 MacBook**: Zig's sync I/O beats Rust (faster single-core)
-- **Linux servers**: Rust's async wins on throughput-optimized CPUs
-
-### vs pg.zig (karlseguin)
-
-[pg.zig](https://github.com/karlseguin/pg.zig) is the popular Zig PostgreSQL library. Key differences:
-
-| Feature | qail-zig | pg.zig |
-|---------|----------|--------|
-| **Pipelining** | ✅ 100 queries/batch | ❌ 1 query/call |
-| Network Roundtrips | 1 per batch | 1 per query |
-| AST Builder | ✅ Type-safe | ❌ SQL strings |
-| Prepared Stmt Cache | ✅ Yes | ✅ Yes |
-| LISTEN/NOTIFY | ✅ Yes | ✅ Yes |
-
-**Why qail-zig is faster**: Pipelining sends 100 queries in a single TCP write, then reads all responses. pg.zig sends 1 query → waits for response → sends next query (100x network roundtrips).
+| Driver | Queries/Second | Time |
+|--------|----------------|------|
+| **qail-zig** | **316,872** | 157.8s |
+| qail-pg (Rust) | ~300,000 | ~166s |
 
 > 📌 See [qail.rs](https://github.com/qail-io/qail) for the Rust version
 
@@ -243,7 +222,7 @@ src/
 | Dependencies | 0 | 15+ crates |
 | Build Time | <2s | ~30s |
 | Binary Size | ~200KB | ~2MB |
-| Performance | 323K q/s | 294K q/s |
+| Performance | 1M q/s (pool) | 1.2M q/s (pool) |
 | Async | Sync | Tokio |
 | TLS | ✅ Pure Zig (std.crypto.tls) | ✅ rustls |
 | Connection Pool | ✅ PgPool | ✅ Yes |
