@@ -20,10 +20,14 @@
 
 50 million query stress test against PostgreSQL 18:
 
-| Driver | Queries/Second | Time for 50M | Language |
-|--------|---------------|--------------|----------|
-| **QAIL Rust** | 355,000 | 141s | Rust |
-| **QAIL Zig** | 316,791 | 158s | Zig |
+| Driver | Stack | Queries/Second | Time for 50M | Target |
+|--------|-------|----------------|--------------|--------|
+| **qail-pg** | Rust + Zig FFI | 355,000 | 141s | Rust developers |
+| **qail-zig** | Pure Zig | 316,791 | 158s | Zig developers |
+
+### Stack Explanation
+- **qail-pg**: Rust driver using Zig for high-performance protocol encoding (dual-stack approach)
+- **qail-zig**: Pure Zig implementation - zero FFI, native Zig, easiest installation
 
 Both tests use identical configuration:
 - Query: `SELECT id, name FROM harbors LIMIT $1`
