@@ -64,8 +64,10 @@ pub const Connection = struct {
                     return error.ConnectionTimeout;
                 }
 
-                // Check for socket error (will throw if there was a connect error)
-                try posix.getsockoptError(fd);
+                // Check for socket error (skip on Windows - getsockopt requires libc)
+                if (builtin.os.tag != .windows) {
+                    try posix.getsockoptError(fd);
+                }
             } else {
                 return err;
             }
