@@ -223,7 +223,7 @@ src/
 | Build Time | <2s | ~30s |
 | Binary Size | ~200KB | ~2MB |
 | Performance | 1M q/s (pool) | 1.2M q/s (pool) |
-| Async | io_uring (Linux) / Sync fallback | Tokio |
+| Async | io_uring (Linux) / Sync fallback | io_uring (Linux) / Tokio fallback |
 | TLS | ✅ Pure Zig (std.crypto.tls) | ✅ rustls |
 | Connection Pool | ✅ PgPool | ✅ Yes |
 
