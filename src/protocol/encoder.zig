@@ -186,7 +186,11 @@ pub const Encoder = struct {
     /// Encode Execute
     pub fn encodeExecute(self: *Encoder, portal: []const u8, max_rows: u32) !void {
         self.reset();
+        try self.appendExecute(portal, max_rows);
+    }
 
+    /// Append Execute (no reset - for pipelining)
+    pub fn appendExecute(self: *Encoder, portal: []const u8, max_rows: u32) !void {
         const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + 4;
         try self.writeByte(@intFromEnum(FrontendMessage.execute));
         try self.writeU32(msg_len);
@@ -197,6 +201,11 @@ pub const Encoder = struct {
     /// Encode Sync
     pub fn encodeSync(self: *Encoder) !void {
         self.reset();
+        try self.appendSync();
+    }
+
+    /// Append Sync (no reset - for pipelining)
+    pub fn appendSync(self: *Encoder) !void {
         try self.writeByte(@intFromEnum(FrontendMessage.sync));
         try self.writeU32(4);
     }
@@ -213,6 +222,42 @@ pub const Encoder = struct {
         self.reset();
         try self.writeByte(@intFromEnum(FrontendMessage.flush));
         try self.writeU32(4);
+    }
+
+    /// Append Bind (no reset - for pipelining)
+    pub fn appendBind(
+        self: *Encoder,
+        portal: []const u8,
+        stmt_name: []const u8,
+        params: []const ?[]const u8,
+    ) !void {
+        var params_size: u32 = 0;
+        for (params) |param| {
+            params_size += 4;
+            if (param) |p| {
+                params_size += @intCast(p.len);
+            }
+        }
+
+        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + @as(u32, @intCast(stmt_name.len)) + 1 + 2 + 2 + params_size + 2;
+
+        try self.writeByte(@intFromEnum(FrontendMessage.bind));
+        try self.writeU32(msg_len);
+        try self.writeCString(portal);
+        try self.writeCString(stmt_name);
+        try self.writeU16(0);
+        try self.writeU16(@intCast(params.len));
+
+        for (params) |param| {
+            if (param) |p| {
+                try self.writeI32(@intCast(p.len));
+                try self.writeBytes(p);
+            } else {
+                try self.writeI32(-1);
+            }
+        }
+
+        try self.writeU16(0);
     }
 };
 

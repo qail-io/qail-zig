@@ -126,7 +126,7 @@ pub const PgPool = struct {
         var pool = PgPool{
             .config = config,
             .allocator = allocator,
-            .idle_connections = std.ArrayList(PooledConn).init(allocator),
+            .idle_connections = .{},
             .mutex = .{},
             .active_count = 0,
         };
@@ -219,7 +219,7 @@ pub const PgPool = struct {
 
         // Try to get an idle connection
         while (self.idle_connections.items.len > 0) {
-            const pooled = self.idle_connections.pop();
+            const pooled = self.idle_connections.pop() orelse break;
 
             // Check if connection is stale
             if (now - pooled.last_used > self.config.idle_timeout_ms) {

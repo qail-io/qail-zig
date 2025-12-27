@@ -123,6 +123,44 @@ pub fn build(b: *std.Build) void {
     const fair_step = b.step("fair", "Run fair Rust-matching benchmark");
     fair_step.dependOn(&run_fair.step);
 
+    // ==================== Pool Benchmark Executable ====================
+    const pool_bench = b.addExecutable(.{
+        .name = "qail-pool",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pool_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(pool_bench);
+
+    const run_pool = b.addRunArtifact(pool_bench);
+    run_pool.step.dependOn(b.getInstallStep());
+    const pool_step = b.step("pool", "Run pool benchmark (matches Rust)");
+    pool_step.dependOn(&run_pool.step);
+
+    // ==================== Multi-Connection Benchmark ====================
+    const multi_bench = b.addExecutable(.{
+        .name = "qail-multi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/multi_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(multi_bench);
+
+    const run_multi = b.addRunArtifact(multi_bench);
+    run_multi.step.dependOn(b.getInstallStep());
+    const multi_step = b.step("multi", "Run multi-connection benchmark (direct)");
+    multi_step.dependOn(&run_multi.step);
+
     // ==================== Pipeline API Benchmark Executable ====================
     const pipeline_bench = b.addExecutable(.{
         .name = "qail-pipeline",
