@@ -10,6 +10,7 @@ pub const row = @import("row.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const pool = @import("pool.zig");
 pub const copy = @import("copy.zig");
+pub const io_backend = @import("io_backend.zig");
 
 // Re-export main types
 pub const Connection = connection.Connection;

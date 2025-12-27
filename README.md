@@ -238,7 +238,7 @@ src/
 - [x] Transaction commands
 - [x] TLS/SSL support (pure Zig, std.crypto.tls)
 - [x] Connection pooling (PgPool with thread safety)
-- [ ] Async I/O
+- [x] Async I/O auto-detection (io_uring on Linux, sync fallback)
 
 ## Related Projects
 
