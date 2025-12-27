@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const builtin = @import("builtin");
 const protocol = @import("../protocol/mod.zig");
 
 const Encoder = protocol.Encoder;
@@ -209,7 +210,7 @@ pub const AsyncConnection = struct {
 /// Wait for fd to be readable. Returns true if ready, false if timeout.
 fn pollRead(fd: posix.fd_t, timeout_ms: i32) !bool {
     var fds = [1]posix.pollfd{
-        .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 },
+        .{ .fd = if (builtin.os.tag == .windows) @ptrCast(fd) else fd, .events = posix.POLL.IN, .revents = 0 },
     };
 
     const result = try posix.poll(&fds, timeout_ms);
@@ -219,7 +220,7 @@ fn pollRead(fd: posix.fd_t, timeout_ms: i32) !bool {
 /// Wait for fd to be writable. Returns true if ready, false if timeout.
 fn pollWrite(fd: posix.fd_t, timeout_ms: i32) !bool {
     var fds = [1]posix.pollfd{
-        .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
+        .{ .fd = if (builtin.os.tag == .windows) @ptrCast(fd) else fd, .events = posix.POLL.OUT, .revents = 0 },
     };
 
     const result = try posix.poll(&fds, timeout_ms);
