@@ -1,9 +1,11 @@
 //! PostgreSQL Row
 //!
 //! Represents a row of data returned from a query.
+//! Provides typed access to column values, similar to pg.zig.
 
 const std = @import("std");
 const protocol = @import("../protocol/mod.zig");
+const pg_types = @import("types/mod.zig");
 const types = protocol.types;
 
 /// A row of data from PostgreSQL
@@ -14,6 +16,55 @@ pub const PgRow = struct {
 
     pub fn deinit(self: *PgRow) void {
         self.allocator.free(self.columns);
+    }
+
+    /// Generic typed getter by column index
+    /// Usage: row.get(i32, 0), row.get([]const u8, 1)
+    pub fn get(self: *const PgRow, comptime T: type, index: usize) ?T {
+        const raw = self.getString(index) orelse return null;
+        return parseAs(T, raw);
+    }
+
+    /// Generic typed getter by column name
+    /// Usage: row.getCol(i32, "id"), row.getCol([]const u8, "name")
+    pub fn getCol(self: *const PgRow, comptime T: type, name: []const u8) ?T {
+        const raw = self.getByName(name) orelse return null;
+        return parseAs(T, raw);
+    }
+
+    /// Parse raw bytes as type T
+    fn parseAs(comptime T: type, raw: []const u8) ?T {
+        if (T == []const u8) {
+            return raw;
+        } else if (T == i16) {
+            return std.fmt.parseInt(i16, raw, 10) catch null;
+        } else if (T == i32) {
+            return std.fmt.parseInt(i32, raw, 10) catch null;
+        } else if (T == i64) {
+            return std.fmt.parseInt(i64, raw, 10) catch null;
+        } else if (T == u32) {
+            return std.fmt.parseInt(u32, raw, 10) catch null;
+        } else if (T == f32) {
+            return std.fmt.parseFloat(f32, raw) catch null;
+        } else if (T == f64) {
+            return std.fmt.parseFloat(f64, raw) catch null;
+        } else if (T == bool) {
+            if (raw.len == 0) return null;
+            return raw[0] == 't' or raw[0] == 'T' or raw[0] == '1';
+        } else if (T == pg_types.Uuid) {
+            if (raw.len == 16) {
+                return pg_types.Uuid.fromBytes(raw[0..16].*);
+            } else if (raw.len == 36) {
+                return pg_types.Uuid.fromHex(raw) catch null;
+            }
+            return null;
+        } else if (T == pg_types.Timestamp) {
+            // Parse microseconds from text
+            const micros = std.fmt.parseInt(i64, raw, 10) catch return null;
+            return pg_types.Timestamp.fromMicros(micros);
+        } else {
+            @compileError("Unsupported type for PgRow.get(): " ++ @typeName(T));
+        }
     }
 
     /// Get column value by index as string
@@ -34,26 +85,22 @@ pub const PgRow = struct {
 
     /// Get column value as i32
     pub fn getInt32(self: *const PgRow, index: usize) ?i32 {
-        const str = self.getString(index) orelse return null;
-        return types.textToInt32(str) catch null;
+        return self.get(i32, index);
     }
 
     /// Get column value as i64
     pub fn getInt64(self: *const PgRow, index: usize) ?i64 {
-        const str = self.getString(index) orelse return null;
-        return types.textToInt64(str) catch null;
+        return self.get(i64, index);
     }
 
     /// Get column value as f64
     pub fn getFloat64(self: *const PgRow, index: usize) ?f64 {
-        const str = self.getString(index) orelse return null;
-        return types.textToFloat64(str) catch null;
+        return self.get(f64, index);
     }
 
     /// Get column value as bool
     pub fn getBool(self: *const PgRow, index: usize) ?bool {
-        const str = self.getString(index) orelse return null;
-        return types.textToBool(str);
+        return self.get(bool, index);
     }
 };
 

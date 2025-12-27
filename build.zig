@@ -123,6 +123,44 @@ pub fn build(b: *std.Build) void {
     const fair_step = b.step("fair", "Run fair Rust-matching benchmark");
     fair_step.dependOn(&run_fair.step);
 
+    // ==================== Pipeline API Benchmark Executable ====================
+    const pipeline_bench = b.addExecutable(.{
+        .name = "qail-pipeline",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_pipeline.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(pipeline_bench);
+
+    const run_pipeline = b.addRunArtifact(pipeline_bench);
+    run_pipeline.step.dependOn(b.getInstallStep());
+    const pipeline_step = b.step("pipeline", "Run Pipeline API benchmark");
+    pipeline_step.dependOn(&run_pipeline.step);
+
+    // ==================== Async Connection Test ====================
+    const async_test = b.addExecutable(.{
+        .name = "qail-async-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test_async.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(async_test);
+
+    const run_async = b.addRunArtifact(async_test);
+    run_async.step.dependOn(b.getInstallStep());
+    const async_step = b.step("async", "Run async connection test");
+    async_step.dependOn(&run_async.step);
+
     // ==================== Check Step (fast compile check) ====================
     const check = b.addTest(.{
         .root_module = b.createModule(.{

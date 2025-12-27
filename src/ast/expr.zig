@@ -164,11 +164,23 @@ pub const WhenClause = struct {
     result: Expr,
 };
 
-/// A filter condition (column op value)
+/// A filter condition (expr op value)
 pub const Condition = struct {
-    column: []const u8,
-    op: Operator,
-    value: Value,
+    /// Left side (column or expression)
+    left: Expr = .star,
+    /// Column name shorthand (used if left is star)
+    column: []const u8 = "",
+    /// Comparison operator
+    op: Operator = .eq,
+    /// Value to compare
+    value: Value = .null,
+    /// Whether this is an array unnest operation
+    is_array_unnest: bool = false,
+
+    /// Create a simple column condition
+    pub fn init(col: []const u8, op_: Operator, val: Value) Condition {
+        return .{ .column = col, .op = op_, .value = val };
+    }
 };
 
 // Tests

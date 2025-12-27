@@ -16,15 +16,45 @@ const Value = values.Value;
 
 /// Command type (GET, SET, DEL, ADD, etc.)
 pub const CmdKind = enum {
+    // Query operations
     get, // SELECT
     set, // UPDATE
     del, // DELETE
     add, // INSERT
     put, // UPSERT (INSERT ON CONFLICT)
+
+    // Schema operations
     make, // CREATE TABLE
     truncate, // TRUNCATE
+
+    // Transaction control
+    begin, // BEGIN TRANSACTION
+    commit, // COMMIT
+    rollback, // ROLLBACK
+    savepoint, // SAVEPOINT name
+    release, // RELEASE SAVEPOINT name
+    rollback_to, // ROLLBACK TO SAVEPOINT name
+
+    // Pub/Sub (LISTEN/NOTIFY)
+    listen, // LISTEN channel
+    notify, // NOTIFY channel, 'payload'
+    unlisten, // UNLISTEN channel
+
+    // Analysis
     explain, // EXPLAIN
+    explain_analyze, // EXPLAIN ANALYZE
+
+    // Bulk operations
     raw, // Raw SQL passthrough
+    copy_out, // COPY TO STDOUT (bulk export)
+
+    // Table operations
+    lock_table, // LOCK TABLE
+
+    // Materialized views
+    create_materialized_view, // CREATE MATERIALIZED VIEW
+    refresh_materialized_view, // REFRESH MATERIALIZED VIEW
+    drop_materialized_view, // DROP MATERIALIZED VIEW
 };
 
 /// Join type
@@ -73,6 +103,38 @@ pub const Assignment = struct {
     value: Value,
 };
 
+/// CTE (Common Table Expression) definition
+pub const CTEDef = struct {
+    name: []const u8,
+    recursive: bool = false,
+    columns: []const []const u8 = &.{},
+    // Note: For Zig, we use sql string instead of nested QailCmd pointer
+    base_sql: []const u8 = "",
+};
+
+/// ON CONFLICT action for upsert
+pub const ConflictAction = enum {
+    do_nothing,
+    do_update,
+};
+
+/// ON CONFLICT clause for upsert (INSERT ON CONFLICT)
+pub const OnConflict = struct {
+    columns: []const []const u8 = &.{},
+    action: ConflictAction = .do_nothing,
+    update_columns: []const Assignment = &.{},
+};
+
+/// Set operation for combining queries
+pub const SetOp = enum {
+    @"union",
+    union_all,
+    intersect,
+    intersect_all,
+    except,
+    except_all,
+};
+
 /// The primary QAIL command structure
 pub const QailCmd = struct {
     kind: CmdKind = .get,
@@ -90,6 +152,13 @@ pub const QailCmd = struct {
     returning: []const Expr = &.{},
     distinct: bool = false,
     for_update: bool = false,
+
+    // Transaction fields
+    savepoint_name: ?[]const u8 = null,
+
+    // Pub/Sub fields (LISTEN/NOTIFY)
+    channel: ?[]const u8 = null,
+    payload: ?[]const u8 = null,
 
     // ==================== Static Constructors ====================
 
@@ -121,6 +190,55 @@ pub const QailCmd = struct {
     /// Create a TRUNCATE command
     pub fn truncate(table: []const u8) QailCmd {
         return .{ .kind = .truncate, .table = table };
+    }
+
+    // ==================== Transaction Commands ====================
+
+    /// BEGIN TRANSACTION
+    pub fn beginTx() QailCmd {
+        return .{ .kind = .begin };
+    }
+
+    /// COMMIT
+    pub fn commitTx() QailCmd {
+        return .{ .kind = .commit };
+    }
+
+    /// ROLLBACK
+    pub fn rollbackTx() QailCmd {
+        return .{ .kind = .rollback };
+    }
+
+    /// SAVEPOINT name
+    pub fn savepoint(name: []const u8) QailCmd {
+        return .{ .kind = .savepoint, .savepoint_name = name };
+    }
+
+    /// RELEASE SAVEPOINT name
+    pub fn releaseSavepoint(name: []const u8) QailCmd {
+        return .{ .kind = .release, .savepoint_name = name };
+    }
+
+    /// ROLLBACK TO SAVEPOINT name
+    pub fn rollbackTo(name: []const u8) QailCmd {
+        return .{ .kind = .rollback_to, .savepoint_name = name };
+    }
+
+    // ==================== Pub/Sub Commands ====================
+
+    /// LISTEN channel
+    pub fn listen(ch: []const u8) QailCmd {
+        return .{ .kind = .listen, .channel = ch };
+    }
+
+    /// NOTIFY channel, 'payload'
+    pub fn notifyChannel(ch: []const u8, msg: ?[]const u8) QailCmd {
+        return .{ .kind = .notify, .channel = ch, .payload = msg };
+    }
+
+    /// UNLISTEN channel (or all if null)
+    pub fn unlisten(ch: ?[]const u8) QailCmd {
+        return .{ .kind = .unlisten, .channel = ch };
     }
 
     /// Create an EXPLAIN command
