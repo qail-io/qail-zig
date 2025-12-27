@@ -198,11 +198,11 @@ src/
 
 | Feature | QAIL Zig | QAIL Rust |
 |---------|----------|-----------|
-| Lines of Code | ~3,700 | ~8,000 |
+| Lines of Code | ~4,000 | ~8,000 |
 | Dependencies | 0 | 15+ crates |
 | Build Time | <2s | ~30s |
 | Binary Size | ~200KB | ~2MB |
-| Performance | 316K q/s | 355K q/s |
+| Performance | 323K q/s | 294K q/s |
 | Async | Sync | Tokio |
 | TLS | ❌ Planned | ✅ Yes |
 | Connection Pool | ❌ Planned | ✅ Yes |
@@ -217,19 +217,21 @@ src/
 - [x] Prepared statements
 - [x] Pipelining
 - [x] Basic driver
+- [x] LISTEN/NOTIFY pub/sub
+- [x] Transaction commands
 - [ ] TLS/SSL support
 - [ ] Connection pooling
 - [ ] Async I/O
-- [ ] Full QAIL syntax parser
 
 ## Related Projects
 
-- [qail.rs](https://github.com/meastblue/qail.rs) - Rust version with full features
-- [QAIL Website](https://qail.dev) - Documentation and playground
+- [qail.rs](https://github.com/qail-io/qail) - Rust version with full features
+- [QAIL Website](https://qail.rs) - Documentation and playground
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
 
 ---
 
