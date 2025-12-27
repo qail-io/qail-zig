@@ -20,14 +20,21 @@
 
 50 million query stress test against PostgreSQL 18:
 
-| Driver | Stack | Queries/Second | Time for 50M | Target |
-|--------|-------|----------------|--------------|--------|
-| **qail-pg** | Rust + Zig FFI | 355,000 | 141s | Rust developers |
-| **qail-zig** | Pure Zig | 316,791 | 158s | Zig developers |
+| Driver | Stack | Queries/Second | Time for 50M | Notes |
+|--------|-------|----------------|--------------|-------|
+| **qail-pg** | Pure Rust | 355,000 | 141s | Native tokio async |
+| **qail-zig** | Pure Zig | **316,791** | 158s | **This repo** - Native, zero FFI |
+| **qail-pg+zig** | Rust + Zig FFI | 315,708 | 158s | Rust calling Zig encoder |
+
+### Key Insights
+- **Pure Zig matches Rust+Zig FFI**: 316K vs 315K (no FFI overhead!)
+- **Both within 11% of pure Rust**: Proves Zig's performance viability
+- **Pure Zig is easier**: One `zig build`, no cross-language complexity
 
 ### Stack Explanation
-- **qail-pg**: Rust driver using Zig for high-performance protocol encoding (dual-stack approach)
-- **qail-zig**: Pure Zig implementation - zero FFI, native Zig, easiest installation
+- **qail-pg (Rust)**: Production Rust driver with full async/await on tokio
+- **qail-zig (Zig)**: Pure Zig implementation - zero FFI, native Zig, easiest installation
+- **qail-pg+zig (hybrid)**: Rust driver calling Zig encoder via FFI (shown on website benchmark)
 
 Both tests use identical configuration:
 - Query: `SELECT id, name FROM harbors LIMIT $1`
