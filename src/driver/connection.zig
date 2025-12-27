@@ -64,9 +64,8 @@ pub const Connection = struct {
                     return error.ConnectionTimeout;
                 }
 
-                // Check for socket error
-                const err_check = posix.getsockoptError(fd);
-                if (err_check) |e| return e;
+                // Check for socket error (will throw if there was a connect error)
+                try posix.getsockoptError(fd);
             } else {
                 return err;
             }
@@ -91,11 +90,13 @@ pub const Connection = struct {
             if (res != 0) return error.SocketError;
         } else {
             const posix = std.posix;
+            // O_NONBLOCK values: Linux=2048, macOS/BSD=4
+            const O_NONBLOCK: u32 = if (builtin.os.tag == .linux) 2048 else 4;
             const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
             const new_flags = if (blocking)
-                flags & ~@as(u32, posix.O.NONBLOCK)
+                flags & ~O_NONBLOCK
             else
-                flags | posix.O.NONBLOCK;
+                flags | O_NONBLOCK;
             _ = try posix.fcntl(fd, posix.F.SETFL, new_flags);
         }
     }
