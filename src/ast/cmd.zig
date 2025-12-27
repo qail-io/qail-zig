@@ -23,9 +23,27 @@ pub const CmdKind = enum {
     add, // INSERT
     put, // UPSERT (INSERT ON CONFLICT)
 
-    // Schema operations
+    // Schema operations (DDL)
     make, // CREATE TABLE
-    truncate, // TRUNCATE
+    drop, // DROP TABLE
+    mod, // ALTER TABLE (general modification)
+    alter, // ALTER TABLE ADD COLUMN
+    alter_drop, // ALTER TABLE DROP COLUMN
+    drop_col, // DROP COLUMN
+    rename_col, // RENAME COLUMN
+    truncate, // TRUNCATE TABLE
+
+    // Index operations
+    index, // CREATE INDEX
+    drop_index, // DROP INDEX
+
+    // Advanced query features
+    over, // Window functions
+    with, // CTE (Common Table Expression)
+    json_table, // JSON_TABLE
+
+    // Codegen
+    gen, // Generate Rust struct from table schema
 
     // Transaction control
     begin, // BEGIN TRANSACTION
@@ -45,7 +63,6 @@ pub const CmdKind = enum {
     explain_analyze, // EXPLAIN ANALYZE
 
     // Bulk operations
-    raw, // Raw SQL passthrough
     copy_out, // COPY TO STDOUT (bulk export)
 
     // Table operations
@@ -135,6 +152,47 @@ pub const SetOp = enum {
     except_all,
 };
 
+/// Set operation definition (operation + query)
+pub const SetOpDef = struct {
+    op: SetOp,
+    // Note: For Zig, we use sql string instead of nested QailCmd pointer
+    query_sql: []const u8 = "",
+};
+
+/// Index definition for CREATE INDEX
+pub const IndexDef = struct {
+    name: []const u8,
+    table: []const u8,
+    columns: []const []const u8 = &.{},
+    unique: bool = false,
+};
+
+/// Table-level constraint for CREATE TABLE
+pub const TableConstraint = union(enum) {
+    /// UNIQUE (col1, col2, ...)
+    unique: []const []const u8,
+    /// PRIMARY KEY (col1, col2, ...)
+    primary_key: []const []const u8,
+    /// FOREIGN KEY
+    foreign_key: struct {
+        columns: []const []const u8,
+        ref_table: []const u8,
+        ref_columns: []const []const u8,
+    },
+    /// CHECK constraint
+    check: []const u8,
+};
+
+/// GROUP BY mode for advanced aggregations
+pub const GroupByMode = enum {
+    /// Standard GROUP BY
+    simple,
+    /// ROLLUP - hierarchical subtotals
+    rollup,
+    /// CUBE - all combinations of subtotals
+    cube,
+};
+
 /// The primary QAIL command structure
 pub const QailCmd = struct {
     kind: CmdKind = .get,
@@ -152,6 +210,19 @@ pub const QailCmd = struct {
     returning: []const Expr = &.{},
     distinct: bool = false,
     for_update: bool = false,
+
+    // Advanced query features
+    distinct_on: []const Expr = &.{}, // DISTINCT ON (Postgres-specific)
+    group_by_mode: GroupByMode = .simple, // ROLLUP/CUBE support
+    on_conflict: ?OnConflict = null, // Upsert ON CONFLICT clause
+    ctes: []const CTEDef = &.{}, // CTE definitions
+
+    // DDL fields
+    index_def: ?IndexDef = null, // For CREATE INDEX
+    table_constraints: []const TableConstraint = &.{}, // For CREATE TABLE
+
+    // Set operations
+    set_ops: []const SetOpDef = &.{}, // UNION/INTERSECT/EXCEPT
 
     // Transaction fields
     savepoint_name: ?[]const u8 = null,
@@ -246,9 +317,36 @@ pub const QailCmd = struct {
         return .{ .kind = .explain, .table = table };
     }
 
-    /// Create a raw SQL passthrough command
-    pub fn raw(sql: []const u8) QailCmd {
-        return .{ .kind = .raw, .table = sql };
+    // ==================== DDL Commands ====================
+
+    /// DROP TABLE
+    pub fn drop(table: []const u8) QailCmd {
+        return .{ .kind = .drop, .table = table };
+    }
+
+    /// CREATE INDEX
+    pub fn createIndex(table: []const u8) QailCmd {
+        return .{ .kind = .index, .table = table };
+    }
+
+    /// DROP INDEX
+    pub fn dropIndex(index_name: []const u8) QailCmd {
+        return .{ .kind = .drop_index, .table = index_name };
+    }
+
+    /// ALTER TABLE ADD COLUMN
+    pub fn alter(table: []const u8) QailCmd {
+        return .{ .kind = .alter, .table = table };
+    }
+
+    /// ALTER TABLE DROP COLUMN
+    pub fn alterDrop(table: []const u8) QailCmd {
+        return .{ .kind = .alter_drop, .table = table };
+    }
+
+    /// General table modification
+    pub fn modify(table: []const u8) QailCmd {
+        return .{ .kind = .mod, .table = table };
     }
 
     // ==================== Builder Methods ====================
@@ -342,6 +440,92 @@ pub const QailCmd = struct {
         var cmd = self;
         cmd.for_update = true;
         return cmd;
+    }
+
+    // ==================== Advanced Query Builders ====================
+
+    /// Set DISTINCT ON columns (Postgres-specific)
+    pub fn distinctOn(self: QailCmd, exprs: []const Expr) QailCmd {
+        var cmd = self;
+        cmd.distinct_on = exprs;
+        return cmd;
+    }
+
+    /// Set GROUP BY mode (simple, rollup, cube)
+    pub fn groupByWithMode(self: QailCmd, columns: []const []const u8, mode: GroupByMode) QailCmd {
+        var cmd = self;
+        cmd.group_by = columns;
+        cmd.group_by_mode = mode;
+        return cmd;
+    }
+
+    /// Set ON CONFLICT clause for upsert
+    pub fn onConflictDo(self: QailCmd, conflict: OnConflict) QailCmd {
+        var cmd = self;
+        cmd.on_conflict = conflict;
+        return cmd;
+    }
+
+    /// Set CTE definitions
+    pub fn withCtes(self: QailCmd, cte_defs: []const CTEDef) QailCmd {
+        var cmd = self;
+        cmd.ctes = cte_defs;
+        return cmd;
+    }
+
+    // ==================== DDL Builders ====================
+
+    /// Set index definition
+    pub fn withIndex(self: QailCmd, idx: IndexDef) QailCmd {
+        var cmd = self;
+        cmd.index_def = idx;
+        return cmd;
+    }
+
+    /// Set table constraints
+    pub fn withConstraints(self: QailCmd, constraints: []const TableConstraint) QailCmd {
+        var cmd = self;
+        cmd.table_constraints = constraints;
+        return cmd;
+    }
+
+    /// Set set operations (UNION, INTERSECT, EXCEPT)
+    pub fn withSetOps(self: QailCmd, ops: []const SetOpDef) QailCmd {
+        var cmd = self;
+        cmd.set_ops = ops;
+        return cmd;
+    }
+
+    // ==================== Make (CREATE TABLE) Builders ====================
+
+    /// Create a CREATE TABLE command
+    pub fn make(table: []const u8) QailCmd {
+        return .{ .kind = .make, .table = table };
+    }
+
+    /// Create a CREATE MATERIALIZED VIEW command
+    pub fn createMaterializedView(name: []const u8) QailCmd {
+        return .{ .kind = .create_materialized_view, .table = name };
+    }
+
+    /// REFRESH MATERIALIZED VIEW
+    pub fn refreshMaterializedView(name: []const u8) QailCmd {
+        return .{ .kind = .refresh_materialized_view, .table = name };
+    }
+
+    /// DROP MATERIALIZED VIEW
+    pub fn dropMaterializedView(name: []const u8) QailCmd {
+        return .{ .kind = .drop_materialized_view, .table = name };
+    }
+
+    /// LOCK TABLE
+    pub fn lockTable(table: []const u8) QailCmd {
+        return .{ .kind = .lock_table, .table = table };
+    }
+
+    /// COPY TO STDOUT (bulk export)
+    pub fn copyOut(table: []const u8) QailCmd {
+        return .{ .kind = .copy_out, .table = table };
     }
 };
 

@@ -24,6 +24,10 @@ pub const Operator = enum {
     not_like,
     /// ILIKE (case-insensitive LIKE)
     ilike,
+    /// NOT ILIKE (case-insensitive NOT LIKE)
+    not_ilike,
+    /// Fuzzy match (-> ILIKE shorthand)
+    fuzzy,
     /// IS NULL
     is_null,
     /// IS NOT NULL
@@ -34,12 +38,20 @@ pub const Operator = enum {
     not_in,
     /// BETWEEN min AND max
     between,
+    /// NOT BETWEEN min AND max
+    not_between,
+    /// EXISTS (subquery)
+    exists,
+    /// NOT EXISTS (subquery)
+    not_exists,
     /// Array contains (@>)
     contains,
     /// Array is contained by (<@)
     contained_by,
     /// Array overlap (&&)
     overlaps,
+    /// JSON key exists (?)
+    key_exists,
     /// JSON path exists (@?)
     json_exists,
     /// SIMILAR TO
@@ -60,14 +72,20 @@ pub const Operator = enum {
             .like => "LIKE",
             .not_like => "NOT LIKE",
             .ilike => "ILIKE",
+            .not_ilike => "NOT ILIKE",
+            .fuzzy => "ILIKE",
             .is_null => "IS NULL",
             .is_not_null => "IS NOT NULL",
             .in => "IN",
             .not_in => "NOT IN",
             .between => "BETWEEN",
+            .not_between => "NOT BETWEEN",
+            .exists => "EXISTS",
+            .not_exists => "NOT EXISTS",
             .contains => "@>",
             .contained_by => "<@",
             .overlaps => "&&",
+            .key_exists => "?",
             .json_exists => "@?",
             .similar_to => "SIMILAR TO",
             .regex => "~",

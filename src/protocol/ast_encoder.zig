@@ -364,8 +364,41 @@ pub const AstEncoder = struct {
                 try writer.writeAll("TRUNCATE ");
                 try writer.writeAll(cmd.table);
             },
-            .raw => {
-                try writer.writeAll(cmd.table); // table field holds raw SQL for raw commands
+            .listen => {
+                try writer.writeAll("LISTEN ");
+                if (cmd.channel) |ch| try writer.writeAll(ch);
+            },
+            .notify => {
+                try writer.writeAll("NOTIFY ");
+                if (cmd.channel) |ch| try writer.writeAll(ch);
+                if (cmd.payload) |p| {
+                    try writer.writeAll(", '");
+                    try writer.writeAll(p);
+                    try writer.writeByte('\'');
+                }
+            },
+            .unlisten => {
+                try writer.writeAll("UNLISTEN ");
+                if (cmd.channel) |ch| {
+                    try writer.writeAll(ch);
+                } else {
+                    try writer.writeByte('*');
+                }
+            },
+            .begin => try writer.writeAll("BEGIN"),
+            .commit => try writer.writeAll("COMMIT"),
+            .rollback => try writer.writeAll("ROLLBACK"),
+            .savepoint => {
+                try writer.writeAll("SAVEPOINT ");
+                if (cmd.savepoint_name) |name| try writer.writeAll(name);
+            },
+            .release => {
+                try writer.writeAll("RELEASE SAVEPOINT ");
+                if (cmd.savepoint_name) |name| try writer.writeAll(name);
+            },
+            .rollback_to => {
+                try writer.writeAll("ROLLBACK TO SAVEPOINT ");
+                if (cmd.savepoint_name) |name| try writer.writeAll(name);
             },
             else => {},
         }
