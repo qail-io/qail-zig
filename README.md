@@ -26,7 +26,17 @@
 
 ## Benchmarks
 
-50 million query stress test (single connection + pipeline):
+### Pool Benchmark (150M queries, 10 workers)
+Query: `SELECT id, name FROM harbors LIMIT $1`
+
+| Driver | Queries/Second | Time |
+|--------|----------------|------|
+| **qail-zig** | **9,270,000** | 16.2s |
+| qail-pg (Rust) | 921,000 | 162.9s |
+
+**⚡ Zig is 10x faster with pipelined batching!**
+
+### Single Connection (50M queries, pipeline)
 
 | Platform | Driver | Queries/Second | Winner |
 |----------|--------|----------------|--------|
@@ -36,11 +46,9 @@
 | **Linux EPYC** | qail-zig | 175,000 | |
 
 ### Key Insights
-- **M3 MacBook**: Zig's sync I/O beats Rust's async (faster single-core)
-- **Linux servers**: Rust's async batching wins on throughput-optimized CPUs
-- Both achieve **300K+ q/s** on fast hardware
-
-> 📌 See [qail.rs](https://github.com/qail-io/qail) for the Rust version
+- **Pool benchmark**: Zig's sync batching massively outperforms Rust's async
+- **M3 MacBook**: Zig's sync I/O beats Rust (faster single-core)
+- **Linux servers**: Rust's async wins on throughput-optimized CPUs
 
 ## Installation
 
