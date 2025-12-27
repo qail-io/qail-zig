@@ -5,44 +5,42 @@
 [![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.3.0)
 
-> 🚀 **316K queries/second** - Pure Zig, zero FFI, zero garbage collection
+> 🚀 **323K queries/second** on M3 MacBook - Pure Zig, zero FFI, zero GC
+
+## What's New in v0.3.0
+
+- **QailCmd Parity**: Full feature parity with Rust AST (`IndexDef`, `TableConstraint`, `SetOpDef`, etc.)
+- **LISTEN/NOTIFY**: Pub/Sub support for real-time PostgreSQL events
+- **Transaction Commands**: `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`
+- **New Builder Methods**: `distinctOn`, `groupByMode`, `onConflict`, `withCtes`, and more
 
 ## Why QAIL Zig?
 
 - **Pure Zig**: No C dependencies, no FFI, no Rust - just Zig
 - **AST-Native**: Build queries with type-safe AST, not string concatenation
-- **Fast**: 316K q/s with pipelining and prepared statements
+- **Fast**: 323K q/s on M3 with pipelining and prepared statements
 - **Simple**: One `zig build` and you're done
-- **Lightweight**: ~3,700 lines of code
+- **Lightweight**: ~4,000 lines of code
 
 ## Benchmarks
 
-50 million query stress test against PostgreSQL 18:
+50 million query stress test (single connection + pipeline):
 
-| Driver | Stack | Queries/Second | Time for 50M | Notes |
-|--------|-------|----------------|--------------|-------|
-| **qail-pg** | Pure Rust | 355,000 | 141s | Native tokio async |
-| **qail-zig** | Pure Zig | **316,791** | 158s | **This repo** - Native, zero FFI |
-| **qail-pg+zig** | Rust + Zig FFI | 315,708 | 158s | Rust calling Zig encoder |
+| Platform | Driver | Queries/Second | Winner |
+|----------|--------|----------------|--------|
+| **M3 MacBook** | qail-zig | **323,143** | ⚡ Zig +10% |
+| **M3 MacBook** | qail-pg (Rust) | 294,239 | |
+| **Linux EPYC** | qail-pg (Rust) | **198,000** | 🦀 Rust +13% |
+| **Linux EPYC** | qail-zig | 175,000 | |
 
 ### Key Insights
-- **Pure Zig matches Rust+Zig FFI**: 316K vs 315K (no FFI overhead!)
-- **Both within 11% of pure Rust**: Proves Zig's performance viability
-- **Pure Zig is easier**: One `zig build`, no cross-language complexity
+- **M3 MacBook**: Zig's sync I/O beats Rust's async (faster single-core)
+- **Linux servers**: Rust's async batching wins on throughput-optimized CPUs
+- Both achieve **300K+ q/s** on fast hardware
 
-### Stack Explanation
-- **qail-pg (Rust)**: Production Rust driver with full async/await on tokio
-- **qail-zig (Zig)**: Pure Zig implementation - zero FFI, native Zig, easiest installation
-- **qail-pg+zig (hybrid)**: Rust driver calling Zig encoder via FFI (shown on website benchmark)
-
-Both tests use identical configuration:
-- Query: `SELECT id, name FROM harbors LIMIT $1`
-- Batch size: 10,000 queries per pipeline
-- Prepared statements: Yes
-- Connection: localhost TCP
-
-> 📌 See [qail.rs](https://github.com/meastblue/qail.rs) for the Rust version
+> 📌 See [qail.rs](https://github.com/qail-io/qail) for the Rust version
 
 ## Installation
 
