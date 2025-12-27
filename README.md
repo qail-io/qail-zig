@@ -242,6 +242,12 @@ src/
 - [x] TLS/SSL support (pure Zig, std.crypto.tls)
 - [x] Connection pooling (PgPool with thread safety)
 - [x] Async I/O auto-detection (io_uring on Linux, sync fallback)
+- [ ] **io_uring optimizations** (to match tokio-uring performance):
+  - [ ] SQPOLL mode (kernel-side polling, zero syscalls)
+  - [ ] Registered buffers (zero-copy I/O)
+  - [ ] Buffer ring (automatic buffer selection)
+  - [ ] Fixed file descriptors (skip fd lookup)
+
 
 ## Related Projects
 
