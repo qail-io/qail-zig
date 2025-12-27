@@ -221,11 +221,11 @@ src/
 | Binary Size | ~200KB | ~2MB |
 | Performance | 323K q/s | 294K q/s |
 | Async | Sync | Tokio |
-| TLS | ❌ Planned | ✅ Yes |
+| TLS | ✅ Pure Zig (std.crypto.tls) | ✅ rustls |
 | Connection Pool | ❌ Planned | ✅ Yes |
 
-**Choose Zig for**: Simplicity, fast builds, minimal dependencies  
-**Choose Rust for**: Mature ecosystem, async, production features
+**Choose Zig for**: Simplicity, fast builds, zero dependencies  
+**Choose Rust for**: Mature ecosystem, async, connection pooling
 
 ## Roadmap
 
@@ -236,7 +236,7 @@ src/
 - [x] Basic driver
 - [x] LISTEN/NOTIFY pub/sub
 - [x] Transaction commands
-- [ ] TLS/SSL support
+- [x] TLS/SSL support (pure Zig, std.crypto.tls)
 - [ ] Connection pooling
 - [ ] Async I/O
 
