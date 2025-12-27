@@ -50,6 +50,22 @@ Query: `SELECT id, name FROM harbors LIMIT $1`
 - **M3 MacBook**: Zig's sync I/O beats Rust (faster single-core)
 - **Linux servers**: Rust's async wins on throughput-optimized CPUs
 
+### vs pg.zig (karlseguin)
+
+[pg.zig](https://github.com/karlseguin/pg.zig) is the popular Zig PostgreSQL library. Key differences:
+
+| Feature | qail-zig | pg.zig |
+|---------|----------|--------|
+| **Pipelining** | ✅ 100 queries/batch | ❌ 1 query/call |
+| Network Roundtrips | 1 per batch | 1 per query |
+| AST Builder | ✅ Type-safe | ❌ SQL strings |
+| Prepared Stmt Cache | ✅ Yes | ✅ Yes |
+| LISTEN/NOTIFY | ✅ Yes | ✅ Yes |
+
+**Why qail-zig is faster**: Pipelining sends 100 queries in a single TCP write, then reads all responses. pg.zig sends 1 query → waits for response → sends next query (100x network roundtrips).
+
+> 📌 See [qail.rs](https://github.com/qail-io/qail) for the Rust version
+
 ## Installation
 
 ### Requirements
