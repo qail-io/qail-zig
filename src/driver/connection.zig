@@ -37,13 +37,19 @@ pub const Connection = struct {
     /// Connect with timeout (milliseconds). Uses non-blocking socket + poll.
     pub fn connectWithTimeout(allocator: std.mem.Allocator, host: []const u8, port: u16, timeout_ms: i32) !Connection {
         const posix = std.posix;
+        const builtin = @import("builtin");
+
         const address = try std.net.Address.parseIp4(host, port);
 
-        // Create non-blocking socket
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
+        // Create socket (initially blocking)
+        // Note: posix.SOCK.NONBLOCK is not reliable across all platforms in socket() checks
+        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
         errdefer posix.close(fd);
 
-        // Attempt connect (will return EINPROGRESS for non-blocking)
+        // Set non-blocking
+        try setBlocking(fd, false);
+
+        // Attempt connect (will return EINPROGRESS/WSAEWOULDBLOCK for non-blocking)
         const result = posix.connect(fd, &address.any, address.getOsSockLen());
         if (result) |_| {
             // Connected immediately
@@ -51,29 +57,47 @@ pub const Connection = struct {
             if (err == error.WouldBlock) {
                 // Wait for connection with timeout using poll
                 var fds = [1]posix.pollfd{
-                    .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
+                    .{ .fd = if (builtin.os.tag == .windows) @ptrCast(fd) else fd, .events = posix.POLL.OUT, .revents = 0 },
                 };
                 const poll_result = try posix.poll(&fds, timeout_ms);
                 if (poll_result == 0) {
                     return error.ConnectionTimeout;
                 }
-                // If poll says writable, connection succeeded
+
+                // Check for socket error
+                const err_check = posix.getsockoptError(fd);
+                if (err_check) |e| return e;
             } else {
                 return err;
             }
         }
 
-        // Set socket back to blocking mode using raw fcntl
-        const F_GETFL = 3;
-        const F_SETFL = 4;
-        const O_NONBLOCK: usize = 0x0004; // macOS value
-        const flags = try posix.fcntl(fd, F_GETFL, 0);
-        _ = try posix.fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        // Set socket back to blocking mode
+        try setBlocking(fd, true);
 
         return .{
             .stream = .{ .handle = fd },
             .allocator = allocator,
         };
+    }
+
+    fn setBlocking(fd: std.posix.fd_t, blocking: bool) !void {
+        const builtin = @import("builtin");
+        if (builtin.os.tag == .windows) {
+            const windows = std.os.windows;
+            // 0 = blocking, 1 = non-blocking
+            var mode: c_ulong = if (blocking) 0 else 1;
+            const res = windows.ws2_32.ioctlsocket(fd, windows.ws2_32.FIONBIO, &mode);
+            if (res != 0) return error.SocketError;
+        } else {
+            const posix = std.posix;
+            const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+            const new_flags = if (blocking)
+                flags & ~@as(u32, posix.O.NONBLOCK)
+            else
+                flags | posix.O.NONBLOCK;
+            _ = try posix.fcntl(fd, posix.F.SETFL, new_flags);
+        }
     }
 
     pub fn close(self: *Connection) void {
