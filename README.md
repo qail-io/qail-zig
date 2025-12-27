@@ -222,7 +222,7 @@ src/
 | Performance | 323K q/s | 294K q/s |
 | Async | Sync | Tokio |
 | TLS | ✅ Pure Zig (std.crypto.tls) | ✅ rustls |
-| Connection Pool | ❌ Planned | ✅ Yes |
+| Connection Pool | ✅ PgPool | ✅ Yes |
 
 **Choose Zig for**: Simplicity, fast builds, zero dependencies  
 **Choose Rust for**: Mature ecosystem, async, connection pooling
@@ -237,7 +237,7 @@ src/
 - [x] LISTEN/NOTIFY pub/sub
 - [x] Transaction commands
 - [x] TLS/SSL support (pure Zig, std.crypto.tls)
-- [ ] Connection pooling
+- [x] Connection pooling (PgPool with thread safety)
 - [ ] Async I/O
 
 ## Related Projects
