@@ -86,7 +86,8 @@ pub const Connection = struct {
             const windows = std.os.windows;
             // 0 = blocking, 1 = non-blocking
             var mode: c_ulong = if (blocking) 0 else 1;
-            const res = windows.ws2_32.ioctlsocket(fd, windows.ws2_32.FIONBIO, &mode);
+            const socket: windows.ws2_32.SOCKET = @ptrCast(fd);
+            const res = windows.ws2_32.ioctlsocket(socket, windows.ws2_32.FIONBIO, &mode);
             if (res != 0) return error.SocketError;
         } else {
             const posix = std.posix;
