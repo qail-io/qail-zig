@@ -10,7 +10,7 @@ const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 
 /// Protocol encoder - writes PostgreSQL wire format messages
 pub const Encoder = struct {
-    buffer: std.ArrayList(u8),
+    buffer: std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Encoder {

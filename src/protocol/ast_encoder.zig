@@ -26,7 +26,7 @@ const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 /// AST-to-Wire encoder
 /// Directly encodes QailCmd AST to PostgreSQL Extended Query Protocol bytes
 pub const AstEncoder = struct {
-    buffer: std.ArrayList(u8),
+    buffer: std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
     param_count: u16 = 0,
 

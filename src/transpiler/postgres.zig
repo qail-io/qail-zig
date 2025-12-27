@@ -25,7 +25,7 @@ const Value = ast.Value;
 
 /// Convert a QAIL AST command to PostgreSQL SQL string
 pub fn toSql(allocator: std.mem.Allocator, cmd: *const QailCmd) ![]const u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayListUnmanaged(u8) = .{};
     errdefer buf.deinit(allocator);
 
     try writeCmd(buf.writer(allocator), cmd);
