@@ -12,7 +12,7 @@ const Condition = expr.Condition;
 const Operator = operators.Operator;
 const SortOrder = operators.SortOrder;
 const LogicalOp = operators.LogicalOp;
-const Value = values.Value;
+pub const Value = values.Value;
 
 /// Command type (GET, SET, DEL, ADD, etc.)
 pub const CmdKind = enum {
@@ -233,6 +233,9 @@ pub const QailCmd = struct {
     // Pub/Sub fields (LISTEN/NOTIFY)
     channel: ?[]const u8 = null,
     payload: ?[]const u8 = null,
+
+    // INSERT values (for add command)
+    insert_values: []const Value = &.{},
 
     // Raw SQL (for migrations, DDL)
     raw_sql: ?[]const u8 = null,

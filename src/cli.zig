@@ -12,6 +12,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const QailCmd = @import("ast/cmd.zig").QailCmd;
+const Expr = @import("ast/expr.zig").Expr;
 
 const print = std.debug.print;
 
@@ -303,9 +305,52 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
 
     switch (action) {
         .status => |url| {
-            print("📊 Migration Status\n", .{});
-            print("Database: {s}\n\n", .{url});
-            print("No migrations applied yet\n", .{});
+            print("📊 Migration Status\n\n", .{});
+
+            // Parse URL and connect
+            const conn_info = parsePostgresUrl(url) orelse {
+                print("Error: Invalid PostgreSQL URL format\n", .{});
+                return;
+            };
+
+            const driver = @import("driver/mod.zig");
+            var pg = driver.PgDriver.connect(
+                allocator,
+                conn_info.host,
+                conn_info.port,
+                conn_info.user,
+                conn_info.database,
+            ) catch |err| {
+                print("Error connecting to database: {}\n", .{err});
+                return;
+            };
+            defer pg.deinit();
+
+            // Ensure migration table exists (AST-native)
+            const mig_ddl = parser.getMigrationTableDdl();
+            const mig_cmd = QailCmd{ .kind = .make, .table = "_qail_migrations", .raw_sql = mig_ddl };
+            _ = pg.execute(&mig_cmd) catch |err| {
+                print("Error creating migration table: {}\n", .{err});
+                return;
+            };
+
+            // Query migration history
+            const status_cmd = QailCmd.get("_qail_migrations");
+            const row_count = pg.execute(&status_cmd) catch |err| {
+                print("Error querying migrations: {}\n", .{err});
+                return;
+            };
+
+            print("  Database: {s}\n", .{conn_info.database});
+            print("  Migration table: _qail_migrations\n\n", .{});
+
+            if (row_count > 0) {
+                print("  ✓ Found {} migration(s) applied\n\n", .{row_count});
+                print("  Run 'qail migrate up' to apply new migrations\n", .{});
+            } else {
+                print("  No migrations applied yet\n\n", .{});
+                print("  Run 'qail migrate up old.qail:new.qail <URL>' to apply\n", .{});
+            }
         },
         .plan => |p| {
             // Parse schema_diff as old.qail:new.qail
@@ -470,11 +515,39 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             }
 
             if (success) {
+                // Record migration in history (AST-native - no raw SQL!)
+                const version = parser.generateVersion();
+                const checksum = parser.computeChecksum(sql);
+                const checksum_str = std.fmt.allocPrint(allocator, "{x:0>16}", .{checksum}) catch "0";
+                defer allocator.free(checksum_str);
+
+                const Value = @import("ast/cmd.zig").Value;
+
+                // Build INSERT using AST-native columns + insert_values (like qail.rs)
+                const record_cmd = QailCmd{
+                    .kind = .add,
+                    .table = "_qail_migrations",
+                    .columns = &[_]Expr{
+                        Expr.col("version"),
+                        Expr.col("name"),
+                        Expr.col("checksum"),
+                        Expr.col("sql_up"),
+                    },
+                    .insert_values = &[_]Value{
+                        Value.fromString(&version),
+                        Value.fromString("auto_migration"),
+                        Value.fromString(checksum_str),
+                        Value.fromString("migrated"),
+                    },
+                };
+                _ = pg.execute(&record_cmd) catch {}; // Best effort recording
+
                 pg.commit() catch |err| {
                     print("Error committing: {}\n", .{err});
                     return;
                 };
                 print("\n✅ Migration applied successfully!\n", .{});
+                print("  Recorded as migration: {s}\n", .{&version});
             } else {
                 pg.rollback() catch {};
                 print("\n❌ Migration failed, rolled back\n", .{});

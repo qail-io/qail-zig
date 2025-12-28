@@ -344,7 +344,22 @@ pub const AstEncoder = struct {
                 try writer.writeAll("INSERT INTO ");
                 try writer.writeAll(cmd.table);
 
-                if (cmd.assignments.len > 0) {
+                // Option 1: columns + insert_values (AST-native like qail.rs)
+                if (cmd.columns.len > 0 and cmd.insert_values.len > 0) {
+                    try writer.writeAll(" (");
+                    for (cmd.columns, 0..) |col, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writeExpr(writer, &col);
+                    }
+                    try writer.writeAll(") VALUES (");
+                    for (cmd.insert_values, 0..) |val, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writeValue(writer, &val);
+                    }
+                    try writer.writeAll(")");
+                }
+                // Option 2: assignments (legacy pattern)
+                else if (cmd.assignments.len > 0) {
                     try writer.writeAll(" (");
                     for (cmd.assignments, 0..) |assign, i| {
                         if (i > 0) try writer.writeAll(", ");
