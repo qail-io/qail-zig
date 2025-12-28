@@ -378,7 +378,14 @@ test "diff new table" {
     defer new.deinit();
 
     var cmds = try diffSchemas(allocator, &old, &new);
-    defer cmds.deinit(allocator);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) {
+                allocator.free(cmd.table_columns);
+            }
+        }
+        cmds.deinit(allocator);
+    }
 
     // New design: 1 create_table with full DDL (no separate add_column)
     try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
@@ -401,7 +408,14 @@ test "diff dropped table" {
     defer new.deinit();
 
     var cmds = try diffSchemas(allocator, &old, &new);
-    defer cmds.deinit(allocator);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) {
+                allocator.free(cmd.table_columns);
+            }
+        }
+        cmds.deinit(allocator);
+    }
 
     try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
     try std.testing.expect(cmds.items[0].action == .drop_table);
@@ -507,11 +521,18 @@ test "generate sql" {
     defer new.deinit();
 
     var cmds = try diffSchemas(allocator, &old, &new);
-    defer cmds.deinit(allocator);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) {
+                allocator.free(cmd.table_columns);
+            }
+        }
+        cmds.deinit(allocator);
+    }
 
     const sql = try toSqlStatements(allocator, &cmds);
     defer allocator.free(sql);
 
-    try std.testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE users") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "ADD COLUMN id uuid") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "id uuid") != null);
 }

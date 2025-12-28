@@ -16,6 +16,7 @@ const QailCmd = @import("ast/cmd.zig").QailCmd;
 const Expr = @import("ast/expr.zig").Expr;
 
 const print = std.debug.print;
+const data_safety = @import("data_safety.zig");
 
 pub const Command = union(enum) {
     // Simple transpile
@@ -461,7 +462,15 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
                 print("Error computing diff: {}\n", .{err});
                 return;
             };
-            defer cmds.deinit(allocator);
+            defer {
+                // Free table_columns allocations first
+                for (cmds.items) |cmd| {
+                    if (cmd.table_columns.len > 0) {
+                        allocator.free(cmd.table_columns);
+                    }
+                }
+                cmds.deinit(allocator);
+            }
 
             if (cmds.items.len == 0) {
                 print("✅ No migrations needed\n", .{});
@@ -497,6 +506,43 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             };
             defer pg.deinit();
 
+            // === PHASE 1: Impact Analysis ===
+            var analysis = data_safety.ImpactAnalysis.init(allocator);
+            data_safety.analyzeImpact(allocator, cmds.items, &pg, &analysis) catch |err| {
+                print("Warning: Could not analyze impact: {}\n", .{err});
+                // Continue anyway - analysis is advisory
+            };
+            defer analysis.deinit();
+
+            var migration_version: []const u8 = "";
+
+            if (analysis.hasDestructive()) {
+                data_safety.displayImpact(&analysis);
+
+                const choice = data_safety.promptBackupOptions();
+                switch (choice) {
+                    .proceed => {
+                        print("Proceeding without backup...\n", .{});
+                    },
+                    .backup_to_file => {
+                        print("File backup not yet implemented. Proceeding...\n", .{});
+                    },
+                    .backup_to_db => {
+                        // Generate version for this migration
+                        const version_buf = parser.generateVersion();
+                        migration_version = &version_buf;
+                        _ = data_safety.createDbSnapshots(allocator, &pg, migration_version, &analysis) catch |err| {
+                            print("Warning: Backup failed: {}. Aborting.\n", .{err});
+                            return;
+                        };
+                    },
+                    .cancel => {
+                        print("Migration cancelled.\n", .{});
+                        return;
+                    },
+                }
+            }
+
             // Begin transaction
             pg.begin() catch |err| {
                 print("Error starting transaction: {}\n", .{err});
@@ -511,6 +557,13 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
                     print("Error converting migration: {}\n", .{err});
                     success = false;
                     break;
+                };
+                // Free heap-allocated columns after this iteration
+                defer if (qail_cmd.columns.len > 0) {
+                    // Cast away const for deallocation (columns were heap-allocated by toQailCmd)
+                    const cols_ptr: [*]const Expr = qail_cmd.columns.ptr;
+                    const cols_many: [*]Expr = @constCast(cols_ptr);
+                    allocator.free(cols_many[0..qail_cmd.columns.len]);
                 };
 
                 // Show what we're executing

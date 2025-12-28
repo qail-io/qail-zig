@@ -69,6 +69,25 @@ pub fn build(b: *std.Build) void {
     const cli_step = b.step("cli", "Run QAIL CLI");
     cli_step.dependOn(&run_cli.step);
 
+    // ==================== LSP Server Executable ====================
+    const qail_lsp = b.addExecutable(.{
+        .name = "qail-lsp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lsp/server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(qail_lsp);
+
+    const run_lsp = b.addRunArtifact(qail_lsp);
+    run_lsp.step.dependOn(b.getInstallStep());
+    const lsp_step = b.step("lsp", "Run QAIL LSP server");
+    lsp_step.dependOn(&run_lsp.step);
+
     // ==================== Benchmark Executable ====================
     const bench = b.addExecutable(.{
         .name = "qail-bench",

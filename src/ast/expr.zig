@@ -98,6 +98,34 @@ pub const Expr = union(enum) {
         references: ?[]const u8 = null,
     },
 
+    /// Window function (name OVER (PARTITION BY ... ORDER BY ...))
+    /// Matches qail.rs Expr::Window
+    window: struct {
+        name: []const u8,
+        func: []const u8,
+        partition: []const []const u8 = &.{},
+        order: []const OrderByExpr = &.{},
+        frame: ?WindowFrame = null,
+        alias: ?[]const u8 = null,
+    },
+
+    /// Column modification for ALTER (+col, -col)
+    /// Matches qail.rs Expr::Mod
+    col_mod: struct {
+        kind: ModKind,
+        col: *const Expr,
+    },
+
+    /// Special SQL function with keyword args (SUBSTRING, EXTRACT, TRIM)
+    /// e.g., SUBSTRING(expr FROM pos FOR len), EXTRACT(YEAR FROM date)
+    /// Matches qail.rs Expr::SpecialFunction
+    special_func: struct {
+        name: []const u8,
+        /// Arguments as (optional_keyword, expr) pairs
+        args: []const SpecialFuncArg,
+        alias: ?[]const u8 = null,
+    },
+
     // ==================== Builder Methods ====================
 
     /// Create a star expression (*)
@@ -239,6 +267,49 @@ pub const WhenClause = struct {
     condition: Condition,
     result: Expr,
 };
+
+/// Order by expression for window functions
+pub const OrderByExpr = struct {
+    column: []const u8,
+    direction: SortOrder = .asc,
+};
+
+/// Window frame definition (ROWS/RANGE BETWEEN...)
+pub const WindowFrame = struct {
+    kind: FrameKind = .rows,
+    start_bound: FrameBound = .{ .unbounded_preceding = {} },
+    end_bound: ?FrameBound = null,
+};
+
+/// Frame kind (ROWS or RANGE)
+pub const FrameKind = enum {
+    rows,
+    range,
+};
+
+/// Frame bound
+pub const FrameBound = union(enum) {
+    unbounded_preceding,
+    unbounded_following,
+    current_row,
+    preceding: i64,
+    following: i64,
+};
+
+/// Column modification kind for ALTER
+pub const ModKind = enum {
+    add,
+    drop,
+};
+
+/// Special function argument with optional keyword
+pub const SpecialFuncArg = struct {
+    keyword: ?[]const u8 = null, // e.g., "FROM", "FOR"
+    expr: *const Expr,
+};
+
+// Re-import SortOrder
+const SortOrder = @import("operators.zig").SortOrder;
 
 /// A filter condition (expr op value)
 pub const Condition = struct {

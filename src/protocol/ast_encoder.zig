@@ -185,6 +185,35 @@ pub const AstEncoder = struct {
         try self.writeU32(4);
     }
 
+    // ==================== Prepared Statement Protocol ====================
+
+    /// Encode only Parse message for preparing a statement
+    pub fn encodePrepare(self: *AstEncoder, stmt_name: []const u8, cmd: *const QailCmd) !void {
+        self.buffer.clearRetainingCapacity();
+        try self.encodeParse(stmt_name, cmd);
+        try self.encodeSync();
+    }
+
+    /// Execute a named prepared statement with parameters (Bind + Describe + Execute + Sync)
+    pub fn executeNamedStatement(self: *AstEncoder, stmt_name: []const u8, params: []const ?[]const u8) !void {
+        self.buffer.clearRetainingCapacity();
+
+        // Use empty portal name (default)
+        const portal = "";
+
+        // Bind
+        try self.encodeBind(portal, stmt_name, params);
+
+        // Describe portal (to get row description if SELECT)
+        try self.encodeDescribe(portal);
+
+        // Execute
+        try self.encodeExecute(portal, 0);
+
+        // Sync
+        try self.encodeSync();
+    }
+
     // ==================== AST to SQL (temporary - will be replaced with binary protocol) ====================
 
     /// Write AST as SQL to a writer
@@ -495,7 +524,16 @@ pub const AstEncoder = struct {
                 try writer.writeAll("DROP INDEX IF EXISTS ");
                 try writer.writeAll(cmd.table);
             },
-            else => {},
+            // Raw SQL (for backwards compat - should be avoided!)
+            .raw => {
+                if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                }
+            },
+            else => {
+                // Unhandled command type - log warning
+                std.debug.print("Warning: unhandled CmdKind in AST encoder\n", .{});
+            },
         }
     }
 };
@@ -564,6 +602,59 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
                         try writer.writeAll(c.references);
                     }
                 }
+            }
+        },
+        .window => |w| {
+            // name(args) OVER (PARTITION BY ... ORDER BY ...)
+            try writer.writeAll(w.func);
+            try writer.writeAll("() OVER (");
+            if (w.partition.len > 0) {
+                try writer.writeAll("PARTITION BY ");
+                for (w.partition, 0..) |col, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(col);
+                }
+            }
+            if (w.order.len > 0) {
+                if (w.partition.len > 0) try writer.writeAll(" ");
+                try writer.writeAll("ORDER BY ");
+                for (w.order, 0..) |o, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(o.column);
+                    try writer.writeAll(if (o.direction == .asc) " ASC" else " DESC");
+                }
+            }
+            try writer.writeByte(')');
+            if (w.alias) |a| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(a);
+            }
+        },
+        .col_mod => |m| {
+            // +col or -col for ALTER TABLE
+            if (m.kind == .add) {
+                try writer.writeByte('+');
+            } else {
+                try writer.writeByte('-');
+            }
+            try writeExpr(writer, m.col);
+        },
+        .special_func => |sf| {
+            // SUBSTRING(expr FROM pos FOR len), EXTRACT(YEAR FROM date), etc.
+            try writer.writeAll(sf.name);
+            try writer.writeByte('(');
+            for (sf.args, 0..) |arg, i| {
+                if (i > 0) try writer.writeAll(" ");
+                if (arg.keyword) |kw| {
+                    try writer.writeAll(kw);
+                    try writer.writeAll(" ");
+                }
+                try writeExpr(writer, arg.expr);
+            }
+            try writer.writeByte(')');
+            if (sf.alias) |a| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(a);
             }
         },
         else => {},

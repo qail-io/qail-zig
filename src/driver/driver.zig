@@ -84,8 +84,9 @@ pub const PgDriver = struct {
                 .row_description => {
                     var decoder = Decoder.init(msg.payload);
                     field_descriptions = try decoder.parseRowDescription(self.allocator);
+                    defer self.allocator.free(field_descriptions); // Free after extracting names
 
-                    // Extract field names
+                    // Extract field names (names are already allocated separately in FieldDescription)
                     field_names = try self.allocator.alloc([]const u8, field_descriptions.len);
                     for (field_descriptions, 0..) |fd, i| {
                         field_names[i] = fd.name;
@@ -191,6 +192,118 @@ pub const PgDriver = struct {
     pub fn executeRaw(self: *PgDriver, sql: []const u8) !u64 {
         const cmd = QailCmd.raw(sql);
         return try self.execute(&cmd);
+    }
+
+    // ==================== Prepared Statements ====================
+
+    /// Prepare a statement for later execution with parameters
+    /// Returns immediately after Parse completes
+    pub fn prepare(self: *PgDriver, stmt_name: []const u8, cmd: *const QailCmd) !void {
+        // Encode Parse message only (no Bind/Execute)
+        try self.encoder.encodePrepare(stmt_name, cmd);
+        try self.conn.send(self.encoder.getWritten());
+
+        // Wait for ParseComplete
+        while (true) {
+            const msg = try self.conn.readMessage();
+            switch (msg.msg_type) {
+                .parse_complete => {},
+                .ready_for_query => break,
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Prepare error: {s}\n", .{err.message orelse "unknown"});
+                    return error.PrepareError;
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Execute a prepared statement with text parameters
+    pub fn executePrepared(self: *PgDriver, stmt_name: []const u8, params: []const ?[]const u8) !u64 {
+        // Encode Bind + Execute + Sync
+        try self.encoder.executeNamedStatement(stmt_name, params);
+        try self.conn.send(self.encoder.getWritten());
+
+        var affected_rows: u64 = 0;
+
+        while (true) {
+            const msg = try self.conn.readMessage();
+            switch (msg.msg_type) {
+                .bind_complete => {},
+                .command_complete => {
+                    var decoder = Decoder.init(msg.payload);
+                    const tag = try decoder.parseCommandComplete();
+                    var parts = std.mem.splitBackwardsScalar(u8, tag, ' ');
+                    if (parts.next()) |last| {
+                        affected_rows = std.fmt.parseInt(u64, last, 10) catch 0;
+                    }
+                },
+                .ready_for_query => break,
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Execute error: {s}\n", .{err.message orelse "unknown"});
+                    return error.ExecuteError;
+                },
+                else => {},
+            }
+        }
+
+        return affected_rows;
+    }
+
+    /// Fetch all rows from a prepared statement with parameters
+    pub fn fetchPrepared(self: *PgDriver, stmt_name: []const u8, params: []const ?[]const u8) ![]PgRow {
+        try self.encoder.executeNamedStatement(stmt_name, params);
+        try self.conn.send(self.encoder.getWritten());
+
+        var rows: std.ArrayList(PgRow) = .{};
+        errdefer {
+            for (rows.items) |*row| row.deinit();
+            rows.deinit(self.allocator);
+        }
+
+        var field_descriptions: []FieldDescription = &.{};
+        var field_names: [][]const u8 = &.{};
+
+        while (true) {
+            const msg = try self.conn.readMessage();
+            switch (msg.msg_type) {
+                .bind_complete => {},
+                .row_description => {
+                    var decoder = Decoder.init(msg.payload);
+                    field_descriptions = try decoder.parseRowDescription(self.allocator);
+                    defer self.allocator.free(field_descriptions);
+
+                    field_names = try self.allocator.alloc([]const u8, field_descriptions.len);
+                    for (field_descriptions, 0..) |fd, i| {
+                        field_names[i] = fd.name;
+                    }
+                },
+                .data_row => {
+                    var decoder = Decoder.init(msg.payload);
+                    const columns = try decoder.parseDataRow(self.allocator);
+                    try rows.append(self.allocator, PgRow{
+                        .columns = columns,
+                        .field_names = field_names,
+                        .allocator = self.allocator,
+                    });
+                },
+                .command_complete => {},
+                .ready_for_query => break,
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    return error.QueryError;
+                },
+                else => {},
+            }
+        }
+
+        return try rows.toOwnedSlice(self.allocator);
     }
 };
 

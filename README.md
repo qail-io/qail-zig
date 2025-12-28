@@ -1,101 +1,38 @@
 # QAIL Zig
 
-**Pure Zig PostgreSQL driver with AST-native query building and CLI.**
+**Pure Zig PostgreSQL driver with AST-native query building, LSP, and CLI.**
 
 [![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.4.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.4.0)
 
-> 🚀 **1M+ queries/second** with pooling, **316K** single connection - Pure Zig, zero FFI, zero GC
+> 🚀 **1M+ queries/second** pooled, **316K** single connection - Pure Zig, zero FFI, zero GC
 
-## What's New in v0.4.0
+## Highlights
 
-- **CLI Parity**: Full 1:1 CLI command parity with qail.rs
-  - `qail repl` - Interactive REPL
-  - `qail migrate status/up/down/plan/create/shadow/promote/abort` 
-  - `qail explain/fmt/pull/check/diff/lint/watch`
-- **QailCmd Parity**: Full feature parity with Rust AST
-- **TLS/SSL**: Pure Zig TLS support via std.crypto.tls
-- **Connection Pool**: Thread-safe PgPool
-
-## CLI Usage
-
-```bash
-# Build the CLI
-zig build -Doptimize=ReleaseFast
-
-# Show help
-./zig-out/bin/qail --help
-
-# Show symbol reference
-./zig-out/bin/qail symbols
-
-# Check migration status
-./zig-out/bin/qail migrate status postgres://localhost/mydb
-
-# Apply migrations
-./zig-out/bin/qail migrate up old.qail:new.qail postgres://localhost/mydb
-```
-
-## Why QAIL Zig?
-
-- **Pure Zig**: No C dependencies, no FFI, no Rust - just Zig
-- **AST-Native**: Build queries with type-safe AST, not string concatenation
-- **Fast**: 1M+ q/s pooled, 316K single connection with pipelining
-- **Simple**: One `zig build` and you're done
-- **Lightweight**: ~4,500 lines of code
+- **~15,400 lines of pure Zig** - No C, no FFI, no dependencies
+- **AST-Native Queries** - Type-safe query building, not string concatenation
+- **Full PostgreSQL Driver** - Connection pooling, pipelining, TLS, COPY
+- **Language Server** - LSP with hover, completions, diagnostics
+- **CLI** - Migrations, REPL, formatting, schema diff
 
 ## Benchmarks
 
-### Pool Benchmark (150M queries, 10 workers)
-Query: `SELECT id, name FROM harbors LIMIT $1`
-
-| Driver | Queries/Second | Rows Parsed |
-|--------|----------------|-------------|
-| **qail-zig** | **1,016,729** | 825M |
-| qail-pg (Rust) | 1,200,000 | - |
-
-### Single Connection (50M queries, pipeline)
-
-| Driver | Queries/Second | Time |
-|--------|----------------|------|
-| **qail-zig** | **316,872** | 157.8s |
-| qail-pg (Rust) | ~300,000 | ~166s |
-
-> 📌 See [qail.rs](https://github.com/qail-io/qail) for the Rust version
+| Benchmark | qail-zig | qail.rs (Rust) |
+|-----------|----------|----------------|
+| **Pooled (10 workers)** | 1,016,729 q/s | 1,200,000 q/s |
+| **Pipeline (single)** | 316,872 q/s | ~300,000 q/s |
+| **Build time** | <2s | ~30s |
+| **Binary size** | ~200KB | ~2MB |
 
 ## Installation
 
-### Requirements
-- Zig 0.15.2 or later ([download](https://ziglang.org/download/))
-- PostgreSQL 14+ server
-
-### Build from Source
-
 ```bash
-# Clone the repository
+# Requires Zig 0.15+ and PostgreSQL 14+
 git clone https://github.com/qail-io/qail-zig.git
 cd qail-zig
-
-# Build in release mode
 zig build -Doptimize=ReleaseFast
-
-# Build and run the CLI
-./zig-out/bin/qail --help
-```
-
-### Run Benchmarks
-
-```bash
-# Encoding benchmark (no database required)
-zig build bench -Doptimize=ReleaseFast
-
-# Pipeline stress test (requires PostgreSQL)
-zig build stress -Doptimize=ReleaseFast
-
-# Pool benchmark (matches Rust config)
-zig build pool -Doptimize=ReleaseFast
 ```
 
 ## Quick Start
@@ -105,84 +42,124 @@ const std = @import("std");
 const qail = @import("qail");
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
     
-    // Connect to PostgreSQL
-    var driver = try qail.PgDriver.connect(
-        allocator,
-        "127.0.0.1",
-        5432,
-        "postgres",
-        "mydb",
-    );
+    // Connect
+    var driver = try qail.PgDriver.connect(allocator, "127.0.0.1", 5432, "postgres", "mydb");
     defer driver.deinit();
     
-    // Build query with AST
-    const cols = [_]qail.Expr{ 
-        qail.Expr.col("id"), 
-        qail.Expr.col("name") 
-    };
-    const cmd = qail.QailCmd.get("users")
-        .select(&cols)
-        .limit(10);
-    
-    // Execute and fetch rows
+    // AST-native query
+    const cmd = qail.QailCmd.get("users").limit(10);
     const rows = try driver.fetchAll(&cmd);
     defer allocator.free(rows);
     
     for (rows) |row| {
-        std.debug.print("id={s}, name={s}\n", .{
-            row.getString(0) orelse "null",
+        std.debug.print("id={}, name={s}\n", .{
+            row.get(i32, 0),
             row.getString(1) orelse "null",
         });
     }
 }
 ```
 
-## AST Builder API
+## CLI
 
-### SELECT Queries
+```bash
+# Build CLI
+zig build cli
+
+# Commands
+qail --help              # Show all commands
+qail symbols             # Symbol reference
+qail repl                # Interactive REPL
+qail migrate status      # Migration status
+qail migrate up          # Apply migrations
+qail diff old.qail new.qail  # Schema diff
+qail fmt file.qail       # Format QAIL
+qail lint file.qail      # Lint checks
+```
+
+## LSP (Language Server)
+
+```bash
+# Build LSP
+zig build
+
+# Run LSP server (stdio)
+./zig-out/bin/qail-lsp
+```
+
+Features:
+- **textDocument/completion** - QAIL keywords, snippets
+- **textDocument/hover** - Query info, SQL preview
+- **textDocument/publishDiagnostics** - Parse errors
+
+## API
+
+### Queries
+
 ```zig
-// Simple select
-const cmd = QailCmd.get("users");
+// SELECT
+const cmd = QailCmd.get("users").limit(10).offset(20);
 
-// With columns
+// SELECT with columns
 const cols = [_]Expr{ Expr.col("id"), Expr.col("name") };
-const cmd = QailCmd.get("users").select(&cols).limit(10);
+const cmd = QailCmd.get("users").select(&cols);
 
-// With aggregates
-const cols = [_]Expr{ Expr.count(), Expr.sum("amount") };
-const cmd = QailCmd.get("orders").select(&cols).distinct_();
+// SELECT DISTINCT
+const cmd = QailCmd.get("users").distinct_();
+
+// INSERT
+const cmd = QailCmd.add("users");
+
+// UPDATE
+const cmd = QailCmd.set("users");
+
+// DELETE
+const cmd = QailCmd.del("users");
 ```
 
 ### Joins
+
 ```zig
-const joins = [_]qail.ast.Join{.{
+const joins = [_]Join{.{
     .kind = .inner,
     .table = "orders",
     .alias = "o",
     .on_left = "u.id",
     .on_right = "o.user_id",
 }};
-const cmd = QailCmd.get("users")
-    .alias("u")
-    .select(&cols)
-    .join(&joins);
+const cmd = QailCmd.get("users").alias("u").join(&joins);
 ```
 
-### Mutations
+### Connection Pool
+
 ```zig
-// INSERT
-const cmd = QailCmd.add("users");
+const config = qail.driver.PoolConfig.new("localhost", 5432, "postgres", "mydb")
+    .password("secret")
+    .max_connections(20);
 
-// UPDATE  
-const cmd = QailCmd.set("users");
+var pool = try qail.driver.PgPool.connect(config);
+defer pool.deinit();
 
-// DELETE
-const cmd = QailCmd.del("users");
+var conn = try pool.acquire();
+defer conn.release();
 
-// TRUNCATE
-const cmd = QailCmd.truncate("temp");
+const rows = try conn.fetchAll(&cmd);
+```
+
+### Prepared Statements
+
+```zig
+const stmt = try driver.prepare("SELECT * FROM users WHERE id = $1");
+const rows = try driver.fetchPrepared(&stmt, &[_]?[]const u8{"42"});
+```
+
+### COPY Protocol
+
+```zig
+const rows_copied = try qail.driver.copyIn(&driver.connection, "users", &.{"id", "name"}, data);
 ```
 
 ## Project Structure
@@ -190,57 +167,62 @@ const cmd = QailCmd.truncate("temp");
 ```
 src/
 ├── lib.zig           # Root module
-├── cli.zig           # CLI implementation (NEW in v0.4.0)
-├── qail_main.zig     # CLI entry point (NEW in v0.4.0)
+├── cli.zig           # CLI implementation
+├── qail_main.zig     # CLI entry point
+├── data_safety.zig   # Migration safety checks
+├── validator.zig     # Schema validation
+├── fmt.zig           # QAIL formatter
 ├── ast/              # AST types (QailCmd, Expr, Value)
-│   ├── mod.zig
-│   ├── cmd.zig       # Query commands
-│   ├── expr.zig      # Expressions
-│   ├── values.zig    # Literal values
-│   └── operators.zig # Operators
+├── parser/           # QAIL text parser
 ├── protocol/         # PostgreSQL wire protocol
-│   ├── mod.zig
-│   ├── wire.zig      # Message types
-│   ├── encoder.zig   # Frontend messages
-│   ├── decoder.zig   # Backend parsing
-│   ├── auth.zig      # SCRAM-SHA-256
-│   ├── types.zig     # OID mappings
-│   └── ast_encoder.zig # AST → Wire
-├── driver/           # Database driver
-│   ├── mod.zig
-│   ├── connection.zig
-│   ├── driver.zig    # PgDriver
-│   └── row.zig       # PgRow
-└── transpiler/       # SQL output (debug only)
+├── driver/           # Database driver, pool, pipeline
+├── analyzer/         # Code scanner, impact analysis
+├── transpiler/       # SQL output
+└── lsp/              # Language Server Protocol
     ├── mod.zig
-    └── postgres.zig
+    ├── protocol.zig  # JSON-RPC types
+    └── server.zig    # LSP server
 ```
 
-## Comparison with Rust Version
+## Module Summary
 
-| Feature | QAIL Zig | QAIL Rust |
-|---------|----------|-----------|
-| Lines of Code | ~4,500 | ~10,000 |
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| **driver/** | 4,294 | PostgreSQL driver, pool, pipeline, COPY |
+| **parser/** | 2,284 | QAIL text syntax parser |
+| **protocol/** | 1,725 | Wire protocol, auth, encoding |
+| **ast/** | 1,773 | Query AST types |
+| **cli.zig** | ~900 | CLI commands |
+| **analyzer/** | 659 | Code scanner, migration impact |
+| **lsp/** | 535 | Language server |
+| **Total** | **~15,400** | |
+
+## Comparison with Rust
+
+| Feature | qail-zig | qail.rs |
+|---------|----------|---------|
+| Lines of Code | ~15,400 | ~30,000 |
 | Dependencies | 0 | 15+ crates |
 | Build Time | <2s | ~30s |
 | Binary Size | ~200KB | ~2MB |
-| CLI | ✅ Full parity | ✅ Full |
-| Performance | 1M q/s (pool) | 1.2M q/s (pool) |
-| TLS | ✅ Pure Zig | ✅ rustls |
-| Connection Pool | ✅ PgPool | ✅ Yes |
+| CLI | ✅ | ✅ |
+| LSP | ✅ | ✅ |
+| Connection Pool | ✅ | ✅ |
+| TLS | ✅ (std.crypto) | ✅ (rustls) |
+| COPY Protocol | ✅ | ✅ |
+| Python Bindings | ❌ | ✅ |
 
-**Choose Zig for**: Simplicity, fast builds, zero dependencies  
-**Choose Rust for**: Mature ecosystem, async, language bindings
+**Choose Zig**: Simplicity, fast builds, zero dependencies, small binary  
+**Choose Rust**: Mature ecosystem, async, multi-language bindings
 
 ## Related Projects
 
-- [qail.rs](https://github.com/qail-io/qail) - Rust version with full features
-- [QAIL Website](https://qail.rs) - Documentation and playground
+- [qail.rs](https://github.com/qail-io/qail) - Rust implementation
+- [qail.rs Website](https://qail.rs) - Docs & Playground
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
-
+MIT - see [LICENSE](LICENSE)
 
 ---
 
