@@ -333,19 +333,48 @@ const Parser = struct {
             } else if (self.matchKeyword("references")) {
                 self.skipWhitespace();
                 const ref_start = self.pos;
-                // Parse table(column)
+                // Parse table(column) - track parens depth
+                var paren_depth: usize = 0;
                 while (self.current()) |ch| {
-                    if (ch == ' ' or ch == '\t' or ch == ',' or ch == ')' or ch == '}' or ch == '\n') break;
-                    self.advance();
+                    if (ch == '(') {
+                        paren_depth += 1;
+                        self.advance();
+                    } else if (ch == ')') {
+                        if (paren_depth > 0) {
+                            paren_depth -= 1;
+                            self.advance();
+                            if (paren_depth == 0) break; // End of references(col)
+                        } else {
+                            break; // End of table definition
+                        }
+                    } else if ((ch == ' ' or ch == '\t' or ch == ',' or ch == '}' or ch == '\n') and paren_depth == 0) {
+                        break;
+                    } else {
+                        self.advance();
+                    }
                 }
                 result.references = try self.allocator.dupe(u8, self.input[ref_start..self.pos]);
             } else if (self.matchKeyword("default")) {
                 self.skipWhitespace();
                 const def_start = self.pos;
-                // Parse until space, comma, or paren
+                // Parse default value - track parens for function calls like NOW()
+                var paren_depth: usize = 0;
                 while (self.current()) |ch| {
-                    if (ch == ' ' or ch == '\t' or ch == ',' or ch == ')' or ch == '}' or ch == '\n') break;
-                    self.advance();
+                    if (ch == '(') {
+                        paren_depth += 1;
+                        self.advance();
+                    } else if (ch == ')') {
+                        if (paren_depth > 0) {
+                            paren_depth -= 1;
+                            self.advance();
+                        } else {
+                            break; // End of table definition
+                        }
+                    } else if ((ch == ' ' or ch == '\t' or ch == ',' or ch == '}' or ch == '\n') and paren_depth == 0) {
+                        break;
+                    } else {
+                        self.advance();
+                    }
                 }
                 result.default_value = try self.allocator.dupe(u8, self.input[def_start..self.pos]);
             } else if (self.matchKeyword("check")) {
