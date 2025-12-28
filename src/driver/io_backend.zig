@@ -35,7 +35,7 @@ pub fn isIoUringAvailable() bool {
 
     // Try to create a minimal io_uring instance
     const IoUring = std.os.linux.IoUring;
-    var ring = IoUring.init(1, .{}) catch return false;
+    var ring = IoUring.init(1, 0) catch return false;
     ring.deinit();
     return true;
 }
