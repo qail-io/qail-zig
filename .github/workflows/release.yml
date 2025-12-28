@@ -48,6 +48,13 @@ jobs:
             cp zig-out/lib/*.so dist/ 2>/dev/null || true
             cp zig-out/lib/*.dylib dist/ 2>/dev/null || true
           fi
+          # Include binaries (CLI, LSP)
+          mkdir -p dist/bin
+          cp zig-out/bin/qail* dist/bin/ 2>/dev/null || true
+          # On Windows, include .exe
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+             cp zig-out/bin/*.exe dist/bin/ 2>/dev/null || true
+          fi
           tar -czvf qail-zig-${{ matrix.target }}.tar.gz dist/
 
       - name: Upload Artifacts
