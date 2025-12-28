@@ -326,9 +326,8 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             };
             defer pg.deinit();
 
-            // Ensure migration table exists (AST-native)
-            const mig_ddl = parser.getMigrationTableDdl();
-            const mig_cmd = QailCmd{ .kind = .make, .table = "_qail_migrations", .raw_sql = mig_ddl };
+            // Ensure migration table exists (AST-native - no raw SQL!)
+            const mig_cmd = parser.getMigrationTableCmd();
             _ = pg.execute(&mig_cmd) catch |err| {
                 print("Error creating migration table: {}\n", .{err});
                 return;

@@ -15,6 +15,7 @@ pub const diffSchemas = differ.diffSchemas;
 pub const toSqlStatements = differ.toSqlStatements;
 
 pub const getMigrationTableDdl = migrations.getMigrationTableDdl;
+pub const getMigrationTableCmd = migrations.getMigrationTableCmd;
 pub const generateVersion = migrations.generateVersion;
 pub const computeChecksum = migrations.computeChecksum;
 

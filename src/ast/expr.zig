@@ -90,6 +90,12 @@ pub const Expr = union(enum) {
         name: []const u8,
         data_type: []const u8,
         constraints: []const Constraint = &.{},
+        // Individual constraint fields for AST-native DDL
+        is_primary_key: bool = false,
+        is_unique: bool = false,
+        is_not_null: bool = false,
+        default_value: ?[]const u8 = null,
+        references: ?[]const u8 = null,
     },
 
     // ==================== Builder Methods ====================

@@ -18,7 +18,8 @@ pub const MigrationCmd = struct {
     table: []const u8,
     column: ?ColumnDef = null,
     index: ?IndexInfo = null,
-    ddl_sql: ?[]const u8 = null, // Pre-generated DDL for create_table
+    table_columns: []const ColumnDef = &.{}, // For CREATE TABLE (AST-native, no raw SQL!)
+    ddl_sql: ?[]const u8 = null, // DEPRECATED: only for backwards compatibility
 
     pub const Action = enum {
         create_table,
@@ -38,10 +39,31 @@ pub const MigrationCmd = struct {
 
         return switch (self.action) {
             .create_table => blk: {
-                // Use pre-generated DDL via raw_sql for CREATE TABLE
+                // AST-native CREATE TABLE - convert ColumnDefs to Expr.column_def
                 var cmd = QailCmd.make(self.table);
-                if (self.ddl_sql) |ddl| {
-                    cmd.raw_sql = ddl;
+                if (self.table_columns.len > 0) {
+                    const cols = try allocator.alloc(Expr, self.table_columns.len);
+                    for (self.table_columns, 0..) |col_def, i| {
+                        // Build full data type (handle serial, array, type params)
+                        var type_buf: []const u8 = col_def.typ;
+                        if (col_def.is_serial) {
+                            type_buf = "serial";
+                        }
+
+                        // Build Expr.column_def with inline constraints
+                        cols[i] = .{
+                            .column_def = .{
+                                .name = col_def.name,
+                                .data_type = type_buf,
+                                .is_primary_key = col_def.primary_key,
+                                .is_unique = col_def.unique,
+                                .is_not_null = !col_def.nullable,
+                                .default_value = col_def.default_value,
+                                .references = col_def.references,
+                            },
+                        };
+                    }
+                    cmd.columns = cols;
                 }
                 break :blk cmd;
             },
@@ -107,11 +129,24 @@ pub const MigrationCmd = struct {
 
         switch (self.action) {
             .create_table => {
-                // Use pre-generated DDL if available
-                if (self.ddl_sql) |ddl| {
-                    try w.writeAll(ddl);
-                } else {
-                    try w.print("CREATE TABLE {s}", .{self.table});
+                // Render CREATE TABLE from AST columns
+                try w.print("CREATE TABLE IF NOT EXISTS {s}", .{self.table});
+                if (self.table_columns.len > 0) {
+                    try w.writeAll(" (\n");
+                    for (self.table_columns, 0..) |col, i| {
+                        if (i > 0) try w.writeAll(",\n");
+                        try w.print("    {s} {s}", .{ col.name, col.typ });
+                        if (col.primary_key) try w.writeAll(" PRIMARY KEY");
+                        if (!col.nullable and !col.primary_key) try w.writeAll(" NOT NULL");
+                        if (col.unique and !col.primary_key) try w.writeAll(" UNIQUE");
+                        if (col.default_value) |dv| {
+                            try w.print(" DEFAULT {s}", .{dv});
+                        }
+                        if (col.references) |ref| {
+                            try w.print(" REFERENCES {s}", .{ref});
+                        }
+                    }
+                    try w.writeAll("\n)");
                 }
             },
             .drop_table => {
@@ -196,17 +231,19 @@ pub const IndexInfo = struct {
 pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema) !std.ArrayList(MigrationCmd) {
     var cmds = std.ArrayList(MigrationCmd).initCapacity(allocator, 0) catch unreachable;
 
-    // 1. Detect new tables - CREATE TABLE with all columns (no separate ADD COLUMN)
+    // 1. Detect new tables - CREATE TABLE with all columns (AST-native)
     for (new.tables.items) |new_table| {
         if (old.findTable(new_table.name) == null) {
-            // Generate DDL at diff time to avoid dangling pointers
-            const ddl = try new_table.toDdl(allocator);
+            // Copy column slice for AST-native CREATE TABLE
+            const cols = try allocator.alloc(ColumnDef, new_table.columns.items.len);
+            for (new_table.columns.items, 0..) |col, i| {
+                cols[i] = col;
+            }
             try cmds.append(allocator, MigrationCmd{
                 .action = .create_table,
                 .table = new_table.name,
-                .ddl_sql = ddl,
+                .table_columns = cols,
             });
-            // Note: We don't generate ADD COLUMN for new tables - they're in CREATE TABLE
         }
     }
 

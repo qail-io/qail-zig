@@ -45,28 +45,21 @@ pub fn getMigrationTableDdl() []const u8 {
 
 /// Create a QailCmd to create the migration table (AST-native)
 pub fn getMigrationTableCmd() QailCmd {
-    const pk_constraint = [_]Constraint{.primary_key};
-    const not_null_unique = [_]Constraint{ .not_null, .unique };
-    const not_null = [_]Constraint{.not_null};
+    // Static column definitions for migration table
+    const columns = [_]Expr{
+        .{ .column_def = .{ .name = "id", .data_type = "serial", .is_primary_key = true } },
+        .{ .column_def = .{ .name = "version", .data_type = "varchar(255)", .is_not_null = true, .is_unique = true } },
+        .{ .column_def = .{ .name = "name", .data_type = "varchar(255)" } },
+        .{ .column_def = .{ .name = "applied_at", .data_type = "timestamptz", .default_value = "NOW()" } },
+        .{ .column_def = .{ .name = "checksum", .data_type = "varchar(64)", .is_not_null = true } },
+        .{ .column_def = .{ .name = "sql_up", .data_type = "text", .is_not_null = true } },
+        .{ .column_def = .{ .name = "sql_down", .data_type = "text" } },
+    };
 
     return QailCmd{
         .kind = .make,
         .table = "_qail_migrations",
-        .columns = &[_]Expr{
-            Expr.defWithConstraints("id", "serial", &pk_constraint),
-            Expr.defWithConstraints("version", "varchar(255)", &not_null_unique),
-            Expr.defWithConstraints("name", "varchar(255)", &.{}),
-            Expr{
-                .column_def = .{
-                    .name = "applied_at",
-                    .data_type = "timestamptz",
-                    .constraints = &.{}, // Has DEFAULT but we'll handle that separately
-                },
-            },
-            Expr.defWithConstraints("checksum", "varchar(64)", &not_null),
-            Expr.defWithConstraints("sql_up", "text", &not_null),
-            Expr.defWithConstraints("sql_down", "text", &.{}),
-        },
+        .columns = &columns,
     };
 }
 

@@ -528,30 +528,41 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             try writer.writeAll(" ");
             try writer.writeAll(def.data_type);
 
-            // Check constraints using helper methods
-            if (Constraint.hasPrimaryKey(def.constraints)) {
+            // Check constraints - prefer individual fields, fall back to array
+            const has_pk = def.is_primary_key or Constraint.hasPrimaryKey(def.constraints);
+            const has_unique = def.is_unique or Constraint.hasUnique(def.constraints);
+            const is_not_null = def.is_not_null or !Constraint.hasNullable(def.constraints);
+
+            if (has_pk) {
                 try writer.writeAll(" PRIMARY KEY");
             } else {
-                // Default to NOT NULL unless Nullable constraint is present
-                if (!Constraint.hasNullable(def.constraints)) {
+                if (is_not_null) {
                     try writer.writeAll(" NOT NULL");
                 }
-                if (Constraint.hasUnique(def.constraints)) {
+                if (has_unique) {
                     try writer.writeAll(" UNIQUE");
                 }
             }
 
-            // Handle DEFAULT value
-            if (Constraint.getDefault(def.constraints)) |dv| {
+            // Handle DEFAULT value - prefer individual field
+            if (def.default_value) |dv| {
+                try writer.writeAll(" DEFAULT ");
+                try writer.writeAll(dv);
+            } else if (Constraint.getDefault(def.constraints)) |dv| {
                 try writer.writeAll(" DEFAULT ");
                 try writer.writeAll(dv);
             }
 
-            // Handle REFERENCES
-            for (def.constraints) |c| {
-                if (c == .references) {
-                    try writer.writeAll(" REFERENCES ");
-                    try writer.writeAll(c.references);
+            // Handle REFERENCES - prefer individual field
+            if (def.references) |ref| {
+                try writer.writeAll(" REFERENCES ");
+                try writer.writeAll(ref);
+            } else {
+                for (def.constraints) |c| {
+                    if (c == .references) {
+                        try writer.writeAll(" REFERENCES ");
+                        try writer.writeAll(c.references);
+                    }
                 }
             }
         },
