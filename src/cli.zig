@@ -409,6 +409,15 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
 
             print("┌─ UP ({d} operations) ─────────────────────────────────┐\n", .{cmds.items.len});
             print("{s}", .{sql});
+            print("└──────────────────────────────────────────────────────────────┘\n\n", .{});
+
+            // Generate and show DOWN migrations
+            print("┌─ DOWN ({d} operations) ──────────────────────────────┐\n", .{cmds.items.len});
+            for (cmds.items) |*migration_cmd| {
+                const down_sql = migration_cmd.toDownSql(allocator) catch continue;
+                defer allocator.free(down_sql);
+                print("│ {s}\n", .{down_sql});
+            }
             print("└──────────────────────────────────────────────────────────────┘\n", .{});
         },
         .up => |u| {

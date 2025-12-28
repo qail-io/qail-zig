@@ -213,6 +213,49 @@ pub const MigrationCmd = struct {
 
         return buf.toOwnedSlice(allocator);
     }
+
+    /// Generate DOWN (rollback) SQL for this migration command
+    pub fn toDownSql(self: *const MigrationCmd, allocator: Allocator) ![]const u8 {
+        var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
+        const w = buf.writer(allocator);
+
+        switch (self.action) {
+            .create_table => {
+                // CREATE TABLE -> DROP TABLE
+                try w.print("DROP TABLE IF EXISTS {s}", .{self.table});
+            },
+            .drop_table => {
+                // DROP TABLE -> cannot auto-rollback (data lost)
+                try w.print("-- Cannot auto-rollback DROP TABLE {s} (data lost)", .{self.table});
+            },
+            .add_column => {
+                // ADD COLUMN -> DROP COLUMN
+                if (self.column) |col| {
+                    try w.print("ALTER TABLE {s} DROP COLUMN {s}", .{ self.table, col.name });
+                }
+            },
+            .drop_column => {
+                // DROP COLUMN -> cannot auto-rollback (data lost)
+                try w.print("-- Cannot auto-rollback DROP COLUMN on {s} (data lost)", .{self.table});
+            },
+            .alter_column => {
+                // ALTER COLUMN TYPE -> cannot easily reverse (may need USING clause)
+                try w.print("-- Cannot auto-rollback TYPE change on {s} (may need USING clause)", .{self.table});
+            },
+            .create_index => {
+                // CREATE INDEX -> DROP INDEX
+                if (self.index) |idx| {
+                    try w.print("DROP INDEX IF EXISTS {s}", .{idx.name});
+                }
+            },
+            .drop_index => {
+                // DROP INDEX -> cannot auto-rollback (need original definition)
+                try w.print("-- Cannot auto-rollback DROP INDEX (need original definition)", .{});
+            },
+        }
+
+        return buf.toOwnedSlice(allocator);
+    }
 };
 
 pub const IndexInfo = struct {
