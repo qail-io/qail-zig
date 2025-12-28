@@ -1,4 +1,4 @@
-// QAIL Zig Pool Benchmark - Fair Comparison with Rust
+// QAIL Zig Pool Benchmark - Fair Comparison with Rust (Zig 0.16 API)
 //
 // Uses PgPool with multiple threads for parallel query execution.
 // PARSES RESPONSES like Rust's pipeline_prepared_ultra for fair comparison.
@@ -11,6 +11,9 @@ const driver = @import("driver/mod.zig");
 const protocol = @import("protocol/mod.zig");
 const ast = @import("ast/mod.zig");
 
+const Io = std.Io;
+const Threaded = Io.Threaded;
+const posix = std.posix;
 const PgPool = driver.pool.PgPool;
 const PoolConfig = driver.pool.PoolConfig;
 const Pipeline = driver.Pipeline;
@@ -24,13 +27,20 @@ const QUERIES_PER_BATCH: usize = 100;
 // Query being benchmarked
 const QUERY = "SELECT id, name FROM harbors LIMIT $1";
 
+// Global Io instance for all workers
+var global_threaded: Threaded = undefined;
+
 pub fn main() !void {
-    // Use page_allocator - it's thread-safe
     const allocator = std.heap.page_allocator;
+
+    // Initialize Io (Zig 0.16 pattern)
+    global_threaded = Threaded.init(allocator);
+    defer global_threaded.deinit();
+    const io = global_threaded.io();
 
     std.debug.print(
         \\╔═══════════════════════════════════════════════════════════╗
-        \\║  QAIL Zig Pool Benchmark - Fair Comparison with Rust      ║
+        \\║  QAIL Zig Pool Benchmark - Fair Comparison (Zig 0.16)     ║
         \\╠═══════════════════════════════════════════════════════════╣
         \\║  Query:   SELECT id, name FROM harbors LIMIT $1           ║
         \\║  Total:    150,000,000 queries                            ║
@@ -45,8 +55,8 @@ pub fn main() !void {
 
     std.debug.print("🔌 Initializing connection pool...\n", .{});
 
-    // Create pool
-    var pool = try PgPool.init(allocator, .{
+    // Create pool with Io parameter (Zig 0.16 API)
+    var pool = try PgPool.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 5432,
         .user = "orion",
@@ -62,7 +72,8 @@ pub fn main() !void {
     var counter = std.atomic.Value(usize).init(0);
     var rows_counter = std.atomic.Value(usize).init(0);
 
-    const start = std.time.milliTimestamp();
+    // Use Timer (Zig 0.16)
+    var timer = try std.time.Timer.start();
 
     // Spawn worker threads
     var threads: [NUM_WORKERS]std.Thread = undefined;
@@ -71,16 +82,15 @@ pub fn main() !void {
     }
 
     // Progress reporter thread
-    const progress_thread = try std.Thread.spawn(.{}, progressFn, .{ &counter, start });
+    const progress_thread = try std.Thread.spawn(.{}, progressFn, .{ &counter, &timer });
 
     // Wait for all workers
     for (&threads) |*thread| {
         thread.join();
     }
 
-    const end = std.time.milliTimestamp();
-    const elapsed_ms = end - start;
-    const elapsed_s = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
+    const elapsed_ns = timer.read();
+    const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
     const total = counter.load(.acquire);
     const rows = rows_counter.load(.acquire);
     const qps = @as(f64, @floatFromInt(total)) / elapsed_s;
@@ -124,14 +134,14 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
     // Prepare statement - MUST send Sync after Parse
     const stmt_name = "s_pool_bench";
     encoder.encodeParse(stmt_name, QUERY, &[_]u32{23}) catch return;
-    conn.stream.writeAll(encoder.getWritten()) catch return;
+    conn.send(encoder.getWritten()) catch return;
 
     encoder.encodeSync() catch return;
-    conn.stream.writeAll(encoder.getWritten()) catch return;
+    conn.send(encoder.getWritten()) catch return;
 
-    // Read parse complete + ready
+    // Read parse complete + ready using posix
     var read_buf: [65536]u8 = undefined;
-    _ = conn.stream.read(&read_buf) catch return;
+    _ = posix.read(conn.socket.handle, &read_buf) catch return;
 
     // Run batches
     for (0..batches) |_| {
@@ -146,7 +156,7 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
         }
         encoder.appendSync() catch continue;
 
-        conn.stream.writeAll(encoder.getWritten()) catch continue;
+        conn.send(encoder.getWritten()) catch continue;
 
         // FAIR: Parse responses like Rust's pipeline_prepared_ultra
         var rows_in_batch: usize = 0;
@@ -155,7 +165,6 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
         var read_len: usize = 0;
 
         while (commands < QUERIES_PER_BATCH) {
-            // Ensure we have header (1 byte type + 4 byte length)
             while (read_len - read_pos < 5) {
                 if (read_pos > 0) {
                     const remaining = read_len - read_pos;
@@ -163,7 +172,7 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
                     read_len = remaining;
                     read_pos = 0;
                 }
-                const n = conn.stream.read(read_buf[read_len..]) catch break;
+                const n = posix.read(conn.socket.handle, read_buf[read_len..]) catch break;
                 if (n == 0) break;
                 read_len += n;
             }
@@ -174,7 +183,6 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
             const length = std.mem.readInt(u32, read_buf[read_pos + 1 ..][0..4], .big);
             const msg_len = 1 + length;
 
-            // Ensure full message
             while (read_len - read_pos < msg_len) {
                 if (read_pos > 0) {
                     const remaining = read_len - read_pos;
@@ -182,15 +190,13 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
                     read_len = remaining;
                     read_pos = 0;
                 }
-                const n = conn.stream.read(read_buf[read_len..]) catch break;
+                const n = posix.read(conn.socket.handle, read_buf[read_len..]) catch break;
                 if (n == 0) break;
                 read_len += n;
             }
 
-            // Process message
             switch (msg_type) {
                 'D' => {
-                    // DataRow - parse column count and values (like Rust)
                     const data_start = read_pos + 5;
                     if (data_start + 2 <= read_len) {
                         const col_count = std.mem.readInt(u16, read_buf[data_start..][0..2], .big);
@@ -198,9 +204,9 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
                         rows_in_batch += 1;
                     }
                 },
-                'C' => commands += 1, // CommandComplete
-                'n' => commands += 1, // NoData
-                'Z' => break, // ReadyForQuery
+                'C' => commands += 1,
+                'n' => commands += 1,
+                'Z' => break,
                 else => {},
             }
 
@@ -212,16 +218,15 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
     }
 }
 
-fn progressFn(counter: *std.atomic.Value(usize), start: i64) void {
+fn progressFn(counter: *std.atomic.Value(usize), timer: *std.time.Timer) void {
     while (true) {
-        std.Thread.sleep(2 * std.time.ns_per_s);
+        std.posix.nanosleep(2, 0);
 
         const count = counter.load(.acquire);
         if (count >= TOTAL_QUERIES) break;
 
-        const now = std.time.milliTimestamp();
-        const elapsed_ms = now - start;
-        const elapsed_s = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
+        const elapsed_ns = timer.read();
+        const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
         const qps = @as(f64, @floatFromInt(count)) / elapsed_s;
         const remaining = TOTAL_QUERIES - count;
         const eta = if (qps > 0) @as(u64, @intFromFloat(@as(f64, @floatFromInt(remaining)) / qps)) else 0;

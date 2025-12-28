@@ -1,4 +1,4 @@
-// AST-Native Wire Encoder
+// AST-Native Wire Encoder (Zig 0.16 API)
 //
 // Encodes QAIL AST (QailCmd) directly to PostgreSQL wire protocol bytes.
 // NO SQL STRING GENERATION - this is the core of QAIL's philosophy.
@@ -22,6 +22,43 @@ const Value = ast.Value;
 const Operator = ast.Operator;
 const FrontendMessage = wire.FrontendMessage;
 const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
+
+/// Simple fixed buffer writer for Zig 0.16 (replaces std.io.fixedBufferStream)
+pub const FixedBufferWriter = struct {
+    buffer: []u8,
+    pos: usize = 0,
+
+    pub fn init(buffer: []u8) FixedBufferWriter {
+        return .{ .buffer = buffer };
+    }
+
+    pub fn getWritten(self: *const FixedBufferWriter) []const u8 {
+        return self.buffer[0..self.pos];
+    }
+
+    pub fn writeAll(self: *FixedBufferWriter, bytes: []const u8) !void {
+        if (self.pos + bytes.len > self.buffer.len) return error.NoSpaceLeft;
+        @memcpy(self.buffer[self.pos..][0..bytes.len], bytes);
+        self.pos += bytes.len;
+    }
+
+    pub fn print(self: *FixedBufferWriter, comptime fmt: []const u8, args: anytype) !void {
+        const result = std.fmt.bufPrint(self.buffer[self.pos..], fmt, args) catch return error.NoSpaceLeft;
+        self.pos += result.len;
+    }
+
+    pub fn writeByte(self: *FixedBufferWriter, byte: u8) !void {
+        if (self.pos >= self.buffer.len) return error.NoSpaceLeft;
+        self.buffer[self.pos] = byte;
+        self.pos += 1;
+    }
+
+    pub fn writeByteNTimes(self: *FixedBufferWriter, byte: u8, count: usize) !void {
+        if (self.pos + count > self.buffer.len) return error.NoSpaceLeft;
+        @memset(self.buffer[self.pos..][0..count], byte);
+        self.pos += count;
+    }
+};
 
 /// AST-to-Wire encoder
 /// Directly encodes QailCmd AST to PostgreSQL Extended Query Protocol bytes
@@ -117,9 +154,9 @@ pub const AstEncoder = struct {
 
         // Calculate SQL from AST
         var sql_buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&sql_buf);
-        try self.writeAstToSql(fbs.writer(), cmd);
-        const sql = fbs.getWritten();
+        var writer = FixedBufferWriter.init(&sql_buf);
+        try self.writeAstToSql(&writer, cmd);
+        const sql = writer.getWritten();
 
         const msg_len: u32 = 4 + @as(u32, @intCast(stmt_name.len)) + 1 + @as(u32, @intCast(sql.len)) + 1 + 2;
 
@@ -212,6 +249,24 @@ pub const AstEncoder = struct {
 
         // Sync
         try self.encodeSync();
+    }
+
+    /// Encode a Simple Query from AST (faster for non-parameterized queries)
+    /// Uses 'Q' message instead of Parse+Bind+Describe+Execute+Sync
+    pub fn encodeSimpleQuery(self: *AstEncoder, cmd: *const QailCmd) !void {
+        self.reset();
+
+        // Generate SQL from AST
+        var sql_buf: [4096]u8 = undefined;
+        var writer = FixedBufferWriter.init(&sql_buf);
+        try self.writeAstToSql(&writer, cmd);
+        const sql = writer.getWritten();
+
+        // Simple Query message: 'Q' + len(4) + sql + '\0'
+        const msg_len: u32 = 4 + @as(u32, @intCast(sql.len)) + 1;
+        try self.writeByte(@intFromEnum(FrontendMessage.query));
+        try self.writeU32(msg_len);
+        try self.writeCString(sql);
     }
 
     // ==================== AST to SQL (temporary - will be replaced with binary protocol) ====================

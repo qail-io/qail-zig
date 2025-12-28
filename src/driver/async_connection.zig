@@ -29,14 +29,23 @@ pub const AsyncConnection = struct {
 
     /// Connect with timeout (milliseconds). Returns error if connection takes too long.
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16, timeout_ms: i32) !AsyncConnection {
-        const address = try std.net.Address.parseIp4(host, port);
+        // Parse IP address using Zig 0.16 Io.net API
+        const ip_addr = try std.Io.net.IpAddress.parseIp4(host, port);
 
         // Create non-blocking socket
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
         errdefer posix.close(fd);
 
+        // Build sockaddr_in from IpAddress
+        var sockaddr: posix.sockaddr.in = .{
+            .family = posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, ip_addr.ip4.port),
+            .addr = @bitCast(ip_addr.ip4.bytes),
+            .zero = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
+        };
+
         // Attempt connect (will return EINPROGRESS for non-blocking)
-        const result = posix.connect(fd, &address.any, address.getOsSockLen());
+        const result = posix.connect(fd, @ptrCast(&sockaddr), @sizeOf(@TypeOf(sockaddr)));
         if (result) |_| {
             // Connected immediately
         } else |err| {

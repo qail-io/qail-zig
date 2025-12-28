@@ -1,10 +1,13 @@
-// Verification Benchmark - Audits byte counts and message types
+// Verification Benchmark - Audits byte counts and message types (Zig 0.16 API)
 // Run: zig build verify
 
 const std = @import("std");
 const driver = @import("driver/mod.zig");
 const protocol = @import("protocol/mod.zig");
 
+const Io = std.Io;
+const Threaded = Io.Threaded;
+const posix = std.posix;
 const Connection = driver.Connection;
 const Encoder = protocol.Encoder;
 
@@ -16,7 +19,12 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
     std.debug.print("🔍 Verifying response sizes and message counts...\n", .{});
 
-    var conn = try Connection.connect(allocator, "127.0.0.1", 5432);
+    // Create Io instance (Zig 0.16 pattern)
+    var threaded = Threaded.init(allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var conn = try Connection.connect(allocator, io, "127.0.0.1", 5432);
     defer conn.close();
 
     try conn.startup("orion", "postgres", null);
@@ -27,12 +35,12 @@ pub fn main() !void {
     // Prepare statement
     const stmt_name = "verify_test";
     try encoder.encodeParse(stmt_name, "SELECT id, name FROM harbors LIMIT $1", &[_]u32{23});
-    try conn.stream.writeAll(encoder.getWritten());
+    try conn.send(encoder.getWritten());
     try encoder.encodeSync();
-    try conn.stream.writeAll(encoder.getWritten());
+    try conn.send(encoder.getWritten());
 
     var read_buf: [65536]u8 = undefined;
-    const n_prep = try conn.stream.read(&read_buf); // Parse response
+    const n_prep = posix.read(conn.socket.handle, &read_buf) catch return error.ReadFailed;
     std.debug.print("Prepare Response ({} bytes): {any}\n", .{ n_prep, read_buf[0..n_prep] });
 
     std.debug.print("✅ Statement prepared\n\n", .{});
@@ -52,16 +60,15 @@ pub fn main() !void {
             try encoder.appendExecute("", 0);
         }
         try encoder.appendSync();
-        try conn.stream.writeAll(encoder.getWritten());
+        try conn.send(encoder.getWritten());
 
-        // Read and Count
+        // Read and Count using posix
         var batch_bytes: usize = 0;
         var batch_commands: usize = 0;
         var read_pos: usize = 0;
         var read_len: usize = 0;
 
         while (true) {
-            // Read until we frame a message
             while (read_len - read_pos < 5) {
                 if (read_pos > 0) {
                     const remaining = read_len - read_pos;
@@ -69,7 +76,7 @@ pub fn main() !void {
                     read_len = remaining;
                     read_pos = 0;
                 }
-                const n = try conn.stream.read(read_buf[read_len..]);
+                const n = posix.read(conn.socket.handle, read_buf[read_len..]) catch return error.ReadFailed;
                 if (n == 0) return error.ConnectionClosed;
                 read_len += n;
                 batch_bytes += n;
@@ -79,7 +86,6 @@ pub fn main() !void {
             const length = std.mem.readInt(u32, read_buf[read_pos + 1 ..][0..4], .big);
             const msg_len = 1 + length;
 
-            // Ensure full message
             while (read_len - read_pos < msg_len) {
                 if (read_pos > 0) {
                     const remaining = read_len - read_pos;
@@ -87,13 +93,12 @@ pub fn main() !void {
                     read_len = remaining;
                     read_pos = 0;
                 }
-                const n = try conn.stream.read(read_buf[read_len..]);
+                const n = posix.read(conn.socket.handle, read_buf[read_len..]) catch return error.ReadFailed;
                 if (n == 0) return error.ConnectionClosed;
                 read_len += n;
                 batch_bytes += n;
             }
 
-            // Process message
             switch (msg_type) {
                 'D' => total_rows += 1,
                 'C' => {
@@ -103,32 +108,9 @@ pub fn main() !void {
                 },
                 'Z' => {
                     read_pos += msg_len;
-                    break; // ReadyForQuery
+                    break;
                 },
-                'E' => {
-                    std.debug.print("❌ ERROR RESPONSE! Raw bytes: {any}\n", .{read_buf[read_pos .. read_pos + msg_len]});
-
-                    // Parse error fields
-                    var err_pos = read_pos + 5;
-                    const err_end = read_pos + msg_len;
-
-                    while (err_pos < err_end) {
-                        const field_type = read_buf[err_pos];
-                        if (field_type == 0) break; // Null terminator for fields
-                        err_pos += 1;
-
-                        const str_start = err_pos;
-                        // Find null terminator for string
-                        while (err_pos < err_end and read_buf[err_pos] != 0) : (err_pos += 1) {}
-
-                        if (err_pos < err_end) {
-                            const val = read_buf[str_start..err_pos];
-                            std.debug.print("  {c}: {s}\n", .{ field_type, val });
-                            err_pos += 1; // Skip null terminator
-                        }
-                    }
-                    return error.PostgresError;
-                },
+                'E' => return error.PostgresError,
                 else => {
                     read_pos += msg_len;
                 },

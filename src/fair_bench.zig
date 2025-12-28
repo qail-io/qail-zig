@@ -1,10 +1,14 @@
-// QAIL Zig Fair Benchmark - Matches Rust Configuration
+// QAIL Zig Fair Benchmark - Matches Rust Configuration (Zig 0.16 API)
 //
 // Same query, batch size, and parameters as Rust fifty_million_benchmark
 
 const std = @import("std");
 const qail = @import("qail");
 
+const Io = std.Io;
+const Threaded = Io.Threaded;
+const net = Io.net;
+const posix = std.posix;
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;
 const BackendMessage = qail.protocol.BackendMessage;
@@ -18,7 +22,7 @@ pub fn main() !void {
 
     std.debug.print("\n", .{});
     std.debug.print("╔════════════════════════════════════════════════════════════╗\n", .{});
-    std.debug.print("║  QAIL Zig Fair Benchmark - Matches Rust Config             ║\n", .{});
+    std.debug.print("║  QAIL Zig Fair Benchmark - Matches Rust Config (Zig 0.16)  ║\n", .{});
     std.debug.print("╠════════════════════════════════════════════════════════════╣\n", .{});
     std.debug.print("║  Query:   SELECT id, name FROM harbors LIMIT $1            ║\n", .{});
     std.debug.print("║  Batch:   10,000 queries per pipeline                      ║\n", .{});
@@ -26,22 +30,28 @@ pub fn main() !void {
     std.debug.print("╚════════════════════════════════════════════════════════════╝\n", .{});
     std.debug.print("\n", .{});
 
+    // Create Io instance (Zig 0.16 pattern)
+    var threaded = Threaded.init(allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
     // Connect to PostgreSQL
     std.debug.print("🔌 Connecting to PostgreSQL...\n", .{});
 
-    const address = try std.net.Address.parseIp4("127.0.0.1", 5432);
-    var stream = try std.net.tcpConnectToAddress(address);
-    defer stream.close();
+    const address = try net.IpAddress.parseIp4("127.0.0.1", 5432);
+    const stream = try net.IpAddress.connect(address, io, .{ .mode = .stream });
+    defer stream.socket.close(io);
+    const handle = stream.socket.handle;
 
     var encoder = Encoder.init(allocator);
     defer encoder.deinit();
 
     // Startup
     try encoder.encodeStartup("orion", "postgres");
-    try stream.writeAll(encoder.getWritten());
+    try writeAll(handle, encoder.getWritten());
 
     var read_buf: [16384]u8 = undefined;
-    try readUntilReady(&stream, &read_buf);
+    try readUntilReady(handle, &read_buf);
 
     std.debug.print("✅ Connected!\n\n", .{});
 
@@ -49,12 +59,12 @@ pub fn main() !void {
     std.debug.print("📋 Preparing: SELECT id, name FROM harbors LIMIT $1\n", .{});
     const param_types = [_]u32{23}; // int4 OID
     try encoder.encodeParse("s1", "SELECT id, name FROM harbors LIMIT $1", &param_types);
-    try stream.writeAll(encoder.getWritten());
+    try writeAll(handle, encoder.getWritten());
 
     try encoder.encodeSync();
-    try stream.writeAll(encoder.getWritten());
+    try writeAll(handle, encoder.getWritten());
 
-    try readUntilReady(&stream, &read_buf);
+    try readUntilReady(handle, &read_buf);
     std.debug.print("✅ Statement prepared!\n\n", .{});
 
     // Pre-build parameter batches - SAME as Rust (limit varies 1-10)
@@ -78,19 +88,17 @@ pub fn main() !void {
 
     // Warmup
     std.debug.print("🔥 Warming up (1 batch = 10K queries)...\n", .{});
-    _ = try runBatch(&stream, &encoder, &read_buf, &params_batch);
+    _ = try runBatch(handle, &encoder, &read_buf, &params_batch);
 
     std.debug.print("\n📊 Running 50 MILLION queries...\n\n", .{});
 
     const start = std.time.Instant.now() catch unreachable;
     var completed: u64 = 0;
-    var last_report = std.time.Instant.now() catch unreachable;
 
     for (0..BATCHES) |batch| {
-        _ = try runBatch(&stream, &encoder, &read_buf, &params_batch);
+        _ = try runBatch(handle, &encoder, &read_buf, &params_batch);
         completed += BATCH_SIZE;
 
-        // Progress every 1M
         if (completed % 1_000_000 == 0) {
             const now = std.time.Instant.now() catch unreachable;
             const elapsed_ns = now.since(start);
@@ -106,7 +114,6 @@ pub fn main() !void {
                 batch + 1,
                 BATCHES,
             });
-            last_report = now;
         }
     }
 
@@ -118,7 +125,7 @@ pub fn main() !void {
 
     // Terminate
     try encoder.encodeTerminate();
-    try stream.writeAll(encoder.getWritten());
+    try writeAll(handle, encoder.getWritten());
 
     std.debug.print("\n", .{});
     std.debug.print("📈 FINAL RESULTS:\n", .{});
@@ -133,30 +140,40 @@ pub fn main() !void {
     std.debug.print("\n⚡ Pure Zig - Zero FFI - Zero GC\n", .{});
 }
 
-fn runBatch(stream: *std.net.Stream, encoder: *Encoder, buf: *[16384]u8, params_batch: *const [BATCH_SIZE][1]?[]const u8) !u64 {
+fn writeAll(handle: posix.fd_t, bytes: []const u8) !void {
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        const n = posix.write(handle, bytes[sent..]) catch |err| {
+            if (err == error.WouldBlock) continue;
+            return error.WriteFailed;
+        };
+        if (n == 0) return error.ConnectionClosed;
+        sent += n;
+    }
+}
+
+fn runBatch(handle: posix.fd_t, encoder: *Encoder, buf: *[16384]u8, params_batch: *const [BATCH_SIZE][1]?[]const u8) !u64 {
     // Pipeline: Send all Bind+Execute at once
     for (params_batch) |params| {
         try encoder.encodeBind("", "s1", &params);
-        try stream.writeAll(encoder.getWritten());
+        try writeAll(handle, encoder.getWritten());
 
         try encoder.encodeExecute("", 0);
-        try stream.writeAll(encoder.getWritten());
+        try writeAll(handle, encoder.getWritten());
     }
 
     try encoder.encodeSync();
-    try stream.writeAll(encoder.getWritten());
+    try writeAll(handle, encoder.getWritten());
 
-    // Read all responses
-    return try readBatchResponses(stream, buf, BATCH_SIZE);
+    return try readBatchResponses(handle, buf, BATCH_SIZE);
 }
 
-fn readBatchResponses(stream: *std.net.Stream, buf: *[16384]u8, _: u64) !u64 {
+fn readBatchResponses(handle: posix.fd_t, buf: *[16384]u8, _: u64) !u64 {
     var read_pos: usize = 0;
     var read_len: usize = 0;
     var commands: u64 = 0;
 
     while (true) {
-        // Ensure header
         while (read_len - read_pos < 5) {
             if (read_pos > 0) {
                 const remaining = read_len - read_pos;
@@ -164,7 +181,7 @@ fn readBatchResponses(stream: *std.net.Stream, buf: *[16384]u8, _: u64) !u64 {
                 read_len = remaining;
                 read_pos = 0;
             }
-            const n = try stream.read(buf[read_len..]);
+            const n = posix.read(handle, buf[read_len..]) catch return error.ReadFailed;
             if (n == 0) return error.ConnectionClosed;
             read_len += n;
         }
@@ -173,7 +190,6 @@ fn readBatchResponses(stream: *std.net.Stream, buf: *[16384]u8, _: u64) !u64 {
         const length = std.mem.readInt(u32, buf[read_pos + 1 ..][0..4], .big);
         const msg_len = 5 + (length - 4);
 
-        // Ensure full message
         while (read_len - read_pos < msg_len) {
             if (read_pos > 0) {
                 const remaining = read_len - read_pos;
@@ -181,7 +197,7 @@ fn readBatchResponses(stream: *std.net.Stream, buf: *[16384]u8, _: u64) !u64 {
                 read_len = remaining;
                 read_pos = 0;
             }
-            const n = try stream.read(buf[read_len..]);
+            const n = posix.read(handle, buf[read_len..]) catch return error.ReadFailed;
             if (n == 0) return error.ConnectionClosed;
             read_len += n;
         }
@@ -197,13 +213,13 @@ fn readBatchResponses(stream: *std.net.Stream, buf: *[16384]u8, _: u64) !u64 {
     }
 }
 
-fn readUntilReady(stream: *std.net.Stream, buf: *[16384]u8) !void {
+fn readUntilReady(handle: posix.fd_t, buf: *[16384]u8) !void {
     var read_pos: usize = 0;
     var read_len: usize = 0;
 
     while (true) {
         while (read_len - read_pos < 5) {
-            const n = try stream.read(buf[read_len..]);
+            const n = posix.read(handle, buf[read_len..]) catch return error.ReadFailed;
             if (n == 0) return error.ConnectionClosed;
             read_len += n;
         }
@@ -213,7 +229,7 @@ fn readUntilReady(stream: *std.net.Stream, buf: *[16384]u8) !void {
         read_pos += 5 + (length - 4);
 
         if (read_pos > read_len) {
-            const n = try stream.read(buf[read_len..]);
+            const n = posix.read(handle, buf[read_len..]) catch return error.ReadFailed;
             if (n == 0) return error.ConnectionClosed;
             read_len += n;
         }

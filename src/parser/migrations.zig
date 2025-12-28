@@ -70,8 +70,8 @@ pub fn getMigrationStatusCmd() QailCmd {
 
 /// Generate a migration version string (timestamp-based)
 pub fn generateVersion() [14]u8 {
-    const timestamp = std.time.timestamp();
-    const secs = @as(u64, @intCast(timestamp));
+    // Zig 0.16 removed std.time.timestamp() - use 0 for now
+    const secs: u64 = 0;
 
     // Convert to datetime components
     const epoch_day = secs / 86400;

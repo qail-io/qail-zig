@@ -1,6 +1,7 @@
-// PostgreSQL Driver
+// PostgreSQL Driver (Zig 0.16 API)
 //
 // Main driver struct for executing QAIL AST queries.
+// Uses new std.Io interface for pluggable async I/O backends.
 
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
@@ -8,6 +9,7 @@ const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
 const row_mod = @import("row.zig");
 
+const Io = std.Io;
 const QailCmd = ast.QailCmd;
 const AstEncoder = protocol.AstEncoder;
 const Decoder = protocol.Decoder;
@@ -27,15 +29,18 @@ pub const QueryOpts = struct {
 };
 
 /// PostgreSQL driver - executes QAIL AST queries
+/// Zig 0.16: Now accepts Io interface for pluggable async backends
 pub const PgDriver = struct {
     conn: Connection,
     allocator: std.mem.Allocator,
+    io: Io,
     encoder: AstEncoder,
 
-    pub fn init(conn: Connection, allocator: std.mem.Allocator) PgDriver {
+    pub fn init(conn: Connection, allocator: std.mem.Allocator, io: Io) PgDriver {
         return .{
             .conn = conn,
             .allocator = allocator,
+            .io = io,
             .encoder = AstEncoder.init(allocator),
         };
     }
@@ -45,24 +50,25 @@ pub const PgDriver = struct {
         self.conn.close();
     }
 
-    /// Connect to PostgreSQL
-    pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, database: []const u8) !PgDriver {
-        var conn = try Connection.connect(allocator, host, port);
+    /// Connect to PostgreSQL using provided Io interface
+    /// Caller creates Io (e.g., via std.Io.Threaded.init(allocator).io())
+    pub fn connect(allocator: std.mem.Allocator, io: Io, host: []const u8, port: u16, user: []const u8, database: []const u8) !PgDriver {
+        var conn = try Connection.connect(allocator, io, host, port);
         errdefer conn.close();
 
         try conn.startup(user, database, null);
 
-        return PgDriver.init(conn, allocator);
+        return PgDriver.init(conn, allocator, io);
     }
 
     /// Connect with password
-    pub fn connectWithPassword(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, database: []const u8, password: []const u8) !PgDriver {
-        var conn = try Connection.connect(allocator, host, port);
+    pub fn connectWithPassword(allocator: std.mem.Allocator, io: Io, host: []const u8, port: u16, user: []const u8, database: []const u8, password: []const u8) !PgDriver {
+        var conn = try Connection.connect(allocator, io, host, port);
         errdefer conn.close();
 
         try conn.startup(user, database, password);
 
-        return PgDriver.init(conn, allocator);
+        return PgDriver.init(conn, allocator, io);
     }
 
     // ==================== AST-Native Query Execution ====================
@@ -140,6 +146,62 @@ pub const PgDriver = struct {
 
         if (rows.len == 0) return null;
         return rows[0];
+    }
+
+    /// a single 'Q' message instead of Parse+Bind+Describe+Execute+Sync.
+    pub fn fetchAllSimple(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
+        // Encode AST to Simple Query wire protocol
+        try self.encoder.encodeSimpleQuery(cmd);
+        try self.conn.send(self.encoder.getWritten());
+
+        // Collect results
+        var rows: std.ArrayList(PgRow) = .{};
+        errdefer {
+            for (rows.items) |*row| {
+                row.deinit();
+            }
+            rows.deinit(self.allocator);
+        }
+
+        var field_names: [][]const u8 = &.{};
+
+        // Read responses (Simple Query returns: RowDescription, DataRow*, CommandComplete, ReadyForQuery)
+        while (true) {
+            const msg = try self.conn.readMessage();
+
+            switch (msg.msg_type) {
+                .row_description => {
+                    var decoder = Decoder.init(msg.payload);
+                    const descriptions = try decoder.parseRowDescription(self.allocator);
+
+                    // Extract field names for rows
+                    field_names = try self.allocator.alloc([]const u8, descriptions.len);
+                    for (descriptions, 0..) |desc, i| {
+                        field_names[i] = desc.name;
+                    }
+                    self.allocator.free(descriptions);
+                },
+                .data_row => {
+                    var decoder = Decoder.init(msg.payload);
+                    try rows.append(self.allocator, PgRow{
+                        .columns = try decoder.parseDataRow(self.allocator),
+                        .field_names = field_names,
+                        .allocator = self.allocator,
+                    });
+                },
+                .command_complete => {},
+                .ready_for_query => break,
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    return error.QueryError;
+                },
+                else => {},
+            }
+        }
+
+        return try rows.toOwnedSlice(self.allocator);
     }
 
     /// Execute a QAIL AST command (for mutations) - returns affected row count

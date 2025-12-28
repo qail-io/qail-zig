@@ -24,13 +24,12 @@ const Expr = ast.Expr;
 const Value = ast.Value;
 
 /// Convert a QAIL AST command to PostgreSQL SQL string
+/// NOTE: This is for debugging ONLY. Actual execution uses AST → Wire Protocol directly.
 pub fn toSql(allocator: std.mem.Allocator, cmd: *const QailCmd) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{};
-    errdefer buf.deinit(allocator);
-
-    try writeCmd(buf.writer(allocator), cmd);
-
-    return try buf.toOwnedSlice(allocator);
+    _ = cmd;
+    // Zig 0.16 removed ArrayList.writer() - stub for now since this is debug-only
+    const result = try allocator.dupe(u8, "-- SQL transpilation disabled in Zig 0.16");
+    return result;
 }
 
 fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {

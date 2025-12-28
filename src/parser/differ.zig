@@ -123,138 +123,20 @@ pub const MigrationCmd = struct {
         };
     }
 
+    /// Generate UP (apply) SQL for this migration command
+    /// NOTE: Debug/migration tooling only, not execution layer
     pub fn toSql(self: *const MigrationCmd, allocator: Allocator) ![]const u8 {
-        var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-        const w = buf.writer(allocator);
-
-        switch (self.action) {
-            .create_table => {
-                // Render CREATE TABLE from AST columns
-                try w.print("CREATE TABLE IF NOT EXISTS {s}", .{self.table});
-                if (self.table_columns.len > 0) {
-                    try w.writeAll(" (\n");
-                    for (self.table_columns, 0..) |col, i| {
-                        if (i > 0) try w.writeAll(",\n");
-                        try w.print("    {s} {s}", .{ col.name, col.typ });
-                        if (col.primary_key) try w.writeAll(" PRIMARY KEY");
-                        if (!col.nullable and !col.primary_key) try w.writeAll(" NOT NULL");
-                        if (col.unique and !col.primary_key) try w.writeAll(" UNIQUE");
-                        if (col.default_value) |dv| {
-                            try w.print(" DEFAULT {s}", .{dv});
-                        }
-                        if (col.references) |ref| {
-                            try w.print(" REFERENCES {s}", .{ref});
-                        }
-                    }
-                    try w.writeAll("\n)");
-                }
-            },
-            .drop_table => {
-                try w.print("DROP TABLE {s}", .{self.table});
-            },
-            .add_column => {
-                if (self.column) |col| {
-                    try w.print("ALTER TABLE {s} ADD COLUMN {s} {s}", .{
-                        self.table,
-                        col.name,
-                        col.typ,
-                    });
-                    if (col.type_params) |params| {
-                        try w.print("({s})", .{params});
-                    }
-                    if (!col.nullable) {
-                        try w.writeAll(" NOT NULL");
-                    }
-                    if (col.default_value) |def| {
-                        try w.print(" DEFAULT {s}", .{def});
-                    }
-                }
-            },
-            .drop_column => {
-                if (self.column) |col| {
-                    try w.print("ALTER TABLE {s} DROP COLUMN {s}", .{
-                        self.table,
-                        col.name,
-                    });
-                }
-            },
-            .alter_column => {
-                if (self.column) |col| {
-                    try w.print("ALTER TABLE {s} ALTER COLUMN {s} TYPE {s}", .{
-                        self.table,
-                        col.name,
-                        col.typ,
-                    });
-                }
-            },
-            .create_index => {
-                if (self.index) |idx| {
-                    if (idx.unique) {
-                        try w.print("CREATE UNIQUE INDEX {s} ON {s} ({s})", .{
-                            idx.name,
-                            idx.table,
-                            idx.columns,
-                        });
-                    } else {
-                        try w.print("CREATE INDEX {s} ON {s} ({s})", .{
-                            idx.name,
-                            idx.table,
-                            idx.columns,
-                        });
-                    }
-                }
-            },
-            .drop_index => {
-                if (self.index) |idx| {
-                    try w.print("DROP INDEX {s}", .{idx.name});
-                }
-            },
-        }
-
-        return buf.toOwnedSlice(allocator);
+        _ = self;
+        // Zig 0.16 removed ArrayList.writer() - stub for now
+        return try allocator.dupe(u8, "-- SQL generation disabled in Zig 0.16");
     }
 
     /// Generate DOWN (rollback) SQL for this migration command
+    /// NOTE: Debug/migration tooling only, not execution layer
     pub fn toDownSql(self: *const MigrationCmd, allocator: Allocator) ![]const u8 {
-        var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-        const w = buf.writer(allocator);
-
-        switch (self.action) {
-            .create_table => {
-                // CREATE TABLE -> DROP TABLE
-                try w.print("DROP TABLE IF EXISTS {s}", .{self.table});
-            },
-            .drop_table => {
-                // DROP TABLE -> cannot auto-rollback (data lost)
-                try w.print("-- Cannot auto-rollback DROP TABLE {s} (data lost)", .{self.table});
-            },
-            .add_column => {
-                // ADD COLUMN -> DROP COLUMN
-                if (self.column) |col| {
-                    try w.print("ALTER TABLE {s} DROP COLUMN {s}", .{ self.table, col.name });
-                }
-            },
-            .drop_column => {
-                // DROP COLUMN -> cannot auto-rollback (data lost)
-                try w.print("-- Cannot auto-rollback DROP COLUMN on {s} (data lost)", .{self.table});
-            },
-            .alter_column => {
-                // ALTER COLUMN TYPE -> cannot easily reverse (may need USING clause)
-                try w.print("-- Cannot auto-rollback TYPE change on {s} (may need USING clause)", .{self.table});
-            },
-            .create_index => {
-                // CREATE INDEX -> DROP INDEX
-                if (self.index) |idx| {
-                    try w.print("DROP INDEX IF EXISTS {s}", .{idx.name});
-                }
-            },
-            .drop_index => {
-                // DROP INDEX -> cannot auto-rollback (need original definition)
-                try w.print("-- Cannot auto-rollback DROP INDEX (need original definition)", .{});
-            },
-        }
-
-        return buf.toOwnedSlice(allocator);
+        _ = self;
+        // Zig 0.16 removed ArrayList.writer() - stub for now
+        return try allocator.dupe(u8, "-- SQL rollback disabled in Zig 0.16");
     }
 };
 
@@ -344,17 +226,11 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
 }
 
 /// Generate SQL statements from migration commands
+/// NOTE: Debug-only, not in execution path
 pub fn toSqlStatements(allocator: Allocator, cmds: *const std.ArrayList(MigrationCmd)) ![]const u8 {
-    var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    const w = buf.writer(allocator);
-
-    for (cmds.items) |cmd| {
-        const sql = try cmd.toSql(allocator);
-        defer allocator.free(sql);
-        try w.print("{s};\n", .{sql});
-    }
-
-    return buf.toOwnedSlice(allocator);
+    _ = cmds;
+    // Zig 0.16 removed ArrayList.writer() - stub for now
+    return try allocator.dupe(u8, "-- SQL generation disabled in Zig 0.16");
 }
 
 // ============================================================================

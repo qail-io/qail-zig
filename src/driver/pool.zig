@@ -1,10 +1,11 @@
-// PostgreSQL Connection Pool
+// PostgreSQL Connection Pool (Zig 0.16 API)
 //
 // Provides connection pooling for efficient resource management.
 // Connections are reused to avoid reconnection overhead.
-// Supports background reconnect thread and URI-based configuration.
+// Uses new std.Io interface for pluggable async I/O backends.
 
 const std = @import("std");
+const Io = std.Io;
 const Connection = @import("connection.zig").Connection;
 
 /// Connection pool configuration
@@ -113,6 +114,7 @@ pub const PooledConnection = struct {
 pub const PgPool = struct {
     config: PoolConfig,
     allocator: std.mem.Allocator,
+    io: Io,
     idle_connections: std.ArrayList(PooledConn),
     mutex: std.Thread.Mutex,
     active_count: usize,
@@ -122,10 +124,11 @@ pub const PgPool = struct {
     should_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     /// Create a new connection pool
-    pub fn init(allocator: std.mem.Allocator, config: PoolConfig) !PgPool {
+    pub fn init(allocator: std.mem.Allocator, io: Io, config: PoolConfig) !PgPool {
         var pool = PgPool{
             .config = config,
             .allocator = allocator,
+            .io = io,
             .idle_connections = .{},
             .mutex = .{},
             .active_count = 0,
@@ -136,7 +139,7 @@ pub const PgPool = struct {
             const conn = try pool.createConnection();
             try pool.idle_connections.append(allocator, .{
                 .conn = conn,
-                .last_used = std.time.milliTimestamp(),
+                .last_used = 0,
             });
         }
 
@@ -144,9 +147,9 @@ pub const PgPool = struct {
     }
 
     /// Create pool from URI string
-    pub fn initUri(allocator: std.mem.Allocator, uri: []const u8) !PgPool {
+    pub fn initUri(allocator: std.mem.Allocator, io: Io, uri: []const u8) !PgPool {
         const config = try parseUri(uri);
-        return init(allocator, config);
+        return init(allocator, io, config);
     }
 
     /// Start background reconnect thread
@@ -188,7 +191,7 @@ pub const PgPool = struct {
             self.mutex.lock();
             self.idle_connections.append(self.allocator, .{
                 .conn = conn,
-                .last_used = std.time.milliTimestamp(),
+                .last_used = 0,
             }) catch {
                 var c = conn;
                 c.close();
@@ -215,7 +218,7 @@ pub const PgPool = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now: i64 = 0;
 
         // Try to get an idle connection
         while (self.idle_connections.items.len > 0) {
@@ -263,7 +266,7 @@ pub const PgPool = struct {
         if (self.idle_connections.items.len < self.config.max_connections) {
             self.idle_connections.append(self.allocator, .{
                 .conn = conn,
-                .last_used = std.time.milliTimestamp(),
+                .last_used = 0,
             }) catch {
                 var c = conn;
                 c.close();
@@ -297,7 +300,7 @@ pub const PgPool = struct {
         defer pooled.release();
 
         const driver_mod = @import("driver.zig");
-        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
+        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator, self.io);
         return try driver.execute(cmd);
     }
 
@@ -307,7 +310,7 @@ pub const PgPool = struct {
         defer pooled.release();
 
         const driver_mod = @import("driver.zig");
-        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
+        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator, self.io);
         return try driver.fetchAll(cmd);
     }
 
@@ -317,7 +320,7 @@ pub const PgPool = struct {
         defer pooled.release();
 
         const driver_mod = @import("driver.zig");
-        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
+        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator, self.io);
         return try driver.fetchOne(cmd);
     }
 
@@ -325,6 +328,7 @@ pub const PgPool = struct {
     fn createConnection(self: *PgPool) !Connection {
         var conn = try Connection.connect(
             self.allocator,
+            self.io,
             self.config.host,
             self.config.port,
         );

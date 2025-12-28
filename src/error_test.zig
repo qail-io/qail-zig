@@ -1,19 +1,27 @@
-// Error Test - Verify we actually parse responses
+// Error Test - Verify we actually parse responses (Zig 0.16 API)
 // Run: zig build error-test
 
 const std = @import("std");
 const driver = @import("driver/mod.zig");
 const protocol = @import("protocol/mod.zig");
 
+const Io = std.Io;
+const Threaded = Io.Threaded;
 const Connection = driver.Connection;
 const Encoder = protocol.Encoder;
+const posix = std.posix;
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     std.debug.print("Testing error detection with SELECT 1/0 (divide by zero)...\n", .{});
 
-    var conn = try Connection.connect(allocator, "127.0.0.1", 5432);
+    // Create Io instance (Zig 0.16 pattern)
+    var threaded = Threaded.init(allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var conn = try Connection.connect(allocator, io, "127.0.0.1", 5432);
     defer conn.close();
 
     try conn.startup("orion", "postgres", null);
@@ -24,14 +32,14 @@ pub fn main() !void {
     // Prepare statement - should work
     const stmt_name = "error_test";
     try encoder.encodeParse(stmt_name, "SELECT 1/0", &[_]u32{});
-    try conn.stream.writeAll(encoder.getWritten());
+    try conn.send(encoder.getWritten());
 
     try encoder.encodeSync();
-    try conn.stream.writeAll(encoder.getWritten());
+    try conn.send(encoder.getWritten());
 
-    // Read parse response
+    // Read parse response using posix read
     var read_buf: [16384]u8 = undefined;
-    _ = try conn.stream.read(&read_buf);
+    _ = try posix.read(conn.socket.handle, &read_buf);
 
     std.debug.print("✅ Statement prepared\n", .{});
 
@@ -41,7 +49,7 @@ pub fn main() !void {
     try encoder.appendExecute("", 0);
     try encoder.appendSync();
 
-    try conn.stream.writeAll(encoder.getWritten());
+    try conn.send(encoder.getWritten());
 
     std.debug.print("Sent execute, reading response...\n", .{});
 
@@ -50,7 +58,7 @@ pub fn main() !void {
     var found_error = false;
 
     while (read_len < 1000) {
-        const n = try conn.stream.read(read_buf[read_len..]);
+        const n = posix.read(conn.socket.handle, read_buf[read_len..]) catch break;
         if (n == 0) break;
         read_len += n;
 

@@ -1,18 +1,23 @@
-// PostgreSQL Connection
+// PostgreSQL Connection (Zig 0.16 API)
 //
-// TCP socket connection to PostgreSQL server.
+// TCP socket connection to PostgreSQL server using new std.Io interface.
+// Uses direct posix syscalls for efficient wire protocol I/O.
 
 const std = @import("std");
 const protocol = @import("../protocol/mod.zig");
 
+const Io = std.Io;
+const net = Io.net;
+const posix = std.posix;
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
 const BackendMessage = protocol.BackendMessage;
 const wire = protocol.wire;
 
-/// PostgreSQL connection over TCP
+/// PostgreSQL connection over TCP using Zig 0.16 Io interface
 pub const Connection = struct {
-    stream: std.net.Stream,
+    socket: net.Socket,
+    io: Io,
     allocator: std.mem.Allocator,
     read_buffer: [8192]u8 = undefined,
     read_pos: usize = 0,
@@ -24,93 +29,35 @@ pub const Connection = struct {
     ready: bool = false,
     in_transaction: bool = false,
 
-    pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Connection {
-        const address = try std.net.Address.parseIp4(host, port);
-        const stream = try std.net.tcpConnectToAddress(address);
+    pub fn connect(allocator: std.mem.Allocator, io: Io, host: []const u8, port: u16) !Connection {
+        // Parse IP address
+        const address = try net.IpAddress.parseIp4(host, port);
+
+        // Connect using new Io interface
+        const stream = try net.IpAddress.connect(address, io, .{ .mode = .stream });
 
         return .{
-            .stream = stream,
+            .socket = stream.socket,
+            .io = io,
             .allocator = allocator,
         };
-    }
-
-    /// Connect with timeout (milliseconds). Uses non-blocking socket + poll.
-    pub fn connectWithTimeout(allocator: std.mem.Allocator, host: []const u8, port: u16, timeout_ms: i32) !Connection {
-        const posix = std.posix;
-        const builtin = @import("builtin");
-
-        const address = try std.net.Address.parseIp4(host, port);
-
-        // Create socket (initially blocking)
-        // Note: posix.SOCK.NONBLOCK is not reliable across all platforms in socket() checks
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-        errdefer posix.close(fd);
-
-        // Set non-blocking
-        try setBlocking(fd, false);
-
-        // Attempt connect (will return EINPROGRESS/WSAEWOULDBLOCK for non-blocking)
-        const result = posix.connect(fd, &address.any, address.getOsSockLen());
-        if (result) |_| {
-            // Connected immediately
-        } else |err| {
-            if (err == error.WouldBlock) {
-                // Wait for connection with timeout using poll
-                var fds = [1]posix.pollfd{
-                    .{ .fd = if (builtin.os.tag == .windows) @ptrCast(fd) else fd, .events = posix.POLL.OUT, .revents = 0 },
-                };
-                const poll_result = try posix.poll(&fds, timeout_ms);
-                if (poll_result == 0) {
-                    return error.ConnectionTimeout;
-                }
-
-                // Check for socket error (skip on Windows - getsockopt requires libc)
-                if (builtin.os.tag != .windows) {
-                    try posix.getsockoptError(fd);
-                }
-            } else {
-                return err;
-            }
-        }
-
-        // Set socket back to blocking mode
-        try setBlocking(fd, true);
-
-        return .{
-            .stream = .{ .handle = fd },
-            .allocator = allocator,
-        };
-    }
-
-    fn setBlocking(fd: std.posix.fd_t, blocking: bool) !void {
-        const builtin = @import("builtin");
-        if (builtin.os.tag == .windows) {
-            const windows = std.os.windows;
-            // 0 = blocking, 1 = non-blocking
-            var mode: c_ulong = if (blocking) 0 else 1;
-            const socket: windows.ws2_32.SOCKET = @ptrCast(fd);
-            const res = windows.ws2_32.ioctlsocket(socket, windows.ws2_32.FIONBIO, &mode);
-            if (res != 0) return error.SocketError;
-        } else {
-            const posix = std.posix;
-            // O_NONBLOCK values: Linux=2048, macOS/BSD=4
-            const O_NONBLOCK: u32 = if (builtin.os.tag == .linux) 2048 else 4;
-            const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-            const new_flags = if (blocking)
-                flags & ~O_NONBLOCK
-            else
-                flags | O_NONBLOCK;
-            _ = try posix.fcntl(fd, posix.F.SETFL, new_flags);
-        }
     }
 
     pub fn close(self: *Connection) void {
-        self.stream.close();
+        self.socket.close(self.io);
     }
 
-    /// Send bytes to server
+    /// Send bytes to server using direct posix write
     pub fn send(self: *Connection, bytes: []const u8) !void {
-        try self.stream.writeAll(bytes);
+        var sent: usize = 0;
+        while (sent < bytes.len) {
+            const n = posix.write(self.socket.handle, bytes[sent..]) catch |err| {
+                if (err == error.WouldBlock) continue;
+                return error.WriteFailed;
+            };
+            if (n == 0) return error.ConnectionClosed;
+            sent += n;
+        }
     }
 
     /// Read a complete message from server
@@ -142,8 +89,11 @@ pub const Connection = struct {
                 self.read_pos = 0;
             }
 
-            // Read more data
-            const n = try self.stream.read(self.read_buffer[self.read_len..]);
+            // Read more data using direct posix read
+            const n = posix.read(self.socket.handle, self.read_buffer[self.read_len..]) catch |err| {
+                if (err == error.WouldBlock) continue;
+                return error.ReadFailed;
+            };
             if (n == 0) return error.ConnectionClosed;
             self.read_len += n;
         }
@@ -214,13 +164,3 @@ pub const Connection = struct {
         }
     }
 };
-
-// Tests
-test "connection struct init" {
-    // Just test the struct can be created
-    const conn = Connection{
-        .stream = undefined,
-        .allocator = std.testing.allocator,
-    };
-    try std.testing.expect(!conn.ready);
-}

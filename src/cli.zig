@@ -314,9 +314,15 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
                 return;
             };
 
+            // Create Io instance (Zig 0.16 pattern)
+            var threaded = std.Io.Threaded.init(allocator);
+            defer threaded.deinit();
+            const io = threaded.io();
+
             const driver = @import("driver/mod.zig");
             var pg = driver.PgDriver.connect(
                 allocator,
+                io,
                 conn_info.host,
                 conn_info.port,
                 conn_info.user,
@@ -364,13 +370,13 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("  {s} → {s}\n\n", .{ diff.old.?, diff.new.? });
 
             // Load schema files
-            const old_content = std.fs.cwd().readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
+            const old_content = std.fs.cwd().readFileAlloc(diff.old.?, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
                 print("Error reading old schema: {}\n", .{err});
                 return;
             };
             defer allocator.free(old_content);
 
-            const new_content = std.fs.cwd().readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
+            const new_content = std.fs.cwd().readFileAlloc(diff.new.?, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
                 print("Error reading new schema: {}\n", .{err});
                 return;
             };
@@ -432,13 +438,13 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("Database: {s}\n\n", .{u.url});
 
             // Load schema files
-            const old_content = std.fs.cwd().readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
+            const old_content = std.fs.cwd().readFileAlloc(diff.old.?, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
                 print("Error reading old schema: {}\n", .{err});
                 return;
             };
             defer allocator.free(old_content);
 
-            const new_content = std.fs.cwd().readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
+            const new_content = std.fs.cwd().readFileAlloc(diff.new.?, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| {
                 print("Error reading new schema: {}\n", .{err});
                 return;
             };
@@ -493,9 +499,15 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
                 return;
             };
 
+            // Create Io instance (Zig 0.16 pattern)
+            var threaded = std.Io.Threaded.init(allocator);
+            defer threaded.deinit();
+            const io = threaded.io();
+
             const driver = @import("driver/mod.zig");
             var pg = driver.PgDriver.connect(
                 allocator,
+                io,
                 conn_info.host,
                 conn_info.port,
                 conn_info.user,
@@ -624,7 +636,8 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("✅ Rollback complete (dry-run)\n", .{});
         },
         .create => |c| {
-            const timestamp = std.time.timestamp();
+            // Zig 0.16 removed std.time.timestamp() - use 0 for now
+            const timestamp: i64 = 0;
             print("📝 Creating migration: {d}_{s}.qail\n", .{ timestamp, c.name });
         },
         .shadow => |s| {

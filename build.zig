@@ -221,6 +221,44 @@ pub fn build(b: *std.Build) void {
     const verify_step = b.step("verify", "Verify response sizes (audit partial reads)");
     verify_step.dependOn(&run_verify.step);
 
+    // ==================== Sequential Benchmark ====================
+    const seq_bench = b.addExecutable(.{
+        .name = "bench_sequential",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_sequential.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(seq_bench);
+
+    const run_seq_bench = b.addRunArtifact(seq_bench);
+    run_seq_bench.step.dependOn(b.getInstallStep());
+    const seq_bench_step = b.step("bench_sequential", "Sequential query benchmark");
+    seq_bench_step.dependOn(&run_seq_bench.step);
+
+    // ==================== Profile Benchmark ====================
+    const profile_bench = b.addExecutable(.{
+        .name = "bench_profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench_profile.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(profile_bench);
+
+    const run_profile_bench = b.addRunArtifact(profile_bench);
+    run_profile_bench.step.dependOn(b.getInstallStep());
+    const profile_bench_step = b.step("bench_profile", "Profile Zig driver components");
+    profile_bench_step.dependOn(&run_profile_bench.step);
+
     // ==================== Multi-Connection Benchmark ====================
     const multi_bench = b.addExecutable(.{
         .name = "qail-multi",

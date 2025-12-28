@@ -1,10 +1,12 @@
-// Pipeline API Benchmark
+// Pipeline API Benchmark (Zig 0.16 API)
 //
 // Tests the new Pipeline pipelining API for performance.
 
 const std = @import("std");
 const qail = @import("qail");
 
+const Io = std.Io;
+const Threaded = Io.Threaded;
 const Pipeline = qail.driver.Pipeline;
 const Connection = qail.driver.Connection;
 const QailCmd = qail.ast.QailCmd;
@@ -15,14 +17,19 @@ pub fn main() !void {
 
     std.debug.print("\n", .{});
     std.debug.print("╔════════════════════════════════════════════════════════════╗\n", .{});
-    std.debug.print("║  QAIL Zig - Pipeline API Benchmark                         ║\n", .{});
+    std.debug.print("║  QAIL Zig - Pipeline API Benchmark (Zig 0.16)              ║\n", .{});
     std.debug.print("║  Testing new Pipeline struct pipelining                    ║\n", .{});
     std.debug.print("╚════════════════════════════════════════════════════════════╝\n", .{});
     std.debug.print("\n", .{});
 
+    // Create Io instance (Zig 0.16 pattern)
+    var threaded = Threaded.init(allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+
     // Connect
     std.debug.print("🔌 Connecting to PostgreSQL...\n", .{});
-    var conn = try Connection.connect(allocator, "127.0.0.1", 5432);
+    var conn = try Connection.connect(allocator, io, "127.0.0.1", 5432);
     defer conn.close();
 
     try conn.startup("orion", "postgres", null);
