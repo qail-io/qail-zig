@@ -380,5 +380,5 @@ fn showHelp() void {
 }
 
 fn showVersion() void {
-    print("qail-zig 0.10.2\n", .{});
+    print("qail-zig 0.4.0\n", .{});
 }
