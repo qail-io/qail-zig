@@ -197,7 +197,7 @@ src/
 | **lsp/** | 535 | Language server |
 | **Total** | **~15,400** | |
 
-## Comparison with Rust
+## Comparison with qail.rs
 
 | Feature | qail-zig | qail.rs |
 |---------|----------|---------|
@@ -210,15 +210,26 @@ src/
 | Connection Pool | ✅ | ✅ |
 | TLS | ✅ (std.crypto) | ✅ (rustls) |
 | COPY Protocol | ✅ | ✅ |
-| Python Bindings | ❌ | ✅ |
+| Python Bindings | ❌ | ✅ (PyO3) |
+| PHP Bindings | ❌ | ✅ |
+| WASM | ❌ | ✅ |
 
-**Choose Zig**: Simplicity, fast builds, zero dependencies, small binary  
-**Choose Rust**: Mature ecosystem, async, multi-language bindings
+### When to Use Each
+
+**qail-zig** - Pure Zig PostgreSQL driver:
+- Zero dependencies, fast builds, minimal binary
+- Native Zig projects, embedded systems
+- Maximum control & performance
+
+**qail.rs** - Cross-language ecosystem:
+- Python, PHP, WASM bindings
+- Async runtime (Tokio)
+- Broader language support
 
 ## Related Projects
 
-- [qail.rs](https://github.com/qail-io/qail) - Rust implementation
-- [qail.rs Website](https://qail.rs) - Docs & Playground
+- [qail.rs](https://github.com/qail-io/qail) - Rust implementation with language bindings
+- [pg.zig](https://github.com/karlseguin/pg.zig) - Alternative Zig PG driver (we have full parity + more features)
 
 ## License
 
@@ -226,4 +237,4 @@ MIT - see [LICENSE](LICENSE)
 
 ---
 
-**Built with ❤️ in pure Zig**
+**Pure Zig PostgreSQL Driver** | Zero Dependencies | 1M+ queries/second
