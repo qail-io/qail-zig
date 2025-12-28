@@ -47,6 +47,28 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run example");
     run_step.dependOn(&run_example.step);
 
+    // ==================== QAIL CLI Executable ====================
+    const qail_cli = b.addExecutable(.{
+        .name = "qail",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/qail_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(qail_cli);
+
+    const run_cli = b.addRunArtifact(qail_cli);
+    run_cli.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cli.addArgs(args);
+    }
+    const cli_step = b.step("cli", "Run QAIL CLI");
+    cli_step.dependOn(&run_cli.step);
+
     // ==================== Benchmark Executable ====================
     const bench = b.addExecutable(.{
         .name = "qail-bench",
