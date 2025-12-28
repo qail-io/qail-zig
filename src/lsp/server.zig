@@ -360,10 +360,8 @@ pub const QailServer = struct {
         try self.sendRaw(response);
     }
 
-    /// Send raw JSON-RPC message
+    /// Send raw bytes to stdout (LSP JSON-RPC response)
     fn sendRaw(_: *QailServer, content: []const u8) !void {
-        const posix = std.posix;
-
         // Build header
         var header_buf: [64]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "Content-Length: {d}\r\n\r\n", .{content.len}) catch return error.FormatError;
@@ -371,7 +369,7 @@ pub const QailServer = struct {
         // Write header
         var written: usize = 0;
         while (written < header.len) {
-            const n = posix.write(posix.STDOUT_FILENO, header[written..]) catch return error.WriteError;
+            const n = writeStdout(header[written..]) catch return error.WriteError;
             if (n == 0) return error.WriteError;
             written += n;
         }
@@ -379,9 +377,20 @@ pub const QailServer = struct {
         // Write content
         written = 0;
         while (written < content.len) {
-            const n = posix.write(posix.STDOUT_FILENO, content[written..]) catch return error.WriteError;
+            const n = writeStdout(content[written..]) catch return error.WriteError;
             if (n == 0) return error.WriteError;
             written += n;
+        }
+    }
+
+    /// Cross-platform stdout write helper
+    fn writeStdout(bytes: []const u8) !usize {
+        const builtin = @import("builtin");
+        if (builtin.os.tag == .windows) {
+            // Windows: LSP not supported yet, return error
+            return error.UnsupportedPlatform;
+        } else {
+            return std.posix.write(std.posix.STDOUT_FILENO, bytes);
         }
     }
 };
