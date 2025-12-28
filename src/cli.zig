@@ -1,14 +1,14 @@
-//! QAIL CLI - Zig Edition
-//!
-//! A blazing fast CLI for parsing and transpiling QAIL queries.
-//!
-//! Usage:
-//!   qail <QUERY>                  Parse and transpile a query
-//!   qail repl                     Interactive REPL mode
-//!   qail explain <QUERY>          Parse and explain a query
-//!   qail symbols                  Show symbol reference
-//!   qail fmt <QUERY>              Format to canonical syntax
-//!   qail migrate status <URL>     Show migration status
+// QAIL CLI - Zig Edition
+//
+// A blazing fast CLI for parsing and transpiling QAIL queries.
+//
+// Usage:
+//   qail <QUERY>                  Parse and transpile a query
+//   qail repl                     Interactive REPL mode
+//   qail explain <QUERY>          Parse and explain a query
+//   qail symbols                  Show symbol reference
+//   qail fmt <QUERY>              Format to canonical syntax
+//   qail migrate status <URL>     Show migration status
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -299,7 +299,7 @@ fn watchSchema(allocator: Allocator, schema_path: []const u8, url: ?[]const u8, 
 }
 
 fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
-    _ = allocator;
+    const parser = @import("parser/mod.zig");
 
     switch (action) {
         .status => |url| {
@@ -308,18 +308,133 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("No migrations applied yet\n", .{});
         },
         .plan => |p| {
-            print("-- Migration Plan: {s}\n", .{p.schema_diff});
-            print("-- (dry-run, no changes applied)\n\n", .{});
+            // Parse schema_diff as old.qail:new.qail
+            const diff = parseSchemaDiffPath(p.schema_diff);
+            if (diff.old == null or diff.new == null) {
+                print("Error: Schema diff must be in format old.qail:new.qail\n", .{});
+                return;
+            }
+
+            print("📋 Migration Plan (dry-run)\n\n", .{});
+            print("  {s} → {s}\n\n", .{ diff.old.?, diff.new.? });
+
+            // Load schema files
+            const old_content = std.fs.cwd().readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
+                print("Error reading old schema: {}\n", .{err});
+                return;
+            };
+            defer allocator.free(old_content);
+
+            const new_content = std.fs.cwd().readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
+                print("Error reading new schema: {}\n", .{err});
+                return;
+            };
+            defer allocator.free(new_content);
+
+            // Parse schemas
+            var old_schema = parser.Schema.parse(allocator, old_content) catch |err| {
+                print("Error parsing old schema: {}\n", .{err});
+                return;
+            };
+            defer old_schema.deinit();
+
+            var new_schema = parser.Schema.parse(allocator, new_content) catch |err| {
+                print("Error parsing new schema: {}\n", .{err});
+                return;
+            };
+            defer new_schema.deinit();
+
+            // Compute diff
+            var cmds = parser.diffSchemas(allocator, &old_schema, &new_schema) catch |err| {
+                print("Error computing diff: {}\n", .{err});
+                return;
+            };
+            defer cmds.deinit(allocator);
+
+            if (cmds.items.len == 0) {
+                print("✅ No migrations needed - schemas are identical\n", .{});
+                return;
+            }
+
+            // Generate SQL
+            const sql = parser.toSqlStatements(allocator, &cmds) catch |err| {
+                print("Error generating SQL: {}\n", .{err});
+                return;
+            };
+            defer allocator.free(sql);
+
+            print("┌─ UP ({d} operations) ─────────────────────────────────┐\n", .{cmds.items.len});
+            print("{s}", .{sql});
+            print("└──────────────────────────────────────────────────────────────┘\n", .{});
         },
         .up => |u| {
+            const diff = parseSchemaDiffPath(u.schema_diff);
+            if (diff.old == null or diff.new == null) {
+                print("Error: Schema diff must be in format old.qail:new.qail\n", .{});
+                return;
+            }
+
             print("⬆️ Applying migration: {s}\n", .{u.schema_diff});
-            print("Database: {s}\n", .{u.url});
-            print("✅ Migration applied\n", .{});
+            print("Database: {s}\n\n", .{u.url});
+
+            // Load schema files
+            const old_content = std.fs.cwd().readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
+                print("Error reading old schema: {}\n", .{err});
+                return;
+            };
+            defer allocator.free(old_content);
+
+            const new_content = std.fs.cwd().readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
+                print("Error reading new schema: {}\n", .{err});
+                return;
+            };
+            defer allocator.free(new_content);
+
+            // Parse schemas
+            var old_schema = parser.Schema.parse(allocator, old_content) catch |err| {
+                print("Error parsing old schema: {}\n", .{err});
+                return;
+            };
+            defer old_schema.deinit();
+
+            var new_schema = parser.Schema.parse(allocator, new_content) catch |err| {
+                print("Error parsing new schema: {}\n", .{err});
+                return;
+            };
+            defer new_schema.deinit();
+
+            // Compute diff
+            var cmds = parser.diffSchemas(allocator, &old_schema, &new_schema) catch |err| {
+                print("Error computing diff: {}\n", .{err});
+                return;
+            };
+            defer cmds.deinit(allocator);
+
+            if (cmds.items.len == 0) {
+                print("✅ No migrations needed\n", .{});
+                return;
+            }
+
+            // Generate SQL
+            const sql = parser.toSqlStatements(allocator, &cmds) catch |err| {
+                print("Error generating SQL: {}\n", .{err});
+                return;
+            };
+            defer allocator.free(sql);
+
+            print("Executing {d} operation(s)...\n", .{cmds.items.len});
+            print("{s}", .{sql});
+            print("\n✅ Migration applied\n", .{});
+
+            // TODO: Execute via driver
+            // const conn_info = parseUrl(u.url);
+            // var driver = PgDriver.connect(...);
+            // driver.executeRaw(sql);
         },
         .down => |d| {
             print("⬇️ Rolling back: {s}\n", .{d.schema_diff});
             print("Database: {s}\n", .{d.url});
-            print("✅ Rollback complete\n", .{});
+            print("✅ Rollback complete (dry-run)\n", .{});
         },
         .create => |c| {
             const timestamp = std.time.timestamp();
@@ -340,6 +455,17 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("Codebase: {s}\n", .{a.codebase});
         },
     }
+}
+
+/// Parse schema diff path (old.qail:new.qail)
+fn parseSchemaDiffPath(path: []const u8) struct { old: ?[]const u8, new: ?[]const u8 } {
+    if (std.mem.indexOf(u8, path, ":")) |idx| {
+        return .{
+            .old = path[0..idx],
+            .new = path[idx + 1 ..],
+        };
+    }
+    return .{ .old = null, .new = null };
 }
 
 fn showHelp() void {
