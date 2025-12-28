@@ -85,8 +85,8 @@ pub const TableDef = struct {
 
     /// Generate CREATE TABLE DDL
     pub fn toDdl(self: *const TableDef, allocator: Allocator) ![]const u8 {
-        var buf = std.ArrayList(u8).init(allocator);
-        const writer = buf.writer();
+        var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
+        const writer = buf.writer(allocator);
 
         try writer.print("CREATE TABLE IF NOT EXISTS {s} (\n", .{self.name});
 
@@ -125,7 +125,7 @@ pub const TableDef = struct {
         }
 
         try writer.writeAll(")");
-        return buf.toOwnedSlice();
+        return buf.toOwnedSlice(allocator);
     }
 };
 

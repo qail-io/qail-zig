@@ -18,6 +18,7 @@ pub const MigrationCmd = struct {
     table: []const u8,
     column: ?ColumnDef = null,
     index: ?IndexInfo = null,
+    ddl_sql: ?[]const u8 = null, // Pre-generated DDL for create_table
 
     pub const Action = enum {
         create_table,
@@ -35,7 +36,14 @@ pub const MigrationCmd = struct {
         const Expr = @import("../ast/expr.zig").Expr;
 
         return switch (self.action) {
-            .create_table => QailCmd.make(self.table),
+            .create_table => blk: {
+                // Use pre-generated DDL via raw_sql for CREATE TABLE
+                var cmd = QailCmd.make(self.table);
+                if (self.ddl_sql) |ddl| {
+                    cmd.raw_sql = ddl;
+                }
+                break :blk cmd;
+            },
             .drop_table => QailCmd.drop(self.table),
             .add_column => blk: {
                 if (self.column) |col| {
@@ -95,7 +103,12 @@ pub const MigrationCmd = struct {
 
         switch (self.action) {
             .create_table => {
-                try w.print("CREATE TABLE {s}", .{self.table});
+                // Use pre-generated DDL if available
+                if (self.ddl_sql) |ddl| {
+                    try w.writeAll(ddl);
+                } else {
+                    try w.print("CREATE TABLE {s}", .{self.table});
+                }
             },
             .drop_table => {
                 try w.print("DROP TABLE {s}", .{self.table});
@@ -179,22 +192,17 @@ pub const IndexInfo = struct {
 pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema) !std.ArrayList(MigrationCmd) {
     var cmds = std.ArrayList(MigrationCmd).initCapacity(allocator, 0) catch unreachable;
 
-    // 1. Detect new tables
+    // 1. Detect new tables - CREATE TABLE with all columns (no separate ADD COLUMN)
     for (new.tables.items) |new_table| {
         if (old.findTable(new_table.name) == null) {
+            // Generate DDL at diff time to avoid dangling pointers
+            const ddl = try new_table.toDdl(allocator);
             try cmds.append(allocator, MigrationCmd{
                 .action = .create_table,
                 .table = new_table.name,
+                .ddl_sql = ddl,
             });
-
-            // Add all columns for new table
-            for (new_table.columns.items) |col| {
-                try cmds.append(allocator, MigrationCmd{
-                    .action = .add_column,
-                    .table = new_table.name,
-                    .column = col,
-                });
-            }
+            // Note: We don't generate ADD COLUMN for new tables - they're in CREATE TABLE
         }
     }
 

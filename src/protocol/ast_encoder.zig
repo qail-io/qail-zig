@@ -191,6 +191,12 @@ pub const AstEncoder = struct {
     fn writeAstToSql(self: *AstEncoder, writer: anytype, cmd: *const QailCmd) !void {
         _ = self;
 
+        // First check for raw_sql (used for pre-generated DDL)
+        if (cmd.raw_sql) |raw| {
+            try writer.writeAll(raw);
+            return;
+        }
+
         switch (cmd.kind) {
             .get => {
                 try writer.writeAll("SELECT ");
