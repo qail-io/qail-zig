@@ -1,6 +1,6 @@
-//! QAIL Zig Fair Benchmark - Matches Rust Configuration
-//!
-//! Same query, batch size, and parameters as Rust fifty_million_benchmark
+// QAIL Zig Fair Benchmark - Matches Rust Configuration
+//
+// Same query, batch size, and parameters as Rust fifty_million_benchmark
 
 const std = @import("std");
 const qail = @import("qail");

@@ -423,13 +423,62 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             defer allocator.free(sql);
 
             print("Executing {d} operation(s)...\n", .{cmds.items.len});
-            print("{s}", .{sql});
-            print("\n✅ Migration applied\n", .{});
 
-            // TODO: Execute via driver
-            // const conn_info = parseUrl(u.url);
-            // var driver = PgDriver.connect(...);
-            // driver.executeRaw(sql);
+            // Execute via driver
+            const conn_info = parsePostgresUrl(u.url) orelse {
+                print("Error: Invalid PostgreSQL URL format\n", .{});
+                print("Expected: postgres://user@host:port/database\n", .{});
+                return;
+            };
+
+            const driver = @import("driver/mod.zig");
+            var pg = driver.PgDriver.connect(
+                allocator,
+                conn_info.host,
+                conn_info.port,
+                conn_info.user,
+                conn_info.database,
+            ) catch |err| {
+                print("Error connecting to database: {}\n", .{err});
+                return;
+            };
+            defer pg.deinit();
+
+            // Begin transaction
+            pg.begin() catch |err| {
+                print("Error starting transaction: {}\n", .{err});
+                return;
+            };
+
+            // Execute each migration command using AST-native execution
+            var success = true;
+            for (cmds.items) |migration_cmd| {
+                // Convert to AST command (no raw SQL!)
+                const qail_cmd = migration_cmd.toQailCmd();
+
+                // Show what we're executing
+                const stmt_sql = migration_cmd.toSql(allocator) catch continue;
+                defer allocator.free(stmt_sql);
+                print("  {s};\n", .{stmt_sql});
+
+                // Execute via AST-native path
+                _ = pg.execute(&qail_cmd) catch |err| {
+                    print("Error executing: {}\n", .{err});
+                    success = false;
+                    break;
+                };
+            }
+
+            if (success) {
+                pg.commit() catch |err| {
+                    print("Error committing: {}\n", .{err});
+                    return;
+                };
+                print("\n✅ Migration applied successfully!\n", .{});
+            } else {
+                pg.rollback() catch {};
+                print("\n❌ Migration failed, rolled back\n", .{});
+            }
         },
         .down => |d| {
             print("⬇️ Rolling back: {s}\n", .{d.schema_diff});
@@ -466,6 +515,69 @@ fn parseSchemaDiffPath(path: []const u8) struct { old: ?[]const u8, new: ?[]cons
         };
     }
     return .{ .old = null, .new = null };
+}
+
+/// Parse PostgreSQL URL: postgres://user:pass@host:port/database
+pub const PostgresUrl = struct {
+    host: []const u8,
+    port: u16,
+    user: []const u8,
+    password: ?[]const u8,
+    database: []const u8,
+};
+
+fn parsePostgresUrl(url: []const u8) ?PostgresUrl {
+    // Remove protocol prefix
+    var rest = url;
+    if (std.mem.startsWith(u8, rest, "postgres://")) {
+        rest = rest[11..];
+    } else if (std.mem.startsWith(u8, rest, "postgresql://")) {
+        rest = rest[13..];
+    } else {
+        return null;
+    }
+
+    // Find @ to separate user:pass from host:port/db
+    const at_idx = std.mem.indexOf(u8, rest, "@") orelse {
+        // No auth, format: host:port/database
+        return parseHostPortDb(rest, null, null);
+    };
+
+    const auth_part = rest[0..at_idx];
+    const host_part = rest[at_idx + 1 ..];
+
+    // Parse user:password
+    var user: []const u8 = auth_part;
+    var password: ?[]const u8 = null;
+    if (std.mem.indexOf(u8, auth_part, ":")) |colon_idx| {
+        user = auth_part[0..colon_idx];
+        password = auth_part[colon_idx + 1 ..];
+    }
+
+    return parseHostPortDb(host_part, user, password);
+}
+
+fn parseHostPortDb(host_part: []const u8, user: ?[]const u8, password: ?[]const u8) ?PostgresUrl {
+    // Parse host:port/database
+    const slash_idx = std.mem.indexOf(u8, host_part, "/") orelse return null;
+    const host_port = host_part[0..slash_idx];
+    const database = host_part[slash_idx + 1 ..];
+
+    var host: []const u8 = host_port;
+    var port: u16 = 5432;
+
+    if (std.mem.indexOf(u8, host_port, ":")) |colon_idx| {
+        host = host_port[0..colon_idx];
+        port = std.fmt.parseInt(u16, host_port[colon_idx + 1 ..], 10) catch 5432;
+    }
+
+    return PostgresUrl{
+        .host = host,
+        .port = port,
+        .user = user orelse "postgres",
+        .password = password,
+        .database = database,
+    };
 }
 
 fn showHelp() void {

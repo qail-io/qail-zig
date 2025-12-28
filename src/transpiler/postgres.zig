@@ -1,10 +1,10 @@
-//! PostgreSQL Transpiler
-//!
-//! Converts QAIL AST to PostgreSQL SQL strings.
-//! Used for debugging, logging, and EXPLAIN analysis.
-//!
-//! NOTE: This is NOT the primary execution path!
-//! The primary path is AST → Wire Protocol via ast_encoder.zig
+// PostgreSQL Transpiler
+//
+// Converts QAIL AST to PostgreSQL SQL strings.
+// Used for debugging, logging, and EXPLAIN analysis.
+//
+// NOTE: This is NOT the primary execution path!
+// The primary path is AST → Wire Protocol via ast_encoder.zig
 
 const std = @import("std");
 const ast = struct {

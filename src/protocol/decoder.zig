@@ -1,6 +1,6 @@
-//! PostgreSQL Protocol Decoder
-//!
-//! Decodes backend messages from PostgreSQL wire format.
+// PostgreSQL Protocol Decoder
+//
+// Decodes backend messages from PostgreSQL wire format.
 
 const std = @import("std");
 const wire = @import("wire.zig");

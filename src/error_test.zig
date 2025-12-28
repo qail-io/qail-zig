@@ -1,5 +1,5 @@
-//! Error Test - Verify we actually parse responses
-//! Run: zig build error-test
+// Error Test - Verify we actually parse responses
+// Run: zig build error-test
 
 const std = @import("std");
 const driver = @import("driver/mod.zig");

@@ -1,6 +1,6 @@
-//! Timestamp Type
-//!
-//! PostgreSQL TIMESTAMP and TIMESTAMPTZ support.
+// Timestamp Type
+//
+// PostgreSQL TIMESTAMP and TIMESTAMPTZ support.
 
 const std = @import("std");
 

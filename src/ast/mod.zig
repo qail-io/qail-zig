@@ -1,7 +1,7 @@
-//! QAIL AST Module - Core Abstract Syntax Tree types
-//!
-//! This module provides the fundamental AST types for building
-//! database queries in a type-safe, allocator-aware manner.
+// QAIL AST Module - Core Abstract Syntax Tree types
+//
+// This module provides the fundamental AST types for building
+// database queries in a type-safe, allocator-aware manner.
 
 pub const cmd = @import("cmd.zig");
 pub const expr = @import("expr.zig");

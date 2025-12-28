@@ -1,6 +1,6 @@
-//! Pipeline API Benchmark
-//!
-//! Tests the new Pipeline pipelining API for performance.
+// Pipeline API Benchmark
+//
+// Tests the new Pipeline pipelining API for performance.
 
 const std = @import("std");
 const qail = @import("qail");

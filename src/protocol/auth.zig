@@ -1,6 +1,6 @@
-//! PostgreSQL SCRAM-SHA-256 Authentication
-//!
-//! Implements SASL SCRAM-SHA-256 authentication for PostgreSQL 10+.
+// PostgreSQL SCRAM-SHA-256 Authentication
+//
+// Implements SASL SCRAM-SHA-256 authentication for PostgreSQL 10+.
 
 const std = @import("std");
 const crypto = std.crypto;

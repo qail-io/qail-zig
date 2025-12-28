@@ -1,7 +1,7 @@
-//! AST-Native Wire Encoder
-//!
-//! Encodes QAIL AST (QailCmd) directly to PostgreSQL wire protocol bytes.
-//! NO SQL STRING GENERATION - this is the core of QAIL's philosophy.
+// AST-Native Wire Encoder
+//
+// Encodes QAIL AST (QailCmd) directly to PostgreSQL wire protocol bytes.
+// NO SQL STRING GENERATION - this is the core of QAIL's philosophy.
 
 const std = @import("std");
 const ast = struct {
@@ -400,6 +400,77 @@ pub const AstEncoder = struct {
                 try writer.writeAll("ROLLBACK TO SAVEPOINT ");
                 if (cmd.savepoint_name) |name| try writer.writeAll(name);
             },
+            // DDL Commands
+            .make => {
+                try writer.writeAll("CREATE TABLE IF NOT EXISTS ");
+                try writer.writeAll(cmd.table);
+                if (cmd.columns.len > 0) {
+                    try writer.writeAll(" (");
+                    for (cmd.columns, 0..) |col, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writeExpr(writer, &col);
+                    }
+                    try writer.writeAll(")");
+                }
+            },
+            .drop => {
+                try writer.writeAll("DROP TABLE IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .alter => {
+                // ALTER TABLE ADD COLUMN
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                for (cmd.columns) |col| {
+                    try writer.writeAll(" ADD COLUMN ");
+                    try writeExpr(writer, &col);
+                }
+            },
+            .alter_drop => {
+                // ALTER TABLE DROP COLUMN
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                for (cmd.columns) |col| {
+                    try writer.writeAll(" DROP COLUMN ");
+                    try writeExpr(writer, &col);
+                }
+            },
+            .mod => {
+                // ALTER TABLE ALTER COLUMN TYPE
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                for (cmd.columns) |col| {
+                    try writer.writeAll(" ALTER COLUMN ");
+                    try writeExpr(writer, &col);
+                    try writer.writeAll(" TYPE ");
+                    if (col == .column_def) {
+                        try writer.writeAll(col.column_def.data_type);
+                    }
+                }
+            },
+            .index => {
+                // CREATE INDEX
+                if (cmd.index_def) |idx| {
+                    if (idx.unique) {
+                        try writer.writeAll("CREATE UNIQUE INDEX ");
+                    } else {
+                        try writer.writeAll("CREATE INDEX ");
+                    }
+                    try writer.writeAll(idx.name);
+                    try writer.writeAll(" ON ");
+                    try writer.writeAll(idx.table);
+                    try writer.writeAll(" (");
+                    for (idx.columns, 0..) |col, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writer.writeAll(col);
+                    }
+                    try writer.writeAll(")");
+                }
+            },
+            .drop_index => {
+                try writer.writeAll("DROP INDEX IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
             else => {},
         }
     }
@@ -426,6 +497,26 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             }
         },
         .literal => |val| try writeValue(writer, &val),
+        .column_def => |def| {
+            // Column definition for DDL: name TYPE [NOT NULL] [UNIQUE] [DEFAULT val]
+            try writer.writeAll(def.name);
+            try writer.writeAll(" ");
+            try writer.writeAll(def.data_type);
+            if (def.primary_key) {
+                try writer.writeAll(" PRIMARY KEY");
+            } else {
+                if (!def.nullable) {
+                    try writer.writeAll(" NOT NULL");
+                }
+                if (def.unique) {
+                    try writer.writeAll(" UNIQUE");
+                }
+            }
+            if (def.default_value) |dv| {
+                try writer.writeAll(" DEFAULT ");
+                try writer.writeAll(dv);
+            }
+        },
         else => {},
     }
 }

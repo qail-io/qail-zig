@@ -1,6 +1,6 @@
-//! QAIL Zig Native Benchmark
-//!
-//! Benchmarks AST → Wire Protocol encoding throughput
+// QAIL Zig Native Benchmark
+//
+// Benchmarks AST → Wire Protocol encoding throughput
 
 const std = @import("std");
 const qail = @import("qail");

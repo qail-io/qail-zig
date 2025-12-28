@@ -1,6 +1,6 @@
-//! JSON/JSONB Helpers
-//!
-//! PostgreSQL JSON and JSONB parsing utilities.
+// JSON/JSONB Helpers
+//
+// PostgreSQL JSON and JSONB parsing utilities.
 
 const std = @import("std");
 

@@ -1,6 +1,6 @@
-//! PostgreSQL Connection
-//!
-//! TCP socket connection to PostgreSQL server.
+// PostgreSQL Connection
+//
+// TCP socket connection to PostgreSQL server.
 
 const std = @import("std");
 const protocol = @import("../protocol/mod.zig");

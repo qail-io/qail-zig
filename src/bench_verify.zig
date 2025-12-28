@@ -1,5 +1,5 @@
-//! Verification Benchmark - Audits byte counts and message types
-//! Run: zig build verify
+// Verification Benchmark - Audits byte counts and message types
+// Run: zig build verify
 
 const std = @import("std");
 const driver = @import("driver/mod.zig");

@@ -1,7 +1,7 @@
-//! PostgreSQL Pipelining API
-//!
-//! High-performance pipelining methods for batch query execution.
-//! Matches qail-pg (Rust) pipelining feature set.
+// PostgreSQL Pipelining API
+//
+// High-performance pipelining methods for batch query execution.
+// Matches qail-pg (Rust) pipelining feature set.
 
 const std = @import("std");
 const ast = @import("../ast/mod.zig");

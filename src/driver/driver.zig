@@ -1,6 +1,6 @@
-//! PostgreSQL Driver
-//!
-//! Main driver struct for executing QAIL AST queries.
+// PostgreSQL Driver
+//
+// Main driver struct for executing QAIL AST queries.
 
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
@@ -185,6 +185,12 @@ pub const PgDriver = struct {
     pub fn rollback(self: *PgDriver) !void {
         const cmd = QailCmd.raw("ROLLBACK");
         _ = try self.execute(&cmd);
+    }
+
+    /// Execute raw SQL string (for migrations, DDL, etc.)
+    pub fn executeRaw(self: *PgDriver, sql: []const u8) !u64 {
+        const cmd = QailCmd.raw(sql);
+        return try self.execute(&cmd);
     }
 };
 

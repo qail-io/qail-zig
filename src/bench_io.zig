@@ -1,6 +1,6 @@
-//! QAIL-Zig PostgreSQL I/O Benchmark (FIXED v3)
-//!
-//! Properly waits for ALL responses by counting 'Z' (ReadyForQuery) messages.
+// QAIL-Zig PostgreSQL I/O Benchmark (FIXED v3)
+//
+// Properly waits for ALL responses by counting 'Z' (ReadyForQuery) messages.
 
 const std = @import("std");
 const qail = @import("qail.zig");

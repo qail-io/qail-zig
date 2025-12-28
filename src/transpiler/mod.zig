@@ -1,6 +1,6 @@
-//! Transpiler Module
-//!
-//! Converts QAIL AST to SQL for debugging and logging purposes.
+// Transpiler Module
+//
+// Converts QAIL AST to SQL for debugging and logging purposes.
 
 pub const postgres = @import("postgres.zig");
 

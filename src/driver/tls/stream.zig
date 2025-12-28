@@ -1,7 +1,7 @@
-//! TLS Stream Wrappers
-//!
-//! Wraps std.net.Stream to implement std.Io.Reader and std.Io.Writer
-//! interfaces required by std.crypto.tls.Client.
+// TLS Stream Wrappers
+//
+// Wraps std.net.Stream to implement std.Io.Reader and std.Io.Writer
+// interfaces required by std.crypto.tls.Client.
 
 const std = @import("std");
 const tls = std.crypto.tls;

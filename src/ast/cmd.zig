@@ -1,6 +1,6 @@
-//! QAIL Command - The primary query command structure
-//!
-//! Port of Rust qail-core/src/ast/cmd.rs
+// QAIL Command - The primary query command structure
+//
+// Port of Rust qail-core/src/ast/cmd.rs
 
 const std = @import("std");
 const expr = @import("expr.zig");
@@ -72,6 +72,9 @@ pub const CmdKind = enum {
     create_materialized_view, // CREATE MATERIALIZED VIEW
     refresh_materialized_view, // REFRESH MATERIALIZED VIEW
     drop_materialized_view, // DROP MATERIALIZED VIEW
+
+    // Raw SQL (for migrations, DDL, etc.)
+    raw, // Raw SQL string
 };
 
 /// Join type
@@ -231,6 +234,9 @@ pub const QailCmd = struct {
     channel: ?[]const u8 = null,
     payload: ?[]const u8 = null,
 
+    // Raw SQL (for migrations, DDL)
+    raw_sql: ?[]const u8 = null,
+
     // ==================== Static Constructors ====================
 
     /// Create a GET (SELECT) command
@@ -261,6 +267,11 @@ pub const QailCmd = struct {
     /// Create a TRUNCATE command
     pub fn truncate(table: []const u8) QailCmd {
         return .{ .kind = .truncate, .table = table };
+    }
+
+    /// Create a raw SQL command
+    pub fn raw(sql: []const u8) QailCmd {
+        return .{ .kind = .raw, .raw_sql = sql };
     }
 
     // ==================== Transaction Commands ====================

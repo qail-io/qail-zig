@@ -1,7 +1,7 @@
-//! QAIL Zig Multi-Connection Benchmark (Debug Version)
-//!
-//! Uses direct connections (no pool) with page_allocator for thread safety.
-//! Run: zig build multi
+// QAIL Zig Multi-Connection Benchmark (Debug Version)
+//
+// Uses direct connections (no pool) with page_allocator for thread safety.
+// Run: zig build multi
 
 const std = @import("std");
 const driver = @import("driver/mod.zig");

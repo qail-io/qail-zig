@@ -1,6 +1,6 @@
-//! PostgreSQL OID Types
-//!
-//! Maps PostgreSQL OIDs to Zig types.
+// PostgreSQL OID Types
+//
+// Maps PostgreSQL OIDs to Zig types.
 
 const std = @import("std");
 

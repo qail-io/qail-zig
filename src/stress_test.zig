@@ -1,6 +1,6 @@
-//! QAIL Zig Pipelined Stress Test
-//!
-//! Uses pipelining with prepared statements for maximum throughput
+// QAIL Zig Pipelined Stress Test
+//
+// Uses pipelining with prepared statements for maximum throughput
 
 const std = @import("std");
 const qail = @import("qail");

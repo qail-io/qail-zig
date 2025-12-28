@@ -1,7 +1,7 @@
-//! TLS Buffer Management
-//!
-//! Pre-allocated buffers for TLS records.
-//! std.crypto.tls.Client requires buffers of at least max_ciphertext_record_len.
+// TLS Buffer Management
+//
+// Pre-allocated buffers for TLS records.
+// std.crypto.tls.Client requires buffers of at least max_ciphertext_record_len.
 
 const std = @import("std");
 const tls = std.crypto.tls;

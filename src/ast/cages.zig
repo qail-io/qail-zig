@@ -1,8 +1,8 @@
-//! QAIL Cages - Constraint blocks for queries
-//!
-//! Port of Rust qail-core/src/ast/cages.rs
-//! Cages represent different types of query constraints:
-//! filters (WHERE), sorts (ORDER BY), limits, etc.
+// QAIL Cages - Constraint blocks for queries
+//
+// Port of Rust qail-core/src/ast/cages.rs
+// Cages represent different types of query constraints:
+// filters (WHERE), sorts (ORDER BY), limits, etc.
 
 const std = @import("std");
 const operators = @import("operators.zig");

@@ -1,6 +1,6 @@
-//! PostgreSQL Wire Protocol Constants and Message Types
-//!
-//! Reference: https://www.postgresql.org/docs/current/protocol-message-formats.html
+// PostgreSQL Wire Protocol Constants and Message Types
+//
+// Reference: https://www.postgresql.org/docs/current/protocol-message-formats.html
 
 const std = @import("std");
 

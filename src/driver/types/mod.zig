@@ -1,6 +1,6 @@
-//! PostgreSQL Types Module
-//!
-//! Re-exports all PostgreSQL type definitions.
+// PostgreSQL Types Module
+//
+// Re-exports all PostgreSQL type definitions.
 
 pub const uuid = @import("uuid.zig");
 pub const inet = @import("inet.zig");

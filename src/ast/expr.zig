@@ -1,6 +1,6 @@
-//! QAIL Expressions - Column references, functions, and computed values
-//!
-//! Port of Rust qail-core/src/ast/expr.rs
+// QAIL Expressions - Column references, functions, and computed values
+//
+// Port of Rust qail-core/src/ast/expr.rs
 
 const std = @import("std");
 const operators = @import("operators.zig");
@@ -84,6 +84,16 @@ pub const Expr = union(enum) {
         alias: ?[]const u8 = null,
     },
 
+    /// Column definition for DDL (name TYPE [constraints])
+    column_def: struct {
+        name: []const u8,
+        data_type: []const u8,
+        nullable: bool = true,
+        primary_key: bool = false,
+        unique: bool = false,
+        default_value: ?[]const u8 = null,
+    },
+
     // ==================== Builder Methods ====================
 
     /// Create a star expression (*)
@@ -149,6 +159,16 @@ pub const Expr = union(enum) {
     /// Create a parameter placeholder
     pub fn param(n: u16) Expr {
         return .{ .literal = .{ .param = n } };
+    }
+
+    /// Create a column definition for DDL
+    pub fn def(name: []const u8, data_type: []const u8) Expr {
+        return .{ .column_def = .{ .name = name, .data_type = data_type } };
+    }
+
+    /// Create a column definition with NOT NULL
+    pub fn defNotNull(name: []const u8, data_type: []const u8) Expr {
+        return .{ .column_def = .{ .name = name, .data_type = data_type, .nullable = false } };
     }
 };
 

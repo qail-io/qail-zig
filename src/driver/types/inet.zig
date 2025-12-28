@@ -1,6 +1,6 @@
-//! INET/CIDR Types
-//!
-//! PostgreSQL network address types support.
+// INET/CIDR Types
+//
+// PostgreSQL network address types support.
 
 const std = @import("std");
 

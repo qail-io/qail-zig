@@ -1,10 +1,10 @@
-//! QAIL Zig Pool Benchmark - Fair Comparison with Rust
-//!
-//! Uses PgPool with multiple threads for parallel query execution.
-//! PARSES RESPONSES like Rust's pipeline_prepared_ultra for fair comparison.
-//!
-//! Query: SELECT id, name FROM harbors LIMIT $1
-//! Run: zig build pool
+// QAIL Zig Pool Benchmark - Fair Comparison with Rust
+//
+// Uses PgPool with multiple threads for parallel query execution.
+// PARSES RESPONSES like Rust's pipeline_prepared_ultra for fair comparison.
+//
+// Query: SELECT id, name FROM harbors LIMIT $1
+// Run: zig build pool
 
 const std = @import("std");
 const driver = @import("driver/mod.zig");

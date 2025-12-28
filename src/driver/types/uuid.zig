@@ -1,6 +1,6 @@
-//! UUID Type
-//!
-//! PostgreSQL UUID type support with 16-byte binary and 36-byte hex formats.
+// UUID Type
+//
+// PostgreSQL UUID type support with 16-byte binary and 36-byte hex formats.
 
 const std = @import("std");
 

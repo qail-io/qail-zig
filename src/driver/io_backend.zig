@@ -1,10 +1,10 @@
-//! I/O Backend Auto-Detection
-//!
-//! Automatically selects the best I/O backend for the current platform:
-//! - Linux: io_uring (high-performance async)
-//! - macOS/Windows: sync (blocking I/O)
-//!
-//! This mirrors the Rust implementation in qail-pg's io_backend.rs
+// I/O Backend Auto-Detection
+//
+// Automatically selects the best I/O backend for the current platform:
+// - Linux: io_uring (high-performance async)
+// - macOS/Windows: sync (blocking I/O)
+//
+// This mirrors the Rust implementation in qail-pg's io_backend.rs
 
 const std = @import("std");
 const builtin = @import("builtin");

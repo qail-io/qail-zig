@@ -1,6 +1,6 @@
-//! QAIL Values - Literal values for queries
-//!
-//! Port of Rust qail-core/src/ast/values.rs
+// QAIL Values - Literal values for queries
+//
+// Port of Rust qail-core/src/ast/values.rs
 
 const std = @import("std");
 

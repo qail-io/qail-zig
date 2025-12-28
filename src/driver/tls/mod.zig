@@ -1,6 +1,6 @@
-//! TLS Module Index
-//!
-//! Re-exports all TLS submodules.
+// TLS Module Index
+//
+// Re-exports all TLS submodules.
 
 pub const stream = @import("stream.zig");
 pub const config = @import("config.zig");

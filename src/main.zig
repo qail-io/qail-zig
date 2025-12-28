@@ -1,7 +1,7 @@
-//! QAIL Zig Example - Pure Zig PostgreSQL Driver
-//!
-//! This demonstrates the AST-native query building approach.
-//! NO SQL STRINGS in the execution path - AST → Wire Protocol directly.
+// QAIL Zig Example - Pure Zig PostgreSQL Driver
+//
+// This demonstrates the AST-native query building approach.
+// NO SQL STRINGS in the execution path - AST → Wire Protocol directly.
 
 const std = @import("std");
 const qail = @import("qail");

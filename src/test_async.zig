@@ -1,6 +1,6 @@
-//! Async Connection Test
-//!
-//! Test the new AsyncConnection with timeout support.
+// Async Connection Test
+//
+// Test the new AsyncConnection with timeout support.
 
 const std = @import("std");
 const qail = @import("qail");

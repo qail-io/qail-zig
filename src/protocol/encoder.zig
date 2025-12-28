@@ -1,6 +1,6 @@
-//! PostgreSQL Protocol Encoder
-//!
-//! Encodes frontend messages to PostgreSQL wire format.
+// PostgreSQL Protocol Encoder
+//
+// Encodes frontend messages to PostgreSQL wire format.
 
 const std = @import("std");
 const wire = @import("wire.zig");

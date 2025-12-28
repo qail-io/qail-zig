@@ -1,6 +1,6 @@
-//! PostgreSQL Driver Module
-//!
-//! Async driver for PostgreSQL using the protocol layer.
+// PostgreSQL Driver Module
+//
+// Async driver for PostgreSQL using the protocol layer.
 
 pub const connection = @import("connection.zig");
 pub const async_connection = @import("async_connection.zig");

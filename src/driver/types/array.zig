@@ -1,6 +1,6 @@
-//! Array Iterator
-//!
-//! PostgreSQL array type parsing and iteration.
+// Array Iterator
+//
+// PostgreSQL array type parsing and iteration.
 
 const std = @import("std");
 

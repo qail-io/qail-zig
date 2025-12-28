@@ -1,6 +1,6 @@
-//! TLS Configuration
-//!
-//! Certificate and verification configuration for TLS connections.
+// TLS Configuration
+//
+// Certificate and verification configuration for TLS connections.
 
 const std = @import("std");
 const Certificate = std.crypto.Certificate;

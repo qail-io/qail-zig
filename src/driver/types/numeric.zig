@@ -1,6 +1,6 @@
-//! Numeric/Decimal Type
-//!
-//! PostgreSQL NUMERIC type with arbitrary precision.
+// Numeric/Decimal Type
+//
+// PostgreSQL NUMERIC type with arbitrary precision.
 
 const std = @import("std");
 

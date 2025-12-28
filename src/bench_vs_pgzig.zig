@@ -1,6 +1,6 @@
-//! QAIL-Zig vs pg.zig Benchmark
-//!
-//! Compares QAIL (Rust core via FFI) against native Zig pg.zig driver
+// QAIL-Zig vs pg.zig Benchmark
+//
+// Compares QAIL (Rust core via FFI) against native Zig pg.zig driver
 
 const std = @import("std");
 const pg = @import("pg_zig");

@@ -1,7 +1,7 @@
-//! PostgreSQL Wire Protocol Module
-//!
-//! This module implements the PostgreSQL wire protocol encoder/decoder.
-//! Pure Zig, no external dependencies.
+// PostgreSQL Wire Protocol Module
+//
+// This module implements the PostgreSQL wire protocol encoder/decoder.
+// Pure Zig, no external dependencies.
 
 pub const wire = @import("wire.zig");
 pub const encoder = @import("encoder.zig");

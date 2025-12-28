@@ -1,6 +1,6 @@
-//! QAIL Operators - Comparison and Binary operators
-//!
-//! Port of Rust qail-core/src/ast/operators.rs
+// QAIL Operators - Comparison and Binary operators
+//
+// Port of Rust qail-core/src/ast/operators.rs
 
 const std = @import("std");
 

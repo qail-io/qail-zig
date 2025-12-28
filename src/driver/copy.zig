@@ -1,7 +1,7 @@
-//! PostgreSQL COPY Protocol
-//!
-//! Bulk data operations using the PostgreSQL COPY protocol.
-//! Provides high-performance bulk insert and export.
+// PostgreSQL COPY Protocol
+//
+// Bulk data operations using the PostgreSQL COPY protocol.
+// Provides high-performance bulk insert and export.
 
 const std = @import("std");
 const Connection = @import("connection.zig").Connection;

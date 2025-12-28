@@ -1,7 +1,7 @@
-//! Async PostgreSQL Connection
-//!
-//! Non-blocking TCP connection with poll-based I/O and timeouts.
-//! Uses std.posix.poll for cross-platform async operations.
+// Async PostgreSQL Connection
+//
+// Non-blocking TCP connection with poll-based I/O and timeouts.
+// Uses std.posix.poll for cross-platform async operations.
 
 const std = @import("std");
 const posix = std.posix;

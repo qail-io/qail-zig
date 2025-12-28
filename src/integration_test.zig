@@ -1,6 +1,6 @@
-//! QAIL Zig Integration Test
-//!
-//! Tests against a real PostgreSQL database (swb-staging)
+// QAIL Zig Integration Test
+//
+// Tests against a real PostgreSQL database (swb-staging)
 
 const std = @import("std");
 const qail = @import("qail");

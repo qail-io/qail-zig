@@ -1,6 +1,6 @@
-//! QAIL-Zig vs pg.zig - 10 Million Pipeline Benchmark
-//!
-//! Tests pipeline/batch mode with 10M queries
+// QAIL-Zig vs pg.zig - 10 Million Pipeline Benchmark
+//
+// Tests pipeline/batch mode with 10M queries
 
 const std = @import("std");
 const pg = @import("pg_zig");

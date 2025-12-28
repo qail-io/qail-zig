@@ -1,8 +1,8 @@
-//! PostgreSQL Connection Pool
-//!
-//! Provides connection pooling for efficient resource management.
-//! Connections are reused to avoid reconnection overhead.
-//! Supports background reconnect thread and URI-based configuration.
+// PostgreSQL Connection Pool
+//
+// Provides connection pooling for efficient resource management.
+// Connections are reused to avoid reconnection overhead.
+// Supports background reconnect thread and URI-based configuration.
 
 const std = @import("std");
 const Connection = @import("connection.zig").Connection;
