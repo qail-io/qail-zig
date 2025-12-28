@@ -31,7 +31,8 @@ pub const MigrationCmd = struct {
     };
 
     /// Convert to QailCmd for AST-native execution (preferred method)
-    pub fn toQailCmd(self: *const MigrationCmd) @import("../ast/cmd.zig").QailCmd {
+    /// NOTE: caller must free returned cmd.columns if non-empty
+    pub fn toQailCmd(self: *const MigrationCmd, allocator: Allocator) !@import("../ast/cmd.zig").QailCmd {
         const QailCmd = @import("../ast/cmd.zig").QailCmd;
         const Expr = @import("../ast/expr.zig").Expr;
 
@@ -47,30 +48,33 @@ pub const MigrationCmd = struct {
             .drop_table => QailCmd.drop(self.table),
             .add_column => blk: {
                 if (self.column) |col| {
-                    // ALTER TABLE ADD COLUMN
+                    // ALTER TABLE ADD COLUMN - heap allocate columns
                     var cmd = QailCmd.alter(self.table);
-                    // Store column info for encoding
-                    const col_exprs = [_]Expr{Expr.def(col.name, col.typ)};
-                    cmd.columns = &col_exprs;
+                    const cols = try allocator.alloc(Expr, 1);
+                    cols[0] = Expr.def(col.name, col.typ);
+                    cmd.columns = cols;
                     break :blk cmd;
                 }
                 break :blk QailCmd.alter(self.table);
             },
             .drop_column => blk: {
                 if (self.column) |col| {
-                    // ALTER TABLE DROP COLUMN
+                    // ALTER TABLE DROP COLUMN - heap allocate columns
                     var cmd = QailCmd.alterDrop(self.table);
-                    const col_exprs = [_]Expr{Expr.col(col.name)};
-                    cmd.columns = &col_exprs;
+                    const cols = try allocator.alloc(Expr, 1);
+                    cols[0] = Expr.col(col.name);
+                    cmd.columns = cols;
                     break :blk cmd;
                 }
                 break :blk QailCmd.alterDrop(self.table);
             },
             .alter_column => blk: {
                 if (self.column) |col| {
+                    // ALTER TABLE ALTER COLUMN TYPE - heap allocate columns
                     var cmd = QailCmd.modify(self.table);
-                    const col_exprs = [_]Expr{Expr.def(col.name, col.typ)};
-                    cmd.columns = &col_exprs;
+                    const cols = try allocator.alloc(Expr, 1);
+                    cols[0] = Expr.def(col.name, col.typ);
+                    cmd.columns = cols;
                     break :blk cmd;
                 }
                 break :blk QailCmd.modify(self.table);

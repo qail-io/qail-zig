@@ -462,10 +462,13 @@ pub const AstEncoder = struct {
                 try writer.writeAll(cmd.table);
                 for (cmd.columns) |col| {
                     try writer.writeAll(" ALTER COLUMN ");
-                    try writeExpr(writer, &col);
-                    try writer.writeAll(" TYPE ");
+                    // Write column name only (not full def)
                     if (col == .column_def) {
+                        try writer.writeAll(col.column_def.name);
+                        try writer.writeAll(" TYPE ");
                         try writer.writeAll(col.column_def.data_type);
+                    } else if (col == .named) {
+                        try writer.writeAll(col.named);
                     }
                 }
             },

@@ -499,7 +499,11 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             var success = true;
             for (cmds.items) |migration_cmd| {
                 // Convert to AST command (no raw SQL!)
-                const qail_cmd = migration_cmd.toQailCmd();
+                const qail_cmd = migration_cmd.toQailCmd(allocator) catch |err| {
+                    print("Error converting migration: {}\n", .{err});
+                    success = false;
+                    break;
+                };
 
                 // Show what we're executing
                 const stmt_sql = migration_cmd.toSql(allocator) catch continue;
