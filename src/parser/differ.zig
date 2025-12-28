@@ -296,8 +296,8 @@ test "diff new table" {
     var cmds = try diffSchemas(allocator, &old, &new);
     defer cmds.deinit(allocator);
 
-    // Should have: create_table + 2 add_column
-    try std.testing.expectEqual(@as(usize, 3), cmds.items.len);
+    // New design: 1 create_table with full DDL (no separate add_column)
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
     try std.testing.expect(cmds.items[0].action == .create_table);
 }
 

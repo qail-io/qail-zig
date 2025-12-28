@@ -504,23 +504,37 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
         },
         .literal => |val| try writeValue(writer, &val),
         .column_def => |def| {
-            // Column definition for DDL: name TYPE [NOT NULL] [UNIQUE] [DEFAULT val]
+            const Constraint = @import("../ast/expr.zig").Constraint;
+            // Column definition for DDL: name TYPE [constraints]
             try writer.writeAll(def.name);
             try writer.writeAll(" ");
             try writer.writeAll(def.data_type);
-            if (def.primary_key) {
+
+            // Check constraints using helper methods
+            if (Constraint.hasPrimaryKey(def.constraints)) {
                 try writer.writeAll(" PRIMARY KEY");
             } else {
-                if (!def.nullable) {
+                // Default to NOT NULL unless Nullable constraint is present
+                if (!Constraint.hasNullable(def.constraints)) {
                     try writer.writeAll(" NOT NULL");
                 }
-                if (def.unique) {
+                if (Constraint.hasUnique(def.constraints)) {
                     try writer.writeAll(" UNIQUE");
                 }
             }
-            if (def.default_value) |dv| {
+
+            // Handle DEFAULT value
+            if (Constraint.getDefault(def.constraints)) |dv| {
                 try writer.writeAll(" DEFAULT ");
                 try writer.writeAll(dv);
+            }
+
+            // Handle REFERENCES
+            for (def.constraints) |c| {
+                if (c == .references) {
+                    try writer.writeAll(" REFERENCES ");
+                    try writer.writeAll(c.references);
+                }
             }
         },
         else => {},

@@ -85,13 +85,11 @@ pub const Expr = union(enum) {
     },
 
     /// Column definition for DDL (name TYPE [constraints])
+    /// Matches qail.rs Expr::Def structure
     column_def: struct {
         name: []const u8,
         data_type: []const u8,
-        nullable: bool = true,
-        primary_key: bool = false,
-        unique: bool = false,
-        default_value: ?[]const u8 = null,
+        constraints: []const Constraint = &.{},
     },
 
     // ==================== Builder Methods ====================
@@ -166,9 +164,61 @@ pub const Expr = union(enum) {
         return .{ .column_def = .{ .name = name, .data_type = data_type } };
     }
 
-    /// Create a column definition with NOT NULL
-    pub fn defNotNull(name: []const u8, data_type: []const u8) Expr {
-        return .{ .column_def = .{ .name = name, .data_type = data_type, .nullable = false } };
+    /// Create a column definition with constraints
+    pub fn defWithConstraints(name: []const u8, data_type: []const u8, constraints: []const Constraint) Expr {
+        return .{ .column_def = .{ .name = name, .data_type = data_type, .constraints = constraints } };
+    }
+};
+
+/// DDL constraint types (matches qail.rs Constraint enum)
+pub const Constraint = union(enum) {
+    /// PRIMARY KEY
+    primary_key,
+    /// NULL allowed (?)
+    nullable,
+    /// UNIQUE
+    unique,
+    /// NOT NULL (explicit)
+    not_null,
+    /// DEFAULT value
+    default: []const u8,
+    /// CHECK constraint with allowed values
+    check: []const []const u8,
+    /// REFERENCES table(column)
+    references: []const u8,
+    /// COMMENT ON COLUMN
+    comment: []const u8,
+
+    /// Check if constraint list contains primary_key
+    pub fn hasPrimaryKey(constraints: []const Constraint) bool {
+        for (constraints) |c| {
+            if (c == .primary_key) return true;
+        }
+        return false;
+    }
+
+    /// Check if constraint list contains nullable
+    pub fn hasNullable(constraints: []const Constraint) bool {
+        for (constraints) |c| {
+            if (c == .nullable) return true;
+        }
+        return false;
+    }
+
+    /// Check if constraint list contains unique
+    pub fn hasUnique(constraints: []const Constraint) bool {
+        for (constraints) |c| {
+            if (c == .unique) return true;
+        }
+        return false;
+    }
+
+    /// Get default value if present
+    pub fn getDefault(constraints: []const Constraint) ?[]const u8 {
+        for (constraints) |c| {
+            if (c == .default) return c.default;
+        }
+        return null;
     }
 };
 

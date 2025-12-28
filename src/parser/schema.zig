@@ -188,7 +188,12 @@ const Parser = struct {
             if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
                 self.pos += 1;
             } else if (self.pos + 1 < self.input.len and self.input[self.pos] == '-' and self.input[self.pos + 1] == '-') {
-                // Skip comment until end of line
+                // Skip -- comment until end of line
+                while (self.pos < self.input.len and self.input[self.pos] != '\n') {
+                    self.pos += 1;
+                }
+            } else if (c == '#') {
+                // Skip # comment until end of line
                 while (self.pos < self.input.len and self.input[self.pos] != '\n') {
                     self.pos += 1;
                 }
@@ -310,11 +315,11 @@ const Parser = struct {
     fn parseConstraints(self: *Parser) !ConstraintResult {
         var result = ConstraintResult{};
 
-        // Parse constraint keywords until we hit , or )
+        // Parse constraint keywords until we hit , or ) or } or newline
         while (true) {
             self.skipWhitespace();
             const c = self.current() orelse break;
-            if (c == ',' or c == ')') break;
+            if (c == ',' or c == ')' or c == '}' or c == '\n') break;
 
             if (self.matchKeyword("primary_key") or self.matchKeyword("primary")) {
                 _ = self.matchKeyword("key"); // optional "key" part
@@ -330,7 +335,7 @@ const Parser = struct {
                 const ref_start = self.pos;
                 // Parse table(column)
                 while (self.current()) |ch| {
-                    if (ch == ' ' or ch == '\t' or ch == ',' or ch == ')' or ch == '\n') break;
+                    if (ch == ' ' or ch == '\t' or ch == ',' or ch == ')' or ch == '}' or ch == '\n') break;
                     self.advance();
                 }
                 result.references = try self.allocator.dupe(u8, self.input[ref_start..self.pos]);
@@ -339,7 +344,7 @@ const Parser = struct {
                 const def_start = self.pos;
                 // Parse until space, comma, or paren
                 while (self.current()) |ch| {
-                    if (ch == ' ' or ch == '\t' or ch == ',' or ch == ')' or ch == '\n') break;
+                    if (ch == ' ' or ch == '\t' or ch == ',' or ch == ')' or ch == '}' or ch == '\n') break;
                     self.advance();
                 }
                 result.default_value = try self.allocator.dupe(u8, self.input[def_start..self.pos]);
@@ -358,7 +363,9 @@ const Parser = struct {
                 result.check = try self.allocator.dupe(u8, self.input[check_start..self.pos]);
                 self.advance(); // skip closing )
             } else {
-                // Unknown, skip character
+                // Unknown token - only skip if it's not a terminator
+                const ch = self.current() orelse break;
+                if (ch == '\n' or ch == ',' or ch == ')' or ch == '}') break;
                 self.advance();
             }
         }
@@ -394,22 +401,28 @@ const Parser = struct {
         const name = try self.parseIdentifier();
         var table = TableDef.init(self.allocator, name);
 
-        try self.expectChar('(');
+        // Support both () and {} for table definitions (like qail.rs uses {})
+        self.skipWhitespace();
+        const open_char = self.current() orelse return error.ExpectedOpenBrace;
+        const close_char: u8 = if (open_char == '{') '}' else if (open_char == '(') ')' else return error.ExpectedOpenBrace;
+        self.advance();
 
         while (true) {
-            self.skipWhitespace();
-            if (self.current() == ')') break;
+            self.skipWhitespace(); // Skips spaces, tabs, newlines, and comments
+            if (self.current() == close_char) break;
+            if (self.current() == null) break;
 
             const col = try self.parseColumn();
             try table.columns.append(self.allocator, col);
 
             self.skipWhitespace();
+            // Comma is optional (qail.rs doesn't require commas)
             if (self.current() == ',') {
                 self.advance();
             }
         }
 
-        try self.expectChar(')');
+        try self.expectChar(close_char);
         return table;
     }
 
