@@ -19,6 +19,7 @@ pub const prepared = @import("prepared.zig");
 pub const cursor = @import("cursor.zig");
 pub const io = @import("io.zig");
 pub const query = @import("query.zig");
+pub const metrics = @import("metrics.zig");
 
 // Re-export main types
 pub const Connection = connection.Connection;
@@ -40,6 +41,8 @@ pub const Cursor = cursor.Cursor;
 pub const IoBuffer = io.IoBuffer;
 pub const WriteBuffer = io.WriteBuffer;
 pub const StatementCache = query.StatementCache;
+pub const PoolMetrics = metrics.PoolMetrics;
+pub const QueryOpts = driver.QueryOpts;
 
 // COPY protocol functions
 pub const copyIn = copy.copyIn;

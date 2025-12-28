@@ -39,7 +39,6 @@ pub const QailServer = struct {
 
     /// Read a JSON-RPC message from stdin (Content-Length header format)
     fn readMessage(self: *QailServer) ![]u8 {
-        const posix = std.posix;
         var content_length: usize = 0;
 
         // Read headers line by line
@@ -48,7 +47,7 @@ pub const QailServer = struct {
 
         while (true) {
             var byte_buf: [1]u8 = undefined;
-            const n = posix.read(posix.STDIN_FILENO, &byte_buf) catch return error.ReadError;
+            const n = readStdin(&byte_buf) catch return error.ReadError;
             if (n == 0) return error.EndOfStream;
 
             const byte = byte_buf[0];
@@ -77,11 +76,22 @@ pub const QailServer = struct {
         const body = try self.allocator.alloc(u8, content_length);
         var total_read: usize = 0;
         while (total_read < content_length) {
-            const n = posix.read(posix.STDIN_FILENO, body[total_read..]) catch return error.ReadError;
+            const n = readStdin(body[total_read..]) catch return error.ReadError;
             if (n == 0) return error.EndOfStream;
             total_read += n;
         }
         return body;
+    }
+
+    /// Cross-platform stdin read helper
+    fn readStdin(buf: []u8) !usize {
+        const builtin = @import("builtin");
+        if (builtin.os.tag == .windows) {
+            // Windows: LSP not supported yet, return error
+            return error.UnsupportedPlatform;
+        } else {
+            return std.posix.read(std.posix.STDIN_FILENO, buf);
+        }
     }
 
     /// Handle incoming JSON-RPC message

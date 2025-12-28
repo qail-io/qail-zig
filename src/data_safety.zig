@@ -263,9 +263,18 @@ pub fn promptBackupOptions() BackupChoice {
     print("  [4] Cancel migration\n", .{});
     print("> ", .{});
 
-    // Read single line from stdin using posix
+    // Read single line from stdin (cross-platform)
     var buf: [16]u8 = undefined;
-    const bytes_read = std.posix.read(std.posix.STDIN_FILENO, &buf) catch return .cancel;
+    const bytes_read = blk: {
+        const builtin = @import("builtin");
+        if (builtin.os.tag == .windows) {
+            // Windows: use std.fs.cwd() based stdin (skip for now, return cancel)
+            break :blk @as(usize, 0);
+        } else {
+            // Unix: use posix
+            break :blk std.posix.read(std.posix.STDIN_FILENO, &buf) catch break :blk @as(usize, 0);
+        }
+    };
     if (bytes_read == 0) return .cancel;
 
     const trimmed = std.mem.trim(u8, buf[0..bytes_read], " \t\r\n");

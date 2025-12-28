@@ -16,6 +16,16 @@ const FieldDescription = protocol.wire.FieldDescription;
 const Connection = conn_mod.Connection;
 const PgRow = row_mod.PgRow;
 
+/// Query options for per-query configuration
+pub const QueryOpts = struct {
+    /// Timeout in milliseconds (null = no timeout)
+    timeout_ms: ?u32 = null,
+    /// Whether to populate column names in results
+    column_names: bool = true,
+    /// Custom allocator for this query (null = use driver allocator)
+    allocator: ?std.mem.Allocator = null,
+};
+
 /// PostgreSQL driver - executes QAIL AST queries
 pub const PgDriver = struct {
     conn: Connection,

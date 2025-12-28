@@ -288,6 +288,39 @@ pub const PgPool = struct {
         return self.active_count;
     }
 
+    // ==================== Convenience Methods (AST-Native) ====================
+
+    /// Execute a QAIL command (acquire, execute, release)
+    /// Returns affected row count
+    pub fn exec(self: *PgPool, cmd: *const @import("../ast/mod.zig").QailCmd) !u64 {
+        var pooled = try self.acquire();
+        defer pooled.release();
+
+        const driver_mod = @import("driver.zig");
+        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
+        return try driver.execute(cmd);
+    }
+
+    /// Fetch all rows for a QAIL command (acquire, fetch, release)
+    pub fn fetchAll(self: *PgPool, cmd: *const @import("../ast/mod.zig").QailCmd) ![]@import("row.zig").PgRow {
+        var pooled = try self.acquire();
+        defer pooled.release();
+
+        const driver_mod = @import("driver.zig");
+        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
+        return try driver.fetchAll(cmd);
+    }
+
+    /// Fetch one row for a QAIL command (acquire, fetch, release)
+    pub fn fetchOne(self: *PgPool, cmd: *const @import("../ast/mod.zig").QailCmd) !?@import("row.zig").PgRow {
+        var pooled = try self.acquire();
+        defer pooled.release();
+
+        const driver_mod = @import("driver.zig");
+        var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
+        return try driver.fetchOne(cmd);
+    }
+
     /// Create a new connection using pool config
     fn createConnection(self: *PgPool) !Connection {
         var conn = try Connection.connect(

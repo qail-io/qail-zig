@@ -102,6 +102,34 @@ pub const PgRow = struct {
     pub fn getBool(self: *const PgRow, index: usize) ?bool {
         return self.get(bool, index);
     }
+
+    /// Map row to struct T using comptime field inspection (AST-native)
+    /// Usage: const user = row.to(User) catch null;
+    pub fn to(self: *const PgRow, comptime T: type) !T {
+        const info = @typeInfo(T);
+        if (info != .@"struct") {
+            @compileError("mapper requires a struct type, got: " ++ @typeName(T));
+        }
+
+        var result: T = undefined;
+        inline for (info.@"struct".fields) |field| {
+            const value = self.getCol(field.type, field.name);
+            if (value) |v| {
+                @field(result, field.name) = v;
+            } else if (field.default_value_ptr) |default_ptr| {
+                const typed_ptr: *const field.type = @ptrCast(@alignCast(default_ptr));
+                @field(result, field.name) = typed_ptr.*;
+            } else {
+                return error.MissingField;
+            }
+        }
+        return result;
+    }
+
+    /// Map row to optional struct T (returns null on any missing field)
+    pub fn toOrNull(self: *const PgRow, comptime T: type) ?T {
+        return self.to(T) catch null;
+    }
 };
 
 // Tests
@@ -143,4 +171,23 @@ test "pgrow getInt32" {
     };
 
     try std.testing.expectEqual(@as(i32, 42), row.getInt32(0).?);
+}
+
+test "pgrow to struct" {
+    const User = struct {
+        id: i32,
+        name: []const u8,
+    };
+
+    const columns = [_]?[]const u8{ "123", "Alice" };
+    const names = [_][]const u8{ "id", "name" };
+    const row = PgRow{
+        .columns = @constCast(&columns),
+        .field_names = &names,
+        .allocator = std.testing.allocator,
+    };
+
+    const user = try row.to(User);
+    try std.testing.expectEqual(@as(i32, 123), user.id);
+    try std.testing.expectEqualStrings("Alice", user.name);
 }

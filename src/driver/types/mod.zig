@@ -8,6 +8,7 @@ pub const numeric = @import("numeric.zig");
 pub const timestamp = @import("timestamp.zig");
 pub const json = @import("json.zig");
 pub const array = @import("array.zig");
+pub const macaddr = @import("macaddr.zig");
 
 // Re-export main types
 pub const Uuid = uuid.Uuid;
@@ -17,6 +18,8 @@ pub const Numeric = numeric.Numeric;
 pub const Sign = numeric.Sign;
 pub const Timestamp = timestamp.Timestamp;
 pub const ArrayIterator = array.ArrayIterator;
+pub const MacAddr = macaddr.MacAddr;
+pub const MacAddr8 = macaddr.MacAddr8;
 
 // JSON helpers
 pub const parseJson = json.parseJson;
