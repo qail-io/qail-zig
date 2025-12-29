@@ -97,8 +97,25 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
         }
     }
 
-    try writer.writeAll(" FROM ");
+    // FROM with optional ONLY (inheritance control)
+    if (cmd.only_table) {
+        try writer.writeAll(" FROM ONLY ");
+    } else {
+        try writer.writeAll(" FROM ");
+    }
     try writer.writeAll(cmd.table);
+
+    // TABLESAMPLE
+    if (cmd.sample_method) |method| {
+        try writer.print(" TABLESAMPLE {s}(", .{method.toSql()});
+        if (cmd.sample_percent) |pct| {
+            try writer.print("{d}", .{pct});
+        }
+        try writer.writeAll(")");
+        if (cmd.sample_seed) |seed| {
+            try writer.print(" REPEATABLE({d})", .{seed});
+        }
+    }
 
     if (cmd.table_alias) |alias| {
         try writer.writeAll(" AS ");
@@ -174,14 +191,28 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
         try writer.print(" OFFSET {d}", .{offset});
     }
 
-    // FOR UPDATE
-    if (cmd.for_update) {
-        try writer.writeAll(" FOR UPDATE");
+    // FETCH (SQL standard alternative to LIMIT)
+    if (cmd.fetch_count) |count| {
+        if (cmd.fetch_with_ties) {
+            try writer.print(" FETCH FIRST {d} ROWS WITH TIES", .{count});
+        } else {
+            try writer.print(" FETCH FIRST {d} ROWS ONLY", .{count});
+        }
+    }
+
+    // FOR UPDATE/SHARE (row locking)
+    if (cmd.lock_mode) |lock| {
+        try writer.print(" {s}", .{lock.toSql()});
     }
 }
 
 fn writeUpdate(writer: anytype, cmd: *const QailCmd) !void {
-    try writer.writeAll("UPDATE ");
+    // UPDATE with optional ONLY
+    if (cmd.only_table) {
+        try writer.writeAll("UPDATE ONLY ");
+    } else {
+        try writer.writeAll("UPDATE ");
+    }
     try writer.writeAll(cmd.table);
     try writer.writeAll(" SET ");
 
@@ -214,7 +245,12 @@ fn writeUpdate(writer: anytype, cmd: *const QailCmd) !void {
 }
 
 fn writeDelete(writer: anytype, cmd: *const QailCmd) !void {
-    try writer.writeAll("DELETE FROM ");
+    // DELETE with optional ONLY
+    if (cmd.only_table) {
+        try writer.writeAll("DELETE FROM ONLY ");
+    } else {
+        try writer.writeAll("DELETE FROM ");
+    }
     try writer.writeAll(cmd.table);
 
     if (cmd.where_clauses.len > 0) {
@@ -242,13 +278,26 @@ fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
     try writer.writeAll("INSERT INTO ");
     try writer.writeAll(cmd.table);
 
-    if (cmd.assignments.len > 0) {
+    // Column list (if not using DEFAULT VALUES)
+    if (!cmd.default_values and cmd.assignments.len > 0) {
         try writer.writeAll(" (");
         for (cmd.assignments, 0..) |assign, i| {
             if (i > 0) try writer.writeAll(", ");
             try writer.writeAll(assign.column);
         }
-        try writer.writeAll(") VALUES (");
+        try writer.writeAll(")");
+    }
+
+    // OVERRIDING clause
+    if (cmd.overriding) |ovr| {
+        try writer.print(" {s}", .{ovr.toSql()});
+    }
+
+    // DEFAULT VALUES or VALUES
+    if (cmd.default_values) {
+        try writer.writeAll(" DEFAULT VALUES");
+    } else if (cmd.assignments.len > 0) {
+        try writer.writeAll(" VALUES (");
         for (cmd.assignments, 0..) |assign, i| {
             if (i > 0) try writer.writeAll(", ");
             try writeValue(writer, &assign.value);
@@ -270,8 +319,8 @@ fn writeTruncate(writer: anytype, cmd: *const QailCmd) !void {
     try writer.writeAll(cmd.table);
 }
 
-fn writeExpr(writer: anytype, expr: *const Expr) !void {
-    switch (expr.*) {
+fn writeExpr(writer: anytype, ex: *const Expr) !void {
+    switch (ex.*) {
         .star => try writer.writeAll("*"),
         .named => |name| try writer.writeAll(name),
         .aliased => |a| {
@@ -291,6 +340,56 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             }
         },
         .literal => |val| try writeValue(writer, &val),
+        .func_call => |fc| {
+            try writer.writeAll(fc.name);
+            try writer.writeAll("(");
+            for (fc.args, 0..) |arg, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExpr(writer, &arg);
+            }
+            try writer.writeAll(")");
+            if (fc.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .coalesce => |c| {
+            try writer.writeAll("COALESCE(");
+            for (c.exprs, 0..) |ex_inner, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExpr(writer, &ex_inner);
+            }
+            try writer.writeAll(")");
+            if (c.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .cast => |c| {
+            try writeExpr(writer, c.expr);
+            try writer.writeAll("::");
+            try writer.writeAll(c.target_type);
+            if (c.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .json_access => |ja| {
+            try writer.writeAll(ja.column);
+            for (ja.path) |seg| {
+                if (seg.as_text) {
+                    try writer.writeAll("->>'");
+                } else {
+                    try writer.writeAll("->'");
+                }
+                try writer.writeAll(seg.key);
+                try writer.writeAll("'");
+            }
+            if (ja.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
         else => {},
     }
 }

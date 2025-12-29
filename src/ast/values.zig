@@ -57,6 +57,10 @@ pub const Value = union(enum) {
     interval: struct { amount: i64, unit: IntervalUnit },
     /// Timestamp value (ISO format string)
     timestamp: []const u8,
+    /// Range for BETWEEN conditions
+    range: struct { low: i64, high: i64 },
+    /// Explicit null value variant (for isNull conditions)
+    null_val,
 
     /// Format value for SQL output
     pub fn format(self: Value, writer: anytype) !void {
@@ -98,6 +102,8 @@ pub const Value = union(enum) {
             .uuid => |u| try writer.print("'{s}'", .{u}),
             .interval => |iv| try writer.print("INTERVAL '{d} {s}'", .{ iv.amount, iv.unit.toSql() }),
             .timestamp => |ts| try writer.print("'{s}'", .{ts}),
+            .range => |r| try writer.print("{d} AND {d}", .{ r.low, r.high }),
+            .null_val => try writer.writeAll("NULL"),
         }
     }
 

@@ -126,6 +126,25 @@ pub fn build(b: *std.Build) void {
     const integration_step = b.step("integration", "Run integration test");
     integration_step.dependOn(&run_integration.step);
 
+    // ==================== Pipeline Test Executable ====================
+    const pipeline_test = b.addExecutable(.{
+        .name = "qail-pipeline-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pipeline_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(pipeline_test);
+
+    const run_pipeline_test = b.addRunArtifact(pipeline_test);
+    run_pipeline_test.step.dependOn(b.getInstallStep());
+    const pipeline_test_step = b.step("pipeline-test", "Run pipeline test (real DB)");
+    pipeline_test_step.dependOn(&run_pipeline_test.step);
+
     // ==================== Stress Test Executable ====================
     const stress = b.addExecutable(.{
         .name = "qail-stress",

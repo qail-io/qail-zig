@@ -202,6 +202,65 @@ pub const Expr = union(enum) {
     pub fn defWithConstraints(name: []const u8, data_type: []const u8, constraints: []const Constraint) Expr {
         return .{ .column_def = .{ .name = name, .data_type = data_type, .constraints = constraints } };
     }
+
+    // ==================== Fluent Methods (match Rust col().upper() API) ====================
+
+    /// UPPER(expr) - convert to uppercase
+    pub fn upper(self: Expr) Expr {
+        return .{ .func_call = .{ .name = "UPPER", .args = &[_]Expr{self} } };
+    }
+
+    /// LOWER(expr) - convert to lowercase
+    pub fn lower(self: Expr) Expr {
+        return .{ .func_call = .{ .name = "LOWER", .args = &[_]Expr{self} } };
+    }
+
+    /// TRIM(expr) - remove leading/trailing whitespace
+    pub fn trim(self: Expr) Expr {
+        return .{ .func_call = .{ .name = "TRIM", .args = &[_]Expr{self} } };
+    }
+
+    /// LENGTH(expr) - get string length
+    pub fn length(self: Expr) Expr {
+        return .{ .func_call = .{ .name = "LENGTH", .args = &[_]Expr{self} } };
+    }
+
+    /// ABS(expr) - absolute value
+    pub fn absVal(self: Expr) Expr {
+        return .{ .func_call = .{ .name = "ABS", .args = &[_]Expr{self} } };
+    }
+
+    /// CAST expr AS type (expr::type in Postgres)
+    pub fn castTo(self: *const Expr, target_type: []const u8) Expr {
+        return .{ .cast = .{ .expr = self, .target_type = target_type } };
+    }
+
+    /// Add alias to expression (AS alias)
+    pub fn withAlias(self: Expr, alias_name: []const u8) Expr {
+        return switch (self) {
+            .named => |n| .{ .aliased = .{ .name = n, .alias = alias_name } },
+            .aggregate => |a| .{ .aggregate = .{ .func = a.func, .column = a.column, .distinct = a.distinct, .alias = alias_name } },
+            .func_call => |f| .{ .func_call = .{ .name = f.name, .args = f.args, .alias = alias_name } },
+            .coalesce => |c| .{ .coalesce = .{ .exprs = c.exprs, .alias = alias_name } },
+            .cast => |c| .{ .cast = .{ .expr = c.expr, .target_type = c.target_type, .alias = alias_name } },
+            .case_expr => |c| .{ .case_expr = .{ .when_clauses = c.when_clauses, .else_value = c.else_value, .alias = alias_name } },
+            else => self, // Can't alias other types
+        };
+    }
+
+    /// COALESCE(expr, default) - return first non-null value
+    pub fn orDefault(self: *const Expr, default_expr: Expr) Expr {
+        return .{ .coalesce = .{ .exprs = &[_]Expr{ self.*, default_expr } } };
+    }
+
+    /// JSON accessor (data->>'key')
+    pub fn jsonText(self: Expr, key: []const u8) Expr {
+        const col_name = switch (self) {
+            .named => |n| n,
+            else => "",
+        };
+        return .{ .json_access = .{ .column = col_name, .path = &[_]JsonPathSegment{.{ .key = key, .as_text = true }} } };
+    }
 };
 
 /// DDL constraint types (matches qail.rs Constraint enum)

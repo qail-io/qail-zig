@@ -21,6 +21,10 @@ pub const Value = ast.Value;
 pub const PgDriver = driver.PgDriver;
 pub const PgRow = driver.PgRow;
 
+// Re-export builders for convenience
+pub const builders = ast.builders;
+pub const cmd = ast.cmd;
+
 test {
     @import("std").testing.refAllDecls(@This());
 }

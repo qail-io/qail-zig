@@ -308,9 +308,9 @@ pub const AstEncoder = struct {
                     try writer.print(" OFFSET {d}", .{offset});
                 }
 
-                // FOR UPDATE
-                if (cmd.for_update) {
-                    try writer.writeAll(" FOR UPDATE");
+                // FOR UPDATE/SHARE (row locking)
+                if (cmd.lock_mode) |lock| {
+                    try writer.print(" {s}", .{lock.toSql()});
                 }
             },
             .set => {

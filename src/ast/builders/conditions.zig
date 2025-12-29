@@ -3,24 +3,21 @@
 //! Port of qail.rs/qail-core/src/ast/builders/conditions.rs
 
 const std = @import("std");
-const Expr = @import("../expr.zig").Expr;
+const expr = @import("../expr.zig");
 const values = @import("../values.zig");
 const operators = @import("../operators.zig");
 
+const Expr = expr.Expr;
 const Value = values.Value;
 const Operator = operators.Operator;
 
-/// A filter condition for WHERE clauses
-pub const Condition = struct {
-    left: Expr,
-    op: Operator,
-    value: Value,
-};
+// Re-export Condition from expr.zig to avoid type mismatch
+pub const Condition = expr.Condition;
 
 /// Helper to create a condition
 fn makeCondition(column: []const u8, op: Operator, value: Value) Condition {
     return .{
-        .left = .{ .named = column },
+        .column = column,
         .op = op,
         .value = value,
     };
@@ -78,6 +75,86 @@ pub fn isNotNull(column: []const u8) Condition {
 /// Create a LIKE condition (column LIKE pattern)
 pub fn like(column: []const u8, pattern: []const u8) Condition {
     return makeCondition(column, .like, .{ .string = pattern });
+}
+
+/// Create a NOT LIKE condition (column NOT LIKE pattern)
+pub fn notLike(column: []const u8, pattern: []const u8) Condition {
+    return makeCondition(column, .not_like, .{ .string = pattern });
+}
+
+/// Create an ILIKE condition (case-insensitive LIKE)
+pub fn ilike(column: []const u8, pattern: []const u8) Condition {
+    return makeCondition(column, .ilike, .{ .string = pattern });
+}
+
+/// Create a NOT ILIKE condition
+pub fn notIlike(column: []const u8, pattern: []const u8) Condition {
+    return makeCondition(column, .not_ilike, .{ .string = pattern });
+}
+
+/// Create a regex match condition (column ~ pattern)
+pub fn regex(column: []const u8, pattern: []const u8) Condition {
+    return makeCondition(column, .regex, .{ .string = pattern });
+}
+
+/// Create a case-insensitive regex condition (column ~* pattern)
+pub fn regexI(column: []const u8, pattern: []const u8) Condition {
+    return makeCondition(column, .regex_i, .{ .string = pattern });
+}
+
+/// Create a SIMILAR TO condition
+pub fn similarTo(column: []const u8, pattern: []const u8) Condition {
+    return makeCondition(column, .similar_to, .{ .string = pattern });
+}
+
+/// Create a BETWEEN condition (column BETWEEN low AND high)
+pub fn between(column: []const u8, low: i64, high: i64) Condition {
+    return .{
+        .left = .{ .named = column },
+        .op = .between,
+        .value = .{ .range = .{ .low = low, .high = high } },
+    };
+}
+
+/// Create a NOT BETWEEN condition
+pub fn notBetween(column: []const u8, low: i64, high: i64) Condition {
+    return .{
+        .left = .{ .named = column },
+        .op = .not_between,
+        .value = .{ .range = .{ .low = low, .high = high } },
+    };
+}
+
+/// Create a NOT IN condition (column NOT IN (values))
+pub fn notIn(column: []const u8, vals: []const Value) Condition {
+    return .{
+        .left = .{ .named = column },
+        .op = .not_in,
+        .value = .{ .array = vals },
+    };
+}
+
+/// Create an array contains condition (column @> array)
+pub fn contains(column: []const u8, vals: []const Value) Condition {
+    return .{
+        .left = .{ .named = column },
+        .op = .contains,
+        .value = .{ .array = vals },
+    };
+}
+
+/// Create an array overlaps condition (column && array)
+pub fn overlaps(column: []const u8, vals: []const Value) Condition {
+    return .{
+        .left = .{ .named = column },
+        .op = .overlaps,
+        .value = .{ .array = vals },
+    };
+}
+
+/// Create a JSON key exists condition (column ? key)
+pub fn keyExists(column: []const u8, key: []const u8) Condition {
+    return makeCondition(column, .key_exists, .{ .string = key });
 }
 
 test "eq creates equality condition" {
