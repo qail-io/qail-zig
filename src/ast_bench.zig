@@ -234,7 +234,7 @@ fn transpileOnly6(alloc: std.mem.Allocator) usize {
 }
 
 pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.heap.page_allocator;
 
     std.debug.print("\n", .{});
     std.debug.print("╔═══════════════════════════════════════════════════════╗\n", .{});
