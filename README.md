@@ -7,6 +7,12 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.4.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.4.0)
 
+> ⚠️ **Status: Deferred** — This repository is paused until Zig stabilizes its I/O standard library (expected in Zig **0.16**). The current `std.io` has known instability issues that make production-grade networking unreliable. Rather than building on an unstable foundation and rewriting when the API breaks, we're waiting for the stable interface.
+>
+> **What's done:** ~15,400 lines of pure Zig covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, and LSP — all at ~85% feature parity with [qail.rs](https://github.com/qail-io/qail). When `std.io` stabilizes, wiring up I/O to the existing modules is a matter of days, not months.
+>
+> **Active development continues on [qail.rs](https://github.com/qail-io/qail)** (Rust), which serves as the production implementation and battle-tested reference.
+
 > 🚀 **1M+ queries/second** pooled, **316K** single connection - Pure Zig, zero FFI, zero GC
 
 ## Highlights
