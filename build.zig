@@ -183,6 +183,25 @@ pub fn build(b: *std.Build) void {
     const fair_step = b.step("fair", "Run fair Rust-matching benchmark");
     fair_step.dependOn(&run_fair.step);
 
+    // ==================== AST Bench Executable ====================
+    const ast_bench = b.addExecutable(.{
+        .name = "ast_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ast_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(ast_bench);
+
+    const run_ast_bench = b.addRunArtifact(ast_bench);
+    run_ast_bench.step.dependOn(b.getInstallStep());
+    const ast_bench_step = b.step("ast-bench", "Run AST build + transpile benchmark (vs Rust)");
+    ast_bench_step.dependOn(&run_ast_bench.step);
+
     // ==================== Pool Benchmark Executable ====================
     const pool_bench = b.addExecutable(.{
         .name = "qail-pool",

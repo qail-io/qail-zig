@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../qail.rs"
+		},
+		{
+			"path": "../qail-web"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {}
+}

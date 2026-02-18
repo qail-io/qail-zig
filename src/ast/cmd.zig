@@ -22,13 +22,15 @@ pub const CmdKind = enum {
     del, // DELETE
     add, // INSERT
     put, // UPSERT (INSERT ON CONFLICT)
+    cnt, // COUNT
 
     // Schema operations (DDL)
     make, // CREATE TABLE
     drop, // DROP TABLE
-    mod, // ALTER TABLE (general modification)
+    @"mod", // ALTER TABLE (general modification)
     alter, // ALTER TABLE ADD COLUMN
     alter_drop, // ALTER TABLE DROP COLUMN
+    alter_type, // ALTER TABLE ALTER COLUMN TYPE
     drop_col, // DROP COLUMN
     rename_col, // RENAME COLUMN
     truncate, // TRUNCATE TABLE
@@ -38,12 +40,55 @@ pub const CmdKind = enum {
     drop_index, // DROP INDEX
 
     // Advanced query features
-    over, // Window functions
+    over, // Window functions / UPSERT
     with, // CTE (Common Table Expression)
     json_table, // JSON_TABLE
 
+    // View operations
+    create_view, // CREATE VIEW
+    drop_view, // DROP VIEW
+
+    // Materialized views
+    create_materialized_view, // CREATE MATERIALIZED VIEW
+    refresh_materialized_view, // REFRESH MATERIALIZED VIEW
+    drop_materialized_view, // DROP MATERIALIZED VIEW
+
+    // Function/Trigger operations
+    create_function, // CREATE FUNCTION
+    drop_function, // DROP FUNCTION
+    create_trigger, // CREATE TRIGGER
+    drop_trigger, // DROP TRIGGER
+
+    // Extension operations
+    create_extension, // CREATE EXTENSION
+    drop_extension, // DROP EXTENSION
+
+    // Sequence operations
+    create_sequence, // CREATE SEQUENCE
+    drop_sequence, // DROP SEQUENCE
+
+    // Enum type operations
+    create_enum, // CREATE TYPE ... AS ENUM
+    drop_enum, // DROP TYPE
+    alter_enum_add_value, // ALTER TYPE ... ADD VALUE
+
+    // Column-level ALTER operations
+    alter_set_not_null, // ALTER COLUMN SET NOT NULL
+    alter_drop_not_null, // ALTER COLUMN DROP NOT NULL
+    alter_set_default, // ALTER COLUMN SET DEFAULT
+    alter_drop_default, // ALTER COLUMN DROP DEFAULT
+
+    // RLS operations
+    alter_enable_rls, // ALTER TABLE ENABLE ROW LEVEL SECURITY
+    alter_disable_rls, // ALTER TABLE DISABLE ROW LEVEL SECURITY
+    alter_force_rls, // ALTER TABLE FORCE ROW LEVEL SECURITY
+    alter_no_force_rls, // ALTER TABLE NO FORCE ROW LEVEL SECURITY
+
+    // Comment
+    comment_on, // COMMENT ON
+
     // Codegen
-    gen, // Generate Rust struct from table schema
+    gen, // Generate struct from table schema
 
     // Transaction control
     begin, // BEGIN TRANSACTION
@@ -68,10 +113,21 @@ pub const CmdKind = enum {
     // Table operations
     lock_table, // LOCK TABLE
 
-    // Materialized views
-    create_materialized_view, // CREATE MATERIALIZED VIEW
-    refresh_materialized_view, // REFRESH MATERIALIZED VIEW
-    drop_materialized_view, // DROP MATERIALIZED VIEW
+    // Search & vector
+    search, // Full-text or vector search
+    upsert, // INSERT ... ON CONFLICT DO UPDATE
+    scroll, // Cursor-based scrolling
+
+    // Vector database (Qdrant)
+    create_collection, // Create vector collection
+    delete_collection, // Delete vector collection
+
+    // Session & procedural commands
+    call, // CALL procedure
+    do_block, // DO anonymous block
+    session_set, // SET session variable
+    session_show, // SHOW session variable
+    session_reset, // RESET session variable
 
     // Raw SQL (for migrations, DDL, etc.)
     raw, // Raw SQL string
@@ -262,7 +318,35 @@ pub const QailCmd = struct {
     // ONLY - select/update/delete without child tables (inheritance)
     only_table: bool = false,
 
-    // ==================== Static Constructors ====================
+    // ==================== DML Extensions ====================
+
+    // INSERT ... SELECT source query
+    source_query_sql: ?[]const u8 = null,
+
+    // UPDATE ... FROM additional tables
+    from_tables: []const []const u8 = &.{},
+
+    // DELETE ... USING additional tables
+    using_tables: []const []const u8 = &.{},
+
+    // ==================== Vector Database (Qdrant) ====================
+
+    /// Search vector for similarity queries
+    vector: ?[]const f32 = null,
+    /// Minimum score threshold
+    score_threshold: ?f32 = null,
+    /// Named vector in multi-vector collections
+    vector_name: ?[]const u8 = null,
+    /// Include vector data in results
+    with_vector: bool = false,
+    /// Vector dimensionality
+    vector_size: ?u64 = null,
+    /// Distance metric
+    distance: ?operators.Distance = null,
+    /// Store vectors on disk
+    on_disk: ?bool = null,
+
+    // ==================== Static Constructors ======================================
 
     /// Create a GET (SELECT) command
     pub fn get(table: []const u8) QailCmd {
@@ -368,6 +452,71 @@ pub const QailCmd = struct {
     /// DROP INDEX
     pub fn dropIndex(index_name: []const u8) QailCmd {
         return .{ .kind = .drop_index, .table = index_name };
+    }
+
+    /// CREATE VIEW
+    pub fn createView(name: []const u8) QailCmd {
+        return .{ .kind = .create_view, .table = name };
+    }
+
+    /// DROP VIEW
+    pub fn dropView(name: []const u8) QailCmd {
+        return .{ .kind = .drop_view, .table = name };
+    }
+
+    /// CREATE FUNCTION
+    pub fn createFunction(name: []const u8) QailCmd {
+        return .{ .kind = .create_function, .table = name };
+    }
+
+    /// DROP FUNCTION
+    pub fn dropFunction(name: []const u8) QailCmd {
+        return .{ .kind = .drop_function, .table = name };
+    }
+
+    /// CREATE TRIGGER
+    pub fn createTrigger(name: []const u8) QailCmd {
+        return .{ .kind = .create_trigger, .table = name };
+    }
+
+    /// DROP TRIGGER
+    pub fn dropTrigger(name: []const u8) QailCmd {
+        return .{ .kind = .drop_trigger, .table = name };
+    }
+
+    /// CREATE EXTENSION
+    pub fn createExtension(name: []const u8) QailCmd {
+        return .{ .kind = .create_extension, .table = name };
+    }
+
+    /// DROP EXTENSION
+    pub fn dropExtension(name: []const u8) QailCmd {
+        return .{ .kind = .drop_extension, .table = name };
+    }
+
+    /// COMMENT ON
+    pub fn commentOn(target: []const u8) QailCmd {
+        return .{ .kind = .comment_on, .table = target };
+    }
+
+    /// CALL procedure
+    pub fn callProc(name: []const u8) QailCmd {
+        return .{ .kind = .call, .table = name };
+    }
+
+    /// SET session variable
+    pub fn sessionSet(name: []const u8) QailCmd {
+        return .{ .kind = .session_set, .table = name };
+    }
+
+    /// SHOW session variable
+    pub fn sessionShow(name: []const u8) QailCmd {
+        return .{ .kind = .session_show, .table = name };
+    }
+
+    /// RESET session variable
+    pub fn sessionReset(name: []const u8) QailCmd {
+        return .{ .kind = .session_reset, .table = name };
     }
 
     /// ALTER TABLE ADD COLUMN

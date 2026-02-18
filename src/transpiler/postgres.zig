@@ -465,3 +465,185 @@ test "transpile truncate" {
 
     try std.testing.expectEqualStrings("TRUNCATE temp_data", sql);
 }
+
+// ==================== Roundtrip Tests ====================
+
+test "transpile insert with values" {
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "name", .value = .{ .string = "Alice" } },
+        .{ .column = "age", .value = .{ .int = 30 } },
+    };
+    const cmd = QailCmd.add("users").values(&assigns);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (name, age) VALUES ('Alice', 30)",
+        sql,
+    );
+}
+
+test "transpile insert default values" {
+    var cmd = QailCmd.add("events");
+    cmd.default_values = true;
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings("INSERT INTO events DEFAULT VALUES", sql);
+}
+
+test "transpile insert with returning" {
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "name", .value = .{ .string = "Bob" } },
+    };
+    const ret = [_]Expr{Expr.col("id")};
+    const cmd = QailCmd.add("users").values(&assigns).returningCols(&ret);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (name) VALUES ('Bob') RETURNING id",
+        sql,
+    );
+}
+
+test "transpile update with where" {
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "status", .value = .{ .string = "active" } },
+    };
+    const wheres = [_]ast.cmd.WhereClause{
+        .{
+            .condition = .{ .column = "id", .op = .eq, .value = .{ .int = 42 } },
+        },
+    };
+    const cmd = QailCmd.set("users").values(&assigns).where(&wheres);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "UPDATE users SET status = 'active' WHERE id = 42",
+        sql,
+    );
+}
+
+test "transpile delete with where" {
+    const wheres = [_]ast.cmd.WhereClause{
+        .{
+            .condition = .{ .column = "expired", .op = .eq, .value = .{ .bool = true } },
+        },
+    };
+    const cmd = QailCmd.del("sessions").where(&wheres);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "DELETE FROM sessions WHERE expired = true",
+        sql,
+    );
+}
+
+test "transpile select with join" {
+    const cols = [_]Expr{ Expr.col("u.id"), Expr.col("o.total") };
+    const joins = [_]ast.cmd.Join{
+        .{ .kind = .inner, .table = "orders", .alias = "o", .on_left = "u.id", .on_right = "o.user_id" },
+    };
+    const cmd = QailCmd.get("users").select(&cols).alias("u").join(&joins);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT u.id, o.total FROM users AS u INNER JOIN orders AS o ON u.id = o.user_id",
+        sql,
+    );
+}
+
+test "transpile select with group by and having" {
+    const cols = [_]Expr{ Expr.col("status"), Expr.count() };
+    const groups = [_][]const u8{"status"};
+    const having = [_]ast.cmd.WhereClause{
+        .{ .condition = .{ .column = "COUNT(*)", .op = .gt, .value = .{ .int = 5 } } },
+    };
+    const cmd = QailCmd.get("orders").select(&cols).groupBy(&groups).havingClauses(&having);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT status, COUNT(*) FROM orders GROUP BY status HAVING COUNT(*) > 5",
+        sql,
+    );
+}
+
+test "transpile select with order by and offset" {
+    const cols = [_]Expr{Expr.col("name")};
+    const orders = [_]ast.cmd.OrderBy{
+        .{ .column = "name", .order = .asc },
+    };
+    const cmd = QailCmd.get("users").select(&cols).orderBy(&orders).limit(20).offset(40);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT name FROM users ORDER BY name ASC LIMIT 20 OFFSET 40",
+        sql,
+    );
+}
+
+test "transpile transaction commands" {
+    const begin = try toSql(std.testing.allocator, &QailCmd.beginTx());
+    defer std.testing.allocator.free(begin);
+    try std.testing.expectEqualStrings("BEGIN", begin);
+
+    const commit = try toSql(std.testing.allocator, &QailCmd.commitTx());
+    defer std.testing.allocator.free(commit);
+    try std.testing.expectEqualStrings("COMMIT", commit);
+
+    const rollback = try toSql(std.testing.allocator, &QailCmd.rollbackTx());
+    defer std.testing.allocator.free(rollback);
+    try std.testing.expectEqualStrings("ROLLBACK", rollback);
+}
+
+test "transpile listen notify" {
+    const listen_cmd = QailCmd.listen("order_created");
+    const sql = try toSql(std.testing.allocator, &listen_cmd);
+    defer std.testing.allocator.free(sql);
+    try std.testing.expectEqualStrings("LISTEN order_created", sql);
+
+    const notify_cmd = QailCmd.notifyChannel("order_created", null);
+    const sql2 = try toSql(std.testing.allocator, &notify_cmd);
+    defer std.testing.allocator.free(sql2);
+    try std.testing.expectEqualStrings("NOTIFY order_created", sql2);
+}
+
+test "transpile select with cast expression" {
+    const inner = Expr.col("amount");
+    const cols = [_]Expr{Expr{ .cast = .{ .expr = &inner, .target_type = "float8" } }};
+    const cmd = QailCmd.get("orders").select(&cols);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings("SELECT amount::float8 FROM orders", sql);
+}
+
+test "transpile string escaping" {
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "name", .value = .{ .string = "O'Brien" } },
+    };
+    const cmd = QailCmd.add("users").values(&assigns);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (name) VALUES ('O''Brien')",
+        sql,
+    );
+}

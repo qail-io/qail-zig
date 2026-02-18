@@ -53,14 +53,18 @@ pub const Value = union(enum) {
     column: []const u8,
     /// UUID value (stored as 36-char string)
     uuid: []const u8,
+    /// NULL-typed UUID
+    null_uuid,
     /// Time interval (e.g., 24 hours, 7 days)
     interval: struct { amount: i64, unit: IntervalUnit },
     /// Timestamp value (ISO format string)
     timestamp: []const u8,
     /// Range for BETWEEN conditions
     range: struct { low: i64, high: i64 },
-    /// Explicit null value variant (for isNull conditions)
-    null_val,
+    /// Vector embedding for similarity search (Qdrant)
+    vector: []const f32,
+    /// JSON data
+    json: []const u8,
 
     /// Format value for SQL output
     pub fn format(self: Value, writer: anytype) !void {
@@ -103,7 +107,26 @@ pub const Value = union(enum) {
             .interval => |iv| try writer.print("INTERVAL '{d} {s}'", .{ iv.amount, iv.unit.toSql() }),
             .timestamp => |ts| try writer.print("'{s}'", .{ts}),
             .range => |r| try writer.print("{d} AND {d}", .{ r.low, r.high }),
-            .null_val => try writer.writeAll("NULL"),
+            .null_uuid => try writer.writeAll("NULL"),
+            .vector => |v| {
+                try writer.writeByte('[');
+                for (v, 0..) |val, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.print("{d}", .{val});
+                }
+                try writer.writeByte(']');
+            },
+            .json => |j| {
+                try writer.writeByte('\'');
+                for (j) |c| {
+                    if (c == '\'') {
+                        try writer.writeAll("''");
+                    } else {
+                        try writer.writeByte(c);
+                    }
+                }
+                try writer.writeAll("'::jsonb");
+            },
         }
     }
 
@@ -139,6 +162,14 @@ pub const Value = union(enum) {
     pub fn fromInterval(amount: i64, unit: IntervalUnit) Value {
         return .{ .interval = .{ .amount = amount, .unit = unit } };
     }
+
+    pub fn fromVector(v: []const f32) Value {
+        return .{ .vector = v };
+    }
+
+    pub fn fromJson(j: []const u8) Value {
+        return .{ .json = j };
+    }
 };
 
 // Tests
@@ -162,6 +193,48 @@ test "value format param" {
     var buf: [64]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const v: Value = .{ .param = 1 };
-    try std.fmt.format(fbs.writer(), "{f}", .{v});
+    try v.format(fbs.writer());
     try std.testing.expectEqualStrings("$1", fbs.getWritten());
+}
+
+// ==================== Comptime Exhaustive Tests ====================
+
+test "property: all IntervalUnit variants produce non-empty SQL" {
+    inline for (std.meta.fields(IntervalUnit)) |field| {
+        const v: IntervalUnit = @enumFromInt(field.value);
+        const sql = v.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: Value.format covers all variants" {
+    var buf: [256]u8 = undefined;
+
+    // Test each Value variant produces output
+    const test_values = [_]Value{
+        .null,
+        .{ .bool = true },
+        .{ .int = 42 },
+        .{ .float = 3.14 },
+        .{ .string = "hello" },
+        .{ .bytes = &[_]u8{ 0xDE, 0xAD } },
+        .{ .array = &[_]Value{.{ .int = 1 }} },
+        .{ .param = 1 },
+        .{ .named_param = "user_id" },
+        .{ .function = "now()" },
+        .{ .column = "users.id" },
+        .{ .uuid = "550e8400-e29b-41d4-a716-446655440000" },
+        .null_uuid,
+        .{ .interval = .{ .amount = 24, .unit = .hour } },
+        .{ .timestamp = "2026-01-01T00:00:00Z" },
+        .{ .range = .{ .low = 1, .high = 10 } },
+        .{ .vector = &[_]f32{ 0.1, 0.2, 0.3 } },
+        .{ .json = "{\"key\":\"value\"}" },
+    };
+
+    for (test_values) |val| {
+        var fbs = std.io.fixedBufferStream(&buf);
+        try val.format(fbs.writer());
+        try std.testing.expect(fbs.getWritten().len > 0);
+    }
 }

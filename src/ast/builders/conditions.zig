@@ -64,12 +64,12 @@ pub fn isIn(column: []const u8, vals: []const Value) Condition {
 
 /// Create an IS NULL condition
 pub fn isNull(column: []const u8) Condition {
-    return makeCondition(column, .is_null, .null_val);
+    return makeCondition(column, .is_null, .null);
 }
 
 /// Create an IS NOT NULL condition
 pub fn isNotNull(column: []const u8) Condition {
-    return makeCondition(column, .is_not_null, .null_val);
+    return makeCondition(column, .is_not_null, .null);
 }
 
 /// Create a LIKE condition (column LIKE pattern)
@@ -159,8 +159,7 @@ pub fn keyExists(column: []const u8, key: []const u8) Condition {
 
 test "eq creates equality condition" {
     const cond = eq("status", .{ .string = "active" });
-    try std.testing.expect(cond.left == .named);
-    try std.testing.expectEqualStrings("status", cond.left.named);
+    try std.testing.expectEqualStrings("status", cond.column);
     try std.testing.expect(cond.op == .eq);
 }
 

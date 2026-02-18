@@ -7,7 +7,6 @@ const operators = @import("operators.zig");
 const values = @import("values.zig");
 
 const Operator = operators.Operator;
-const BinaryOp = operators.BinaryOp;
 const AggregateFunc = operators.AggregateFunc;
 const Value = values.Value;
 
@@ -118,13 +117,61 @@ pub const Expr = union(enum) {
 
     /// Special SQL function with keyword args (SUBSTRING, EXTRACT, TRIM)
     /// e.g., SUBSTRING(expr FROM pos FOR len), EXTRACT(YEAR FROM date)
-    /// Matches qail.rs Expr::SpecialFunction
     special_func: struct {
         name: []const u8,
-        /// Arguments as (optional_keyword, expr) pairs
         args: []const SpecialFuncArg,
         alias: ?[]const u8 = null,
     },
+
+    /// Array constructor: ARRAY[expr1, expr2, ...]
+    array_constructor: struct {
+        elements: []const Expr,
+        alias: ?[]const u8 = null,
+    },
+
+    /// Row constructor: ROW(expr1, expr2, ...) or (expr1, expr2, ...)
+    row_constructor: struct {
+        elements: []const Expr,
+        alias: ?[]const u8 = null,
+    },
+
+    /// Array/string subscript: arr[index]
+    subscript: struct {
+        base: *const Expr,
+        index: *const Expr,
+        alias: ?[]const u8 = null,
+    },
+
+    /// Collation: expr COLLATE "collation_name"
+    collate: struct {
+        expr: *const Expr,
+        collation: []const u8,
+        alias: ?[]const u8 = null,
+    },
+
+    /// Field selection from composite: (row).field
+    field_access: struct {
+        expr: *const Expr,
+        field: []const u8,
+        alias: ?[]const u8 = null,
+    },
+
+    /// EXISTS subquery: EXISTS(SELECT ...)
+    exists_subquery: struct {
+        sql: []const u8,
+        negated: bool = false,
+        alias: ?[]const u8 = null,
+    },
+
+    /// Unary operation (e.g., NOT col, -amount)
+    unary: struct {
+        op: UnaryOp,
+        operand: *const Expr,
+    },
+
+    /// Raw SQL expression — escape hatch for expressions that cannot be
+    /// typed as AST nodes (e.g. pg_policies introspection).
+    raw: []const u8,
 
     // ==================== Builder Methods ====================
 
@@ -281,6 +328,8 @@ pub const Constraint = union(enum) {
     references: []const u8,
     /// COMMENT ON COLUMN
     comment: []const u8,
+    /// GENERATED column
+    generated: ColumnGeneration,
 
     /// Check if constraint list contains primary_key
     pub fn hasPrimaryKey(constraints: []const Constraint) bool {
@@ -359,12 +408,162 @@ pub const FrameBound = union(enum) {
 pub const ModKind = enum {
     add,
     drop,
+
+    pub fn toSql(self: ModKind) []const u8 {
+        return switch (self) {
+            .add => "ADD",
+            .drop => "DROP",
+        };
+    }
 };
 
 /// Special function argument with optional keyword
 pub const SpecialFuncArg = struct {
     keyword: ?[]const u8 = null, // e.g., "FROM", "FOR"
     expr: *const Expr,
+};
+
+/// Binary operators for arithmetic/string/comparison expressions
+pub const BinaryOp = enum {
+    /// String concatenation (||)
+    concat,
+    /// Addition (+)
+    add,
+    /// Subtraction (-)
+    sub,
+    /// Multiplication (*)
+    mul,
+    /// Division (/)
+    div,
+    /// Modulo (%)
+    rem,
+    /// Logical AND
+    @"and",
+    /// Logical OR
+    @"or",
+    /// Equals (=)
+    eq,
+    /// Not equals (<>)
+    ne,
+    /// Greater than (>)
+    gt,
+    /// Greater than or equal (>=)
+    gte,
+    /// Less than (<)
+    lt,
+    /// Less than or equal (<=)
+    lte,
+    /// IS NULL
+    is_null,
+    /// IS NOT NULL
+    is_not_null,
+
+    pub fn toSql(self: BinaryOp) []const u8 {
+        return switch (self) {
+            .concat => "||",
+            .add => "+",
+            .sub => "-",
+            .mul => "*",
+            .div => "/",
+            .rem => "%",
+            .@"and" => "AND",
+            .@"or" => "OR",
+            .eq => "=",
+            .ne => "<>",
+            .gt => ">",
+            .gte => ">=",
+            .lt => "<",
+            .lte => "<=",
+            .is_null => "IS NULL",
+            .is_not_null => "IS NOT NULL",
+        };
+    }
+};
+
+/// Unary operator
+pub const UnaryOp = enum {
+    /// NOT
+    not,
+    /// Negation (-)
+    negate,
+    /// Bitwise NOT (~)
+    bitwise_not,
+
+    pub fn toSql(self: UnaryOp) []const u8 {
+        return switch (self) {
+            .not => "NOT",
+            .negate => "-",
+            .bitwise_not => "~",
+        };
+    }
+};
+
+/// Generated column type (STORED or VIRTUAL)
+pub const ColumnGeneration = union(enum) {
+    /// GENERATED ALWAYS AS (expr) STORED
+    stored: []const u8,
+    /// GENERATED ALWAYS AS (expr)
+    virtual: []const u8,
+};
+
+/// Trigger timing (BEFORE or AFTER)
+pub const TriggerTiming = enum {
+    before,
+    after,
+    instead_of,
+
+    pub fn toSql(self: TriggerTiming) []const u8 {
+        return switch (self) {
+            .before => "BEFORE",
+            .after => "AFTER",
+            .instead_of => "INSTEAD OF",
+        };
+    }
+};
+
+/// Trigger event types
+pub const TriggerEvent = enum {
+    insert,
+    update,
+    delete,
+    truncate,
+
+    pub fn toSql(self: TriggerEvent) []const u8 {
+        return switch (self) {
+            .insert => "INSERT",
+            .update => "UPDATE",
+            .delete => "DELETE",
+            .truncate => "TRUNCATE",
+        };
+    }
+};
+
+/// PostgreSQL function definition
+pub const FunctionDef = struct {
+    /// Function name
+    name: []const u8,
+    /// Return type (e.g., "trigger", "integer", "void")
+    returns: []const u8 = "",
+    /// Function body (PL/pgSQL code)
+    body: []const u8 = "",
+    /// Language (default: plpgsql)
+    language: ?[]const u8 = null,
+};
+
+/// PostgreSQL trigger definition
+pub const TriggerDef = struct {
+    /// Trigger name
+    name: []const u8,
+    /// Target table
+    table: []const u8,
+    /// Timing (BEFORE, AFTER, INSTEAD OF)
+    timing: TriggerTiming,
+    /// Events that fire the trigger
+    events: []const TriggerEvent = &.{},
+    /// Whether the trigger fires FOR EACH ROW
+    for_each_row: bool = false,
+    /// Function to execute
+    execute_function: []const u8 = "",
 };
 
 // Re-import SortOrder
@@ -415,4 +614,46 @@ test "expr int creates literal" {
 test "expr param creates placeholder" {
     const e = Expr.param(1);
     try std.testing.expectEqual(@as(u16, 1), e.literal.param);
+}
+
+// ==================== Comptime Exhaustive Tests ====================
+
+test "property: all ModKind variants produce non-empty SQL" {
+    inline for (std.meta.fields(ModKind)) |field| {
+        const v: ModKind = @enumFromInt(field.value);
+        const sql = v.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all BinaryOp variants produce non-empty SQL" {
+    inline for (std.meta.fields(BinaryOp)) |field| {
+        const v: BinaryOp = @enumFromInt(field.value);
+        const sql = v.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all UnaryOp variants produce non-empty SQL" {
+    inline for (std.meta.fields(UnaryOp)) |field| {
+        const v: UnaryOp = @enumFromInt(field.value);
+        const sql = v.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all TriggerTiming variants produce non-empty SQL" {
+    inline for (std.meta.fields(TriggerTiming)) |field| {
+        const v: TriggerTiming = @enumFromInt(field.value);
+        const sql = v.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all TriggerEvent variants produce non-empty SQL" {
+    inline for (std.meta.fields(TriggerEvent)) |field| {
+        const v: TriggerEvent = @enumFromInt(field.value);
+        const sql = v.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
 }

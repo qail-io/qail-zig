@@ -17,11 +17,7 @@ pub fn star() Expr {
 /// Create a parameter placeholder ($n)
 /// Returns the formatted string reference - caller should manage buffer if dynamic
 pub fn param(comptime n: u32) Expr {
-    const num_str = comptime blk: {
-        var buf: [16]u8 = undefined;
-        const len = std.fmt.formatIntBuf(&buf, n, 10, .lower, .{});
-        break :blk "$" ++ buf[0..len];
-    };
+    const num_str = comptime std.fmt.comptimePrint("${d}", .{n});
     return .{ .named = num_str };
 }
 

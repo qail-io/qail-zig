@@ -27,4 +27,8 @@ pub const cmd = ast.cmd;
 
 test {
     @import("std").testing.refAllDecls(@This());
+    // Fuzz tests — discovered via explicit import
+    _ = @import("fuzz/fuzz_decoder.zig");
+    _ = @import("fuzz/fuzz_value.zig");
+    _ = @import("fuzz/fuzz_transpiler.zig");
 }

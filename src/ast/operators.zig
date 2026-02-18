@@ -60,6 +60,20 @@ pub const Operator = enum {
     regex,
     /// Case-insensitive regex (~*)
     regex_i,
+    /// Full-text search (@@)
+    text_search,
+    /// JSONB key exists any (?|)
+    key_exists_any,
+    /// JSONB key exists all (?&)
+    key_exists_all,
+    /// JSONB path extraction → jsonb (#>)
+    json_path,
+    /// JSONB path extraction → text (#>>)
+    json_path_text,
+    /// JSON_QUERY path extraction
+    json_query,
+    /// JSON_VALUE scalar extraction
+    json_value,
 
     pub fn toSql(self: Operator) []const u8 {
         return switch (self) {
@@ -90,36 +104,17 @@ pub const Operator = enum {
             .similar_to => "SIMILAR TO",
             .regex => "~",
             .regex_i => "~*",
+            .text_search => "@@",
+            .key_exists_any => "?|",
+            .key_exists_all => "?&",
+            .json_path => "#>",
+            .json_path_text => "#>>",
+            .json_query => "JSON_QUERY",
+            .json_value => "JSON_VALUE",
         };
     }
 };
 
-/// Binary operators for arithmetic/string expressions
-pub const BinaryOp = enum {
-    /// String concatenation (||)
-    concat,
-    /// Addition (+)
-    add,
-    /// Subtraction (-)
-    sub,
-    /// Multiplication (*)
-    mul,
-    /// Division (/)
-    div,
-    /// Modulo (%)
-    rem,
-
-    pub fn toSql(self: BinaryOp) []const u8 {
-        return switch (self) {
-            .concat => "||",
-            .add => "+",
-            .sub => "-",
-            .mul => "*",
-            .div => "/",
-            .rem => "%",
-        };
-    }
-};
 
 /// Logical operators for combining conditions
 pub const LogicalOp = enum {
@@ -237,6 +232,24 @@ pub const SampleMethod = enum {
     }
 };
 
+/// Distance metric for vector similarity (Qdrant)
+pub const Distance = enum {
+    /// Cosine similarity.
+    cosine,
+    /// Euclidean distance.
+    euclid,
+    /// Dot product.
+    dot,
+
+    pub fn toSql(self: Distance) []const u8 {
+        return switch (self) {
+            .cosine => "Cosine",
+            .euclid => "Euclid",
+            .dot => "Dot",
+        };
+    }
+};
+
 // Tests
 test "operator to sql" {
     try std.testing.expectEqualStrings("=", Operator.eq.toSql());
@@ -245,6 +258,7 @@ test "operator to sql" {
 }
 
 test "binary op to sql" {
+    const BinaryOp = @import("expr.zig").BinaryOp;
     try std.testing.expectEqualStrings("+", BinaryOp.add.toSql());
     try std.testing.expectEqualStrings("||", BinaryOp.concat.toSql());
 }
@@ -252,4 +266,79 @@ test "binary op to sql" {
 test "aggregate func to sql" {
     try std.testing.expectEqualStrings("COUNT", AggregateFunc.count.toSql());
     try std.testing.expectEqualStrings("SUM", AggregateFunc.sum.toSql());
+}
+
+// ==================== Property Tests (comptime exhaustive) ====================
+
+test "property: all Operator variants produce non-empty SQL" {
+    inline for (std.meta.fields(Operator)) |field| {
+        const op: Operator = @enumFromInt(field.value);
+        const sql = op.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all LogicalOp variants produce non-empty SQL" {
+    inline for (std.meta.fields(LogicalOp)) |field| {
+        const op: LogicalOp = @enumFromInt(field.value);
+        const sql = op.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all SortOrder variants produce non-empty SQL" {
+    inline for (std.meta.fields(SortOrder)) |field| {
+        const order: SortOrder = @enumFromInt(field.value);
+        const sql = order.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all AggregateFunc variants produce non-empty SQL" {
+    inline for (std.meta.fields(AggregateFunc)) |field| {
+        const func: AggregateFunc = @enumFromInt(field.value);
+        const sql = func.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all LockMode variants produce non-empty SQL" {
+    inline for (std.meta.fields(LockMode)) |field| {
+        const mode: LockMode = @enumFromInt(field.value);
+        const sql = mode.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all OverridingKind variants produce non-empty SQL" {
+    inline for (std.meta.fields(OverridingKind)) |field| {
+        const kind: OverridingKind = @enumFromInt(field.value);
+        const sql = kind.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all SampleMethod variants produce non-empty SQL" {
+    inline for (std.meta.fields(SampleMethod)) |field| {
+        const method: SampleMethod = @enumFromInt(field.value);
+        const sql = method.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all Distance variants produce non-empty SQL" {
+    inline for (std.meta.fields(Distance)) |field| {
+        const dist: Distance = @enumFromInt(field.value);
+        const sql = dist.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all BinaryOp variants produce non-empty SQL" {
+    const BinaryOp = @import("expr.zig").BinaryOp;
+    inline for (std.meta.fields(BinaryOp)) |field| {
+        const op: BinaryOp = @enumFromInt(field.value);
+        const sql = op.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
 }
