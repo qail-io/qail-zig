@@ -293,22 +293,29 @@ pub fn main() !void {
 }
 
 /// Benchmark harness — takes a regular function pointer (not comptime).
+/// Uses ArenaAllocator to avoid per-iteration mmap/munmap syscall overhead.
 fn bench(
-    allocator: std.mem.Allocator,
+    backing_allocator: std.mem.Allocator,
     label: []const u8,
     run_fn: *const fn (std.mem.Allocator) usize,
 ) u64 {
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
     // Warmup
     var sink: u64 = 0;
     for (0..WARMUP) |_| {
-        sink +%= run_fn(allocator);
+        sink +%= run_fn(alloc);
+        _ = arena.reset(.retain_capacity);
     }
     std.mem.doNotOptimizeAway(&sink);
 
     // Timed run
     const start = std.time.Instant.now() catch unreachable;
     for (0..ITERATIONS) |_| {
-        sink +%= run_fn(allocator);
+        sink +%= run_fn(alloc);
+        _ = arena.reset(.retain_capacity);
     }
     std.mem.doNotOptimizeAway(&sink);
     const end = std.time.Instant.now() catch unreachable;
