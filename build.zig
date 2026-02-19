@@ -259,6 +259,25 @@ pub fn build(b: *std.Build) void {
     const pool_step = b.step("pool", "Run pool benchmark (matches Rust)");
     pool_step.dependOn(&run_pool.step);
 
+    // ==================== Pipeline + Pool Benchmark ====================
+    const pipe_bench = b.addExecutable(.{
+        .name = "pipe_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pipe_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(pipe_bench);
+
+    const run_pipe_bench = b.addRunArtifact(pipe_bench);
+    run_pipe_bench.step.dependOn(b.getInstallStep());
+    const pipe_bench_step = b.step("pipe-bench", "Run pipeline + pool benchmark");
+    pipe_bench_step.dependOn(&run_pipe_bench.step);
+
     // ==================== Error Test Executable ====================
     const error_test = b.addExecutable(.{
         .name = "qail-error-test",

@@ -110,6 +110,24 @@ pub const AstEncoder = struct {
         try self.encodeSync();
     }
 
+    /// Append a query to the buffer WITHOUT resetting and WITHOUT Sync.
+    /// Use this for pipeline batching — call once per query, then call
+    /// appendSync() at the end. Unlike encodeQuery(), this accumulates
+    /// multiple queries in the buffer.
+    pub fn appendQuery(self: *AstEncoder, cmd: *const QailCmd) !void {
+        const stmt_name = "";
+        const portal_name = "";
+
+        try self.encodeParse(stmt_name, cmd);
+        try self.encodeBind(portal_name, stmt_name, &.{});
+        try self.encodeExecute(portal_name, 0);
+    }
+
+    /// Append Sync to the buffer WITHOUT resetting (for pipeline batching).
+    pub fn appendSync(self: *AstEncoder) !void {
+        try self.encodeSync();
+    }
+
     /// Encode Parse message with AST-generated query structure
     fn encodeParse(self: *AstEncoder, stmt_name: []const u8, cmd: *const QailCmd) !void {
         // For now, we generate SQL from AST

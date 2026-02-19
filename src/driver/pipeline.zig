@@ -98,11 +98,10 @@ pub const Pipeline = struct {
         const sql_copy = try self.allocator.dupe(u8, sql);
         errdefer self.allocator.free(sql_copy);
 
-        // Send Parse + Sync
+        // Send Parse + Sync in a single write (was 2 separate sends — bug)
+        self.encoder.reset();
         try self.encoder.encodeParse(name, sql, &.{});
-        try self.conn.send(self.encoder.getWritten());
-
-        try self.encoder.encodeSync();
+        try self.encoder.appendSync();
         try self.conn.send(self.encoder.getWritten());
 
         // Wait for ParseComplete + ReadyForQuery
@@ -132,10 +131,12 @@ pub const Pipeline = struct {
         var ast_encoder = AstEncoder.init(self.allocator);
         defer ast_encoder.deinit();
 
-        // Encode all ASTs to wire protocol
+        // Encode all ASTs to wire protocol (appendQuery does NOT reset buffer)
         for (cmds) |cmd| {
-            try ast_encoder.encodeQuery(cmd);
+            try ast_encoder.appendQuery(cmd);
         }
+        // Single Sync at end (one ReadyForQuery for the whole batch)
+        try ast_encoder.appendSync();
 
         // Send all at once
         try self.conn.send(ast_encoder.getWritten());
@@ -154,10 +155,12 @@ pub const Pipeline = struct {
         var ast_encoder = AstEncoder.init(self.allocator);
         defer ast_encoder.deinit();
 
-        // Encode all ASTs
+        // Encode all ASTs (appendQuery does NOT reset buffer)
         for (cmds) |cmd| {
-            try ast_encoder.encodeQuery(cmd);
+            try ast_encoder.appendQuery(cmd);
         }
+        // Single Sync at end
+        try ast_encoder.appendSync();
 
         // Send all at once
         try self.conn.send(ast_encoder.getWritten());
