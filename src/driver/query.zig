@@ -60,9 +60,21 @@ pub const StatementCache = struct {
 
     /// Get or create a statement name for SQL
     pub fn getOrCreate(self: *StatementCache, sql: []const u8) ![]const u8 {
+        const result = try self.getOrCreateWithStatus(sql);
+        return result.name;
+    }
+
+    /// Result of a cache lookup
+    pub const LookupResult = struct {
+        name: []const u8,
+        was_hit: bool,
+    };
+
+    /// Get or create a statement name, reporting whether it was a cache hit
+    pub fn getOrCreateWithStatus(self: *StatementCache, sql: []const u8) !LookupResult {
         if (self.entries.get(sql)) |entry| {
             self.hits += 1;
-            return entry.name;
+            return .{ .name = entry.name, .was_hit = true };
         }
 
         self.misses += 1;
@@ -87,7 +99,7 @@ pub const StatementCache = struct {
         };
         try self.entries.put(sql, entry);
 
-        return name;
+        return .{ .name = name, .was_hit = false };
     }
 
     /// Check if statement is cached

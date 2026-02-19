@@ -7,6 +7,8 @@ const ast = @import("../ast/mod.zig");
 const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
 const row_mod = @import("row.zig");
+const query_mod = @import("query.zig");
+const transpiler = @import("../transpiler/postgres.zig");
 
 const QailCmd = ast.QailCmd;
 const AstEncoder = protocol.AstEncoder;
@@ -15,6 +17,7 @@ const BackendMessage = protocol.BackendMessage;
 const FieldDescription = protocol.wire.FieldDescription;
 const Connection = conn_mod.Connection;
 const PgRow = row_mod.PgRow;
+const StatementCache = query_mod.StatementCache;
 
 /// Query options for per-query configuration
 pub const QueryOpts = struct {
@@ -31,16 +34,22 @@ pub const PgDriver = struct {
     conn: Connection,
     allocator: std.mem.Allocator,
     encoder: AstEncoder,
+    cache: StatementCache,
+
+    /// Default max cached statements (matches Rust's default)
+    const DEFAULT_CACHE_SIZE: usize = 256;
 
     pub fn init(conn: Connection, allocator: std.mem.Allocator) PgDriver {
         return .{
             .conn = conn,
             .allocator = allocator,
             .encoder = AstEncoder.init(allocator),
+            .cache = StatementCache.init(allocator, DEFAULT_CACHE_SIZE),
         };
     }
 
     pub fn deinit(self: *PgDriver) void {
+        self.cache.deinit();
         self.encoder.deinit();
         self.conn.close();
     }
@@ -204,7 +213,90 @@ pub const PgDriver = struct {
         return try self.execute(&cmd);
     }
 
-    // ==================== Prepared Statements ====================
+    // ==================== Cached (Prepared Statement) Execution ====================
+
+    /// Execute a QAIL AST command with PREPARED STATEMENT CACHING.
+    ///
+    /// On first call: transpiles AST → SQL, sends Parse (prepare), then Bind/Execute
+    /// On subsequent calls with same query shape: skips Parse, just Bind/Execute
+    ///
+    /// This gives zero-transpilation-cost on hot paths.
+    pub fn fetchAllCached(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
+        const stmt_name = try self.getOrPrepare(cmd);
+        return try self.fetchPrepared(stmt_name, &.{});
+    }
+
+    /// Execute a QAIL AST mutation with PREPARED STATEMENT CACHING.
+    ///
+    /// Same as fetchAllCached but for INSERT/UPDATE/DELETE — returns affected row count.
+    pub fn executeCached(self: *PgDriver, cmd: *const QailCmd) !u64 {
+        const stmt_name = try self.getOrPrepare(cmd);
+        return try self.executePrepared(stmt_name, &.{});
+    }
+
+    /// Execute with parameters using prepared statement cache.
+    pub fn fetchAllCachedParams(self: *PgDriver, cmd: *const QailCmd, params: []const ?[]const u8) ![]PgRow {
+        const stmt_name = try self.getOrPrepare(cmd);
+        return try self.fetchPrepared(stmt_name, params);
+    }
+
+    /// Execute mutation with parameters using prepared statement cache.
+    pub fn executeCachedParams(self: *PgDriver, cmd: *const QailCmd, params: []const ?[]const u8) !u64 {
+        const stmt_name = try self.getOrPrepare(cmd);
+        return try self.executePrepared(stmt_name, params);
+    }
+
+    /// Internal: transpile, hash, and prepare (on cache miss)
+    fn getOrPrepare(self: *PgDriver, cmd: *const QailCmd) ![]const u8 {
+        // Transpile AST → SQL
+        const sql = try transpiler.toSql(self.allocator, cmd);
+        defer self.allocator.free(sql);
+
+        // Cache lookup (hash-based): returns name + hit/miss status
+        const result = try self.cache.getOrCreateWithStatus(sql);
+
+        if (!result.was_hit) {
+            // Cache miss → prepare the statement on the server
+            try self.prepareNamed(result.name, sql);
+        }
+        // Cache hit → statement already prepared on server, skip Parse
+
+        return result.name;
+    }
+
+    /// Internal: send Parse + Sync for a named statement
+    fn prepareNamed(self: *PgDriver, stmt_name: []const u8, sql: []const u8) !void {
+        try self.encoder.encodePrepareNamed(stmt_name, sql);
+        try self.conn.send(self.encoder.getWritten());
+
+        // Wait for ParseComplete + ReadyForQuery
+        while (true) {
+            const msg = try self.conn.readMessage();
+            switch (msg.msg_type) {
+                .parse_complete => {},
+                .ready_for_query => break,
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Prepare error: {s}\n", .{err.message orelse "unknown"});
+                    return error.PrepareError;
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Cache statistics
+    pub fn cacheStats(self: *const PgDriver) struct { hits: usize, misses: usize, size: usize, hit_rate: f64 } {
+        return .{
+            .hits = self.cache.hits,
+            .misses = self.cache.misses,
+            .size = self.cache.entries.count(),
+            .hit_rate = self.cache.hitRate(),
+        };
+    }
+
+    // ==================== Prepared Statements (Manual) ====================
 
     /// Prepare a statement for later execution with parameters
     /// Returns immediately after Parse completes

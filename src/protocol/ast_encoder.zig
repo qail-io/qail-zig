@@ -187,10 +187,25 @@ pub const AstEncoder = struct {
 
     // ==================== Prepared Statement Protocol ====================
 
-    /// Encode only Parse message for preparing a statement
+    /// Encode only Parse message for preparing a statement from AST
     pub fn encodePrepare(self: *AstEncoder, stmt_name: []const u8, cmd: *const QailCmd) !void {
         self.buffer.clearRetainingCapacity();
         try self.encodeParse(stmt_name, cmd);
+        try self.encodeSync();
+    }
+
+    /// Encode Parse + Sync from a raw SQL string (for cache-based prepare flow)
+    pub fn encodePrepareNamed(self: *AstEncoder, stmt_name: []const u8, sql: []const u8) !void {
+        self.buffer.clearRetainingCapacity();
+
+        const msg_len: u32 = 4 + @as(u32, @intCast(stmt_name.len)) + 1 + @as(u32, @intCast(sql.len)) + 1 + 2;
+
+        try self.writeByte(@intFromEnum(FrontendMessage.parse));
+        try self.writeU32(msg_len);
+        try self.writeCString(stmt_name);
+        try self.writeCString(sql);
+        try self.writeU16(0); // No parameter types
+
         try self.encodeSync();
     }
 
