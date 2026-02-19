@@ -202,6 +202,25 @@ pub fn build(b: *std.Build) void {
     const ast_bench_step = b.step("ast-bench", "Run AST build + transpile benchmark (vs Rust)");
     ast_bench_step.dependOn(&run_ast_bench.step);
 
+    // ==================== E2E Integration Test ====================
+    const e2e_test = b.addExecutable(.{
+        .name = "e2e_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/e2e_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(e2e_test);
+
+    const run_e2e = b.addRunArtifact(e2e_test);
+    run_e2e.step.dependOn(b.getInstallStep());
+    const e2e_step = b.step("e2e", "Run E2E integration test against real PostgreSQL");
+    e2e_step.dependOn(&run_e2e.step);
+
     // ==================== Pool Benchmark Executable ====================
     const pool_bench = b.addExecutable(.{
         .name = "qail-pool",
