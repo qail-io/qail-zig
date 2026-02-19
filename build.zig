@@ -221,6 +221,25 @@ pub fn build(b: *std.Build) void {
     const e2e_step = b.step("e2e", "Run E2E integration test against real PostgreSQL");
     e2e_step.dependOn(&run_e2e.step);
 
+    // ==================== I/O Benchmark (real DB queries) ====================
+    const io_bench = b.addExecutable(.{
+        .name = "io_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/io_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(io_bench);
+
+    const run_io_bench = b.addRunArtifact(io_bench);
+    run_io_bench.step.dependOn(b.getInstallStep());
+    const io_bench_step = b.step("io-bench", "Run real database query benchmark against PostgreSQL");
+    io_bench_step.dependOn(&run_io_bench.step);
+
     // ==================== Pool Benchmark Executable ====================
     const pool_bench = b.addExecutable(.{
         .name = "qail-pool",
