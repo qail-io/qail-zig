@@ -6,6 +6,7 @@
 const std = @import("std");
 const json = std.json;
 const protocol = @import("protocol.zig");
+const io = @import("qail").compat.io;
 const grammar = @import("qail").parser.grammar;
 
 pub const QailServer = struct {
@@ -47,7 +48,7 @@ pub const QailServer = struct {
 
         while (true) {
             var byte_buf: [1]u8 = undefined;
-            const n = readStdin(&byte_buf) catch return error.ReadError;
+            const n = io.readStdin(&byte_buf) catch return error.ReadError;
             if (n == 0) return error.EndOfStream;
 
             const byte = byte_buf[0];
@@ -76,22 +77,11 @@ pub const QailServer = struct {
         const body = try self.allocator.alloc(u8, content_length);
         var total_read: usize = 0;
         while (total_read < content_length) {
-            const n = readStdin(body[total_read..]) catch return error.ReadError;
+            const n = io.readStdin(body[total_read..]) catch return error.ReadError;
             if (n == 0) return error.EndOfStream;
             total_read += n;
         }
         return body;
-    }
-
-    /// Cross-platform stdin read helper
-    fn readStdin(buf: []u8) !usize {
-        const builtin = @import("builtin");
-        if (builtin.os.tag == .windows) {
-            // Windows: LSP not supported yet, return error
-            return error.UnsupportedPlatform;
-        } else {
-            return std.posix.read(std.posix.STDIN_FILENO, buf);
-        }
     }
 
     /// Handle incoming JSON-RPC message
@@ -366,32 +356,8 @@ pub const QailServer = struct {
         var header_buf: [64]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "Content-Length: {d}\r\n\r\n", .{content.len}) catch return error.FormatError;
 
-        // Write header
-        var written: usize = 0;
-        while (written < header.len) {
-            const n = writeStdout(header[written..]) catch return error.WriteError;
-            if (n == 0) return error.WriteError;
-            written += n;
-        }
-
-        // Write content
-        written = 0;
-        while (written < content.len) {
-            const n = writeStdout(content[written..]) catch return error.WriteError;
-            if (n == 0) return error.WriteError;
-            written += n;
-        }
-    }
-
-    /// Cross-platform stdout write helper
-    fn writeStdout(bytes: []const u8) !usize {
-        const builtin = @import("builtin");
-        if (builtin.os.tag == .windows) {
-            // Windows: LSP not supported yet, return error
-            return error.UnsupportedPlatform;
-        } else {
-            return std.posix.write(std.posix.STDOUT_FILENO, bytes);
-        }
+        io.writeAllStdout(header) catch return error.WriteError;
+        io.writeAllStdout(content) catch return error.WriteError;
     }
 };
 

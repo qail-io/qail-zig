@@ -5,6 +5,7 @@
 //! including edge cases like empty strings, max-length arrays, etc.
 
 const std = @import("std");
+const io = @import("../compat/io.zig");
 const Value = @import("../ast/values.zig").Value;
 const IntervalUnit = @import("../ast/values.zig").IntervalUnit;
 
@@ -45,8 +46,8 @@ fn fuzzValueFormat(_: @TypeOf(.{}), input: []const u8) anyerror!void {
 
     // format() must never panic — errors are OK, panics are NOT
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    val.format(fbs.writer()) catch return;
+    var writer = io.FixedBufferWriter.init(&buf);
+    val.format(writer.writer()) catch return;
 
     // If format succeeds, the output should be non-empty for non-trivial values
 }

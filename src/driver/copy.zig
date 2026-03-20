@@ -4,7 +4,6 @@
 // Provides high-performance bulk insert and export.
 
 const std = @import("std");
-const Connection = @import("connection.zig").Connection;
 const protocol = @import("../protocol/mod.zig");
 const wire = protocol.wire;
 
@@ -15,7 +14,7 @@ const wire = protocol.wire;
 ///
 /// Returns the number of rows inserted.
 pub fn copyIn(
-    conn: *Connection,
+    conn: anytype,
     allocator: std.mem.Allocator,
     table: []const u8,
     columns: []const []const u8,
@@ -77,7 +76,7 @@ pub fn copyIn(
 ///
 /// Returns the number of rows inserted.
 pub fn copyInRaw(
-    conn: *Connection,
+    conn: anytype,
     allocator: std.mem.Allocator,
     table: []const u8,
     columns: []const []const u8,
@@ -134,7 +133,7 @@ pub fn copyInRaw(
 ///
 /// Returns rows as slices of column values.
 pub fn copyExport(
-    conn: *Connection,
+    conn: anytype,
     allocator: std.mem.Allocator,
     table: []const u8,
     columns: []const []const u8,
@@ -209,7 +208,7 @@ fn encodeCopyRow(allocator: std.mem.Allocator, row: []const ?[]const u8) ![]cons
 }
 
 /// Send CopyData message
-fn sendCopyData(conn: *Connection, data: []const u8) !void {
+fn sendCopyData(conn: anytype, data: []const u8) !void {
     // CopyData: 'd' + length (4 bytes) + data
     const len: u32 = @intCast(data.len + 4);
     var header: [5]u8 = undefined;
@@ -221,7 +220,7 @@ fn sendCopyData(conn: *Connection, data: []const u8) !void {
 }
 
 /// Send CopyDone message
-fn sendCopyDone(conn: *Connection) !void {
+fn sendCopyDone(conn: anytype) !void {
     // CopyDone: 'c' + length (4) = 5 bytes total
     const msg = [_]u8{ 'c', 0, 0, 0, 4 };
     try conn.send(&msg);

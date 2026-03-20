@@ -59,6 +59,8 @@ pub const BackendMessage = enum(u8) {
     copy_in_response = 'G',
     /// CopyOutResponse (H)
     copy_out_response = 'H',
+    /// CopyBothResponse (W)
+    copy_both_response = 'W',
     /// DataRow (D)
     data_row = 'D',
     /// EmptyQueryResponse (I)

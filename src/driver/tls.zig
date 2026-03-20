@@ -11,15 +11,18 @@
 
 const std = @import("std");
 const tls = std.crypto.tls;
+const net = @import("../compat/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const tls_mod = @import("tls/mod.zig");
 
 const Encoder = protocol.Encoder;
+const StartupParam = Encoder.StartupParam;
 const Decoder = protocol.Decoder;
 const BackendMessage = protocol.BackendMessage;
+const auth = protocol.auth;
+const auth_options_mod = @import("auth_options.zig");
+pub const AuthOptions = auth_options_mod.AuthOptions;
 
-const StreamReader = tls_mod.StreamReader;
-const StreamWriter = tls_mod.StreamWriter;
 const TlsBuffers = tls_mod.TlsBuffers;
 pub const TlsConfig = tls_mod.TlsConfig;
 pub const VerifyMode = tls_mod.VerifyMode;
@@ -33,13 +36,14 @@ pub const SSL_REQUEST_CODE: u32 = 80877103;
 /// Falls back to plain connection if server doesn't support SSL.
 pub const TlsConnection = struct {
     allocator: std.mem.Allocator,
-    tcp_stream: std.net.Stream,
+    tcp_stream: net.Stream,
 
     // TLS components
     tls_buffers: TlsBuffers,
     tls_client: ?tls.Client = null,
-    stream_reader: ?StreamReader = null,
-    stream_writer: ?StreamWriter = null,
+    stream_reader: ?net.StreamReader = null,
+    stream_writer: ?net.StreamWriter = null,
+    tls_server_end_point_binding: ?[]u8 = null,
 
     // Connection state
     ssl_enabled: bool = false,
@@ -63,8 +67,28 @@ pub const TlsConnection = struct {
         port: u16,
         config: TlsConfig,
     ) !TlsConnection {
-        const address = try std.net.Address.parseIp4(host, port);
-        const tcp_stream = try std.net.tcpConnectToAddress(address);
+        return connectFromStream(allocator, host, config, try net.tcpConnectToAddress(try net.parseIp4(host, port)));
+    }
+
+    /// Connect with TCP connect timeout (milliseconds) + TLS negotiation.
+    ///
+    /// Timeout applies to the initial TCP connect phase.
+    pub fn connectWithTimeout(
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        config: TlsConfig,
+        timeout_ms: i32,
+    ) !TlsConnection {
+        return connectFromStream(allocator, host, config, try net.tcpConnectToIp4WithTimeout(host, port, timeout_ms));
+    }
+
+    fn connectFromStream(
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        config: TlsConfig,
+        tcp_stream: net.Stream,
+    ) !TlsConnection {
         errdefer tcp_stream.close();
 
         var conn = TlsConnection{
@@ -99,9 +123,8 @@ pub const TlsConnection = struct {
 
     /// Initialize TLS handshake using std.crypto.tls.Client
     fn initTls(self: *TlsConnection, config: TlsConfig, host: []const u8) !void {
-        // Create stream wrappers
-        self.stream_reader = StreamReader.init(self.tcp_stream, self.tls_buffers.readBuffer());
-        self.stream_writer = StreamWriter.init(self.tcp_stream, self.tls_buffers.writeBuffer());
+        self.stream_reader = net.streamReader(self.tcp_stream, self.tls_buffers.readBuffer());
+        self.stream_writer = net.streamWriter(self.tcp_stream, self.tls_buffers.writeBuffer());
 
         // Build TLS options
         const tls_options = tls_mod.config.buildClientOptions(
@@ -111,15 +134,25 @@ pub const TlsConnection = struct {
             },
             self.tls_buffers.readBuffer(),
             self.tls_buffers.writeBuffer(),
-            self.tls_buffers.entropyPtr(),
         );
 
         // Initialize TLS client (performs handshake)
-        self.tls_client = try tls.Client.init(&self.stream_reader.?, &self.stream_writer.?, tls_options);
+        self.tls_client = try net.initTlsClient(&self.stream_reader.?, &self.stream_writer.?, tls_options);
         self.ssl_enabled = true;
+
+        if (config.tls_server_end_point_cert_der) |cert_der| {
+            self.tls_server_end_point_binding = try tls_mod.config.deriveTlsServerEndPointBindingFromCertDer(
+                self.allocator,
+                cert_der,
+            );
+        }
     }
 
     pub fn close(self: *TlsConnection) void {
+        if (self.tls_server_end_point_binding) |binding| {
+            self.allocator.free(binding);
+            self.tls_server_end_point_binding = null;
+        }
         self.tcp_stream.close();
     }
 
@@ -131,6 +164,11 @@ pub const TlsConnection = struct {
     /// Check if server accepted SSL (even if TLS not fully enabled)
     pub fn sslAccepted(self: *const TlsConnection) bool {
         return self.ssl_accepted;
+    }
+
+    /// Derived SCRAM `tls-server-end-point` bytes, when configured.
+    pub fn tlsServerEndPointBinding(self: *const TlsConnection) ?[]const u8 {
+        return self.tls_server_end_point_binding;
     }
 
     /// Send bytes (encrypted if TLS enabled)
@@ -146,7 +184,7 @@ pub const TlsConnection = struct {
     /// Read bytes (decrypted if TLS enabled)
     fn readBytes(self: *TlsConnection, buf: []u8) !usize {
         if (self.tls_client) |*client| {
-            return client.reader.read(buf);
+            return client.reader.readSliceShort(buf);
         } else {
             return self.tcp_stream.read(buf);
         }
@@ -185,10 +223,58 @@ pub const TlsConnection = struct {
 
     /// Perform PostgreSQL startup handshake
     pub fn startup(self: *TlsConnection, user: []const u8, database: []const u8, password: ?[]const u8) !void {
+        return self.startupWithParamsAndAuth(user, database, password, &.{}, .{});
+    }
+
+    /// Perform PostgreSQL startup handshake with additional startup parameters.
+    pub fn startupWithParams(
+        self: *TlsConnection,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        extra_params: []const StartupParam,
+    ) !void {
+        return self.startupWithParamsAndAuth(user, database, password, extra_params, .{});
+    }
+
+    /// Perform PostgreSQL startup handshake with auth options.
+    pub fn startupWithAuthOptions(
+        self: *TlsConnection,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        auth_options: AuthOptions,
+    ) !void {
+        return self.startupWithParamsAndAuth(user, database, password, &.{}, auth_options);
+    }
+
+    /// Perform PostgreSQL startup handshake with startup params and auth options.
+    pub fn startupWithParamsAndAuth(
+        self: *TlsConnection,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        extra_params: []const StartupParam,
+        auth_options: AuthOptions,
+    ) !void {
+        var effective_auth_options = auth_options;
+        if (effective_auth_options.scram_tls_server_end_point_binding == null) {
+            effective_auth_options.scram_tls_server_end_point_binding = self.tls_server_end_point_binding;
+        }
+
         var encoder = Encoder.init(self.allocator);
         defer encoder.deinit();
+        var scram_client: ?auth.ScramClient = null;
+        defer {
+            if (scram_client) |*client| {
+                client.deinit();
+            }
+        }
+        var waiting_for_scram_final = false;
+        var gss_mechanism: ?auth_options_mod.GssMechanism = null;
+        var gss_roundtrips: u32 = 0;
 
-        try encoder.encodeStartup(user, database);
+        try encoder.encodeStartupWithParams(user, database, extra_params);
         try self.send(encoder.getWritten());
 
         while (!self.ready) {
@@ -200,14 +286,102 @@ pub const TlsConnection = struct {
                     const auth_type = try decoder.parseAuthentication();
 
                     switch (auth_type) {
-                        .ok => {},
+                        .ok => {
+                            if (waiting_for_scram_final) return error.InvalidScramState;
+                            gss_mechanism = null;
+                            gss_roundtrips = 0;
+                        },
                         .cleartext_password => {
+                            if (!auth_options_mod.authTypeAllowed(effective_auth_options, .cleartext_password)) return error.AuthMechanismDisabled;
                             if (password) |pw| {
                                 try encoder.encodePassword(pw);
                                 try self.send(encoder.getWritten());
                             } else {
                                 return error.PasswordRequired;
                             }
+                        },
+                        .md5_password => {
+                            if (!auth_options_mod.authTypeAllowed(effective_auth_options, .md5_password)) return error.AuthMechanismDisabled;
+                            const salt = try decoder.parseAuthenticationMd5Salt();
+                            if (password) |pw| {
+                                const md5_password = auth.md5Password(pw, user, salt);
+                                try encoder.encodePassword(md5_password[0..]);
+                                try self.send(encoder.getWritten());
+                            } else {
+                                return error.PasswordRequired;
+                            }
+                        },
+                        .kerberos_v5, .gss, .sspi => {
+                            if (!auth_options_mod.authTypeAllowed(effective_auth_options, auth_type)) return error.AuthMechanismDisabled;
+                            const mechanism = auth_options_mod.mechanismFromAuthType(auth_type).?;
+                            const token = try auth_options_mod.requestGssToken(effective_auth_options, mechanism, null, self.allocator);
+                            if (token.len != 0) {
+                                try encoder.encodeSaslResponse(token);
+                                try self.send(encoder.getWritten());
+                            }
+                            gss_mechanism = mechanism;
+                            gss_roundtrips = 0;
+                        },
+                        .gss_continue => {
+                            const mechanism = gss_mechanism orelse return error.InvalidGssState;
+                            gss_roundtrips += 1;
+                            if (gss_roundtrips > effective_auth_options.max_gss_roundtrips) return error.GssRoundtripLimitExceeded;
+
+                            const server_token = try decoder.parseAuthenticationSaslData();
+                            const token = try auth_options_mod.requestGssToken(effective_auth_options, mechanism, server_token, self.allocator);
+                            if (token.len != 0) {
+                                try encoder.encodeSaslResponse(token);
+                                try self.send(encoder.getWritten());
+                            }
+                        },
+                        .sasl => {
+                            if (!auth_options_mod.authTypeAllowed(effective_auth_options, .sasl)) return error.AuthMechanismDisabled;
+                            const mechanisms = try decoder.parseAuthenticationSaslMechanisms(self.allocator);
+                            defer self.allocator.free(mechanisms);
+
+                            if (password == null) return error.PasswordRequired;
+                            const selection = try auth_options_mod.selectScramMechanism(
+                                mechanisms,
+                                effective_auth_options.scram_tls_server_end_point_binding,
+                                effective_auth_options.scram_channel_binding,
+                            );
+
+                            if (scram_client) |*client| {
+                                client.deinit();
+                            }
+                            var client = if (selection.channel_binding_data) |binding|
+                                try auth.ScramClient.initWithTlsServerEndPoint(self.allocator, user, password.?, binding)
+                            else
+                                auth.ScramClient.init(self.allocator, user, password.?);
+                            const first = try client.clientFirstMessage();
+                            defer self.allocator.free(first);
+
+                            try encoder.encodeSaslInitialResponse(selection.mechanism, first);
+                            try self.send(encoder.getWritten());
+
+                            scram_client = client;
+                            waiting_for_scram_final = false;
+                            gss_mechanism = null;
+                            gss_roundtrips = 0;
+                        },
+                        .sasl_continue => {
+                            const server_first = try decoder.parseAuthenticationSaslData();
+                            if (scram_client == null) return error.InvalidScramState;
+                            const client = &scram_client.?;
+
+                            const final = try client.processServerFirst(server_first);
+                            defer self.allocator.free(final);
+
+                            try encoder.encodeSaslResponse(final);
+                            try self.send(encoder.getWritten());
+                            waiting_for_scram_final = true;
+                        },
+                        .sasl_final => {
+                            const server_final = try decoder.parseAuthenticationSaslData();
+                            if (scram_client == null) return error.InvalidScramState;
+                            const client = &scram_client.?;
+                            try client.verifyServerFinal(server_final);
+                            waiting_for_scram_final = false;
                         },
                         else => return error.UnsupportedAuth,
                     }

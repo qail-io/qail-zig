@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const io = @import("../compat/io.zig");
 const schema = @import("schema.zig");
 const Schema = schema.Schema;
 const TableDef = schema.TableDef;
@@ -124,8 +125,9 @@ pub const MigrationCmd = struct {
     }
 
     pub fn toSql(self: *const MigrationCmd, allocator: Allocator) ![]const u8 {
-        var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-        const w = buf.writer(allocator);
+        var writer = io.AllocatingWriter.init(allocator);
+        defer writer.deinit();
+        const w = writer.writer();
 
         switch (self.action) {
             .create_table => {
@@ -211,13 +213,14 @@ pub const MigrationCmd = struct {
             },
         }
 
-        return buf.toOwnedSlice(allocator);
+        return writer.toOwnedSlice();
     }
 
     /// Generate DOWN (rollback) SQL for this migration command
     pub fn toDownSql(self: *const MigrationCmd, allocator: Allocator) ![]const u8 {
-        var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-        const w = buf.writer(allocator);
+        var writer = io.AllocatingWriter.init(allocator);
+        defer writer.deinit();
+        const w = writer.writer();
 
         switch (self.action) {
             .create_table => {
@@ -254,7 +257,7 @@ pub const MigrationCmd = struct {
             },
         }
 
-        return buf.toOwnedSlice(allocator);
+        return writer.toOwnedSlice();
     }
 };
 
@@ -345,8 +348,9 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
 
 /// Generate SQL statements from migration commands
 pub fn toSqlStatements(allocator: Allocator, cmds: *const std.ArrayList(MigrationCmd)) ![]const u8 {
-    var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-    const w = buf.writer(allocator);
+    var writer = io.AllocatingWriter.init(allocator);
+    defer writer.deinit();
+    const w = writer.writer();
 
     for (cmds.items) |cmd| {
         const sql = try cmd.toSql(allocator);
@@ -354,7 +358,7 @@ pub fn toSqlStatements(allocator: Allocator, cmds: *const std.ArrayList(Migratio
         try w.print("{s};\n", .{sql});
     }
 
-    return buf.toOwnedSlice(allocator);
+    return writer.toOwnedSlice();
 }
 
 // ============================================================================

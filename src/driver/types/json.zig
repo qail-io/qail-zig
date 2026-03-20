@@ -3,6 +3,7 @@
 // PostgreSQL JSON and JSONB parsing utilities.
 
 const std = @import("std");
+const io = @import("../../compat/io.zig");
 
 /// Parse JSONB wire format to JSON value
 /// JSONB starts with a version byte (currently 1)
@@ -24,9 +25,9 @@ pub fn parseJson(data: []const u8, allocator: std.mem.Allocator) !std.json.Value
 
 /// Stringify JSON value
 pub fn stringify(value: std.json.Value, buf: []u8) ![]const u8 {
-    var stream = std.io.fixedBufferStream(buf);
-    try std.json.stringify(value, .{}, stream.writer());
-    return stream.getWritten();
+    var writer = io.FixedBufferWriter.init(buf);
+    try std.json.stringify(value, .{}, writer.writer());
+    return writer.getWritten();
 }
 
 // ==================== Tests ====================

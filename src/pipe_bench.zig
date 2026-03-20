@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const time = qail.compat.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
@@ -115,7 +116,7 @@ pub fn main() !void {
             }
         }
 
-        const start = std.time.Instant.now() catch unreachable;
+        const start = time.now() catch unreachable;
         for (0..TOTAL_QUERIES) |_| {
             const maybe_row = drv.fetchOne(&cmd) catch continue;
             if (maybe_row) |row| {
@@ -124,7 +125,7 @@ pub fn main() !void {
                 r.deinit();
             }
         }
-        const end = std.time.Instant.now() catch unreachable;
+        const end = time.now() catch unreachable;
         const elapsed_ns = end.since(start);
         const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(TOTAL_QUERIES))) / 1000.0;
         const qps = @as(f64, @floatFromInt(TOTAL_QUERIES)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);
@@ -166,13 +167,13 @@ pub fn main() !void {
             std.debug.print("  M2 warmup error: {}\n", .{e});
         };
 
-        const start = std.time.Instant.now() catch unreachable;
+        const start = time.now() catch unreachable;
         var total: usize = 0;
         for (0..batches) |_| {
             const n = pipe.pipelineAstFast(cmds) catch continue;
             total += n;
         }
-        const end = std.time.Instant.now() catch unreachable;
+        const end = time.now() catch unreachable;
         const elapsed_ns = end.since(start);
         if (total > 0) {
             const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total))) / 1000.0;
@@ -202,7 +203,7 @@ pub fn main() !void {
         var threads: [POOL_SIZE]std.Thread = undefined;
         var counter = std.atomic.Value(usize).init(0);
 
-        const start = std.time.Instant.now() catch unreachable;
+        const start = time.now() catch unreachable;
 
         for (0..POOL_SIZE) |t| {
             threads[t] = try std.Thread.spawn(.{}, workerFn, .{
@@ -216,7 +217,7 @@ pub fn main() !void {
             threads[t].join();
         }
 
-        const end = std.time.Instant.now() catch unreachable;
+        const end = time.now() catch unreachable;
         const total_done = counter.load(.acquire);
         const elapsed_ns = end.since(start);
         if (total_done > 0) {

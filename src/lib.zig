@@ -10,6 +10,7 @@ pub const parser = @import("parser/mod.zig");
 pub const analyzer = @import("analyzer/mod.zig");
 pub const validator = @import("validator.zig");
 pub const fmt = @import("fmt.zig");
+pub const compat = @import("compat/mod.zig");
 // LSP is built as a standalone binary, not exported from lib
 
 // Re-export key types for convenience
@@ -20,6 +21,30 @@ pub const Value = ast.Value;
 
 pub const PgDriver = driver.PgDriver;
 pub const PgRow = driver.PgRow;
+pub const TlsConnection = driver.TlsConnection;
+pub const TlsConfig = driver.TlsConfig;
+pub const VerifyMode = driver.VerifyMode;
+pub const ExplainEstimate = driver.ExplainEstimate;
+pub const CopyChunkHandler = driver.CopyChunkHandler;
+pub const Notification = driver.Notification;
+pub const PgDriverBuilder = driver.PgDriverBuilder;
+pub const ConnectOptions = driver.ConnectOptions;
+pub const TlsMode = driver.TlsMode;
+pub const GssEncMode = driver.GssEncMode;
+pub const IdentifySystem = driver.IdentifySystem;
+pub const ReplicationSlotInfo = driver.ReplicationSlotInfo;
+pub const ReplicationOption = driver.ReplicationOption;
+pub const ReplicationStreamStart = driver.ReplicationStreamStart;
+pub const ReplicationXLogData = driver.ReplicationXLogData;
+pub const ReplicationKeepalive = driver.ReplicationKeepalive;
+pub const ReplicationStreamMessage = driver.ReplicationStreamMessage;
+pub const AuthOptions = driver.AuthOptions;
+pub const CancelToken = driver.CancelToken;
+pub const GssMechanism = driver.GssMechanism;
+pub const GssTokenProvider = driver.GssTokenProvider;
+pub const ScramChannelBindingMode = driver.ScramChannelBindingMode;
+pub const IoBackend = driver.IoBackend;
+pub const IoBackendPolicy = driver.IoBackendPolicy;
 
 // Re-export builders for convenience
 pub const builders = ast.builders;

@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const time = qail.compat.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
@@ -46,7 +47,7 @@ pub fn main() !void {
         return;
     };
     defer driver.deinit();
-    std.debug.print("  Connected (PID: {d})\n\n", .{driver.conn.process_id});
+    std.debug.print("  Connected (PID: {d})\n\n", .{driver.backendProcessId()});
 
     // ── Setup: seed tables ───────────────────────────────────
     std.debug.print("  Setting up benchmark tables...\n", .{});
@@ -192,7 +193,7 @@ fn benchFetchOne(driver: *PgDriver, label: []const u8, cmd: *const QailCmd) u64 
         }
     }
 
-    const start = std.time.Instant.now() catch unreachable;
+    const start = time.now() catch unreachable;
 
     var row_count: u64 = 0;
     for (0..iters) |_| {
@@ -205,7 +206,7 @@ fn benchFetchOne(driver: *PgDriver, label: []const u8, cmd: *const QailCmd) u64 
         }
     }
 
-    const end = std.time.Instant.now() catch unreachable;
+    const end = time.now() catch unreachable;
     const elapsed_ns = end.since(start);
     const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iters))) / 1000.0;
     const qps = @as(f64, @floatFromInt(iters)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);
@@ -222,14 +223,14 @@ fn benchWriteCycle(driver: *PgDriver, label: []const u8) u64 {
         _ = driver.executeRaw("DELETE FROM bench_users WHERE name = '_tmp'") catch {};
     }
 
-    const start = std.time.Instant.now() catch unreachable;
+    const start = time.now() catch unreachable;
 
     for (0..WRITE_ITERS) |_| {
         _ = driver.executeRaw("INSERT INTO bench_users (name, email) VALUES ('_tmp', '_tmp@t.com')") catch {};
         _ = driver.executeRaw("DELETE FROM bench_users WHERE name = '_tmp'") catch {};
     }
 
-    const end = std.time.Instant.now() catch unreachable;
+    const end = time.now() catch unreachable;
     const elapsed_ns = end.since(start);
     const total_ops = WRITE_ITERS * 2;
     const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(WRITE_ITERS))) / 1000.0;
@@ -246,7 +247,7 @@ fn benchUpdate(driver: *PgDriver, label: []const u8) u64 {
         _ = driver.executeRaw("UPDATE bench_users SET active = true WHERE id = 1") catch {};
     }
 
-    const start = std.time.Instant.now() catch unreachable;
+    const start = time.now() catch unreachable;
 
     // Alternate between two static SQL strings to avoid branch prediction bias
     for (0..WRITE_ITERS) |i| {
@@ -257,7 +258,7 @@ fn benchUpdate(driver: *PgDriver, label: []const u8) u64 {
         }
     }
 
-    const end = std.time.Instant.now() catch unreachable;
+    const end = time.now() catch unreachable;
     const elapsed_ns = end.since(start);
     const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(WRITE_ITERS))) / 1000.0;
     const qps = @as(f64, @floatFromInt(WRITE_ITERS)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);

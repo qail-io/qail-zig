@@ -4,14 +4,15 @@
 
 const std = @import("std");
 const cli = @import("cli.zig");
+const process_compat = @import("compat/process.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try process_compat.argsAlloc(allocator);
+    defer process_compat.argsFree(allocator, args);
 
     const cmd = cli.parse(allocator, args) catch |err| {
         std.debug.print("Error: {}\n", .{err});

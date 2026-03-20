@@ -4,6 +4,7 @@
 // NO SQL STRING GENERATION - this is the core of QAIL's philosophy.
 
 const std = @import("std");
+const io = @import("../compat/io.zig");
 const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");
@@ -135,9 +136,9 @@ pub const AstEncoder = struct {
 
         // Calculate SQL from AST
         var sql_buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&sql_buf);
-        try self.writeAstToSql(fbs.writer(), cmd);
-        const sql = fbs.getWritten();
+        var writer = io.FixedBufferWriter.init(&sql_buf);
+        try self.writeAstToSql(writer.writer(), cmd);
+        const sql = writer.getWritten();
 
         const msg_len: u32 = 4 + @as(u32, @intCast(stmt_name.len)) + 1 + @as(u32, @intCast(sql.len)) + 1 + 2;
 
@@ -260,92 +261,9 @@ pub const AstEncoder = struct {
         }
 
         switch (cmd.kind) {
-            .get => {
-                try writer.writeAll("SELECT ");
-
-                if (cmd.distinct) {
-                    try writer.writeAll("DISTINCT ");
-                }
-
-                // Columns
-                if (cmd.columns.len == 0) {
-                    try writer.writeAll("*");
-                } else {
-                    for (cmd.columns, 0..) |col, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writeExpr(writer, &col);
-                    }
-                }
-
-                try writer.writeAll(" FROM ");
-                try writer.writeAll(cmd.table);
-
-                if (cmd.table_alias) |alias| {
-                    try writer.writeAll(" AS ");
-                    try writer.writeAll(alias);
-                }
-
-                // JOINs
-                for (cmd.joins) |join| {
-                    try writer.print(" {s} ", .{join.kind.toSql()});
-                    try writer.writeAll(join.table);
-                    if (join.alias) |alias| {
-                        try writer.writeAll(" AS ");
-                        try writer.writeAll(alias);
-                    }
-                    try writer.writeAll(" ON ");
-                    try writer.writeAll(join.on_left);
-                    try writer.writeAll(" = ");
-                    try writer.writeAll(join.on_right);
-                }
-
-                // WHERE
-                if (cmd.where_clauses.len > 0) {
-                    try writer.writeAll(" WHERE ");
-                    for (cmd.where_clauses, 0..) |clause, i| {
-                        if (i > 0) {
-                            try writer.print(" {s} ", .{clause.logical_op.toSql()});
-                        }
-                        try writer.writeAll(clause.condition.column);
-                        try writer.print(" {s} ", .{clause.condition.op.toSql()});
-                        try writeValue(writer, &clause.condition.value);
-                    }
-                }
-
-                // GROUP BY
-                if (cmd.group_by.len > 0) {
-                    try writer.writeAll(" GROUP BY ");
-                    for (cmd.group_by, 0..) |col, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writer.writeAll(col);
-                    }
-                }
-
-                // ORDER BY
-                if (cmd.order_by.len > 0) {
-                    try writer.writeAll(" ORDER BY ");
-                    for (cmd.order_by, 0..) |order, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writer.writeAll(order.column);
-                        try writer.print(" {s}", .{order.order.toSql()});
-                    }
-                }
-
-                // LIMIT
-                if (cmd.limit_val) |limit| {
-                    try writer.print(" LIMIT {d}", .{limit});
-                }
-
-                // OFFSET
-                if (cmd.offset_val) |offset| {
-                    try writer.print(" OFFSET {d}", .{offset});
-                }
-
-                // FOR UPDATE/SHARE (row locking)
-                if (cmd.lock_mode) |lock| {
-                    try writer.print(" {s}", .{lock.toSql()});
-                }
-            },
+            .get => try writeSelect(writer, cmd, false),
+            .with => try writeSelect(writer, cmd, false),
+            .cnt => try writeSelect(writer, cmd, true),
             .set => {
                 try writer.writeAll("UPDATE ");
                 try writer.writeAll(cmd.table);
@@ -402,47 +320,8 @@ pub const AstEncoder = struct {
                     }
                 }
             },
-            .add => {
-                try writer.writeAll("INSERT INTO ");
-                try writer.writeAll(cmd.table);
-
-                // Option 1: columns + insert_values (AST-native like qail.rs)
-                if (cmd.columns.len > 0 and cmd.insert_values.len > 0) {
-                    try writer.writeAll(" (");
-                    for (cmd.columns, 0..) |col, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writeExpr(writer, &col);
-                    }
-                    try writer.writeAll(") VALUES (");
-                    for (cmd.insert_values, 0..) |val, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writeValue(writer, &val);
-                    }
-                    try writer.writeAll(")");
-                }
-                // Option 2: assignments (legacy pattern)
-                else if (cmd.assignments.len > 0) {
-                    try writer.writeAll(" (");
-                    for (cmd.assignments, 0..) |assign, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writer.writeAll(assign.column);
-                    }
-                    try writer.writeAll(") VALUES (");
-                    for (cmd.assignments, 0..) |assign, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writeValue(writer, &assign.value);
-                    }
-                    try writer.writeAll(")");
-                }
-
-                if (cmd.returning.len > 0) {
-                    try writer.writeAll(" RETURNING ");
-                    for (cmd.returning, 0..) |col, i| {
-                        if (i > 0) try writer.writeAll(", ");
-                        try writeExpr(writer, &col);
-                    }
-                }
-            },
+            .add => try writeInsertCmd(writer, cmd, false),
+            .put, .upsert => try writeInsertCmd(writer, cmd, true),
             .truncate => {
                 try writer.writeAll("TRUNCATE ");
                 try writer.writeAll(cmd.table);
@@ -518,7 +397,7 @@ pub const AstEncoder = struct {
                     try writeExpr(writer, &col);
                 }
             },
-            .mod => {
+            .mod, .alter_type => {
                 // ALTER TABLE ALTER COLUMN TYPE
                 try writer.writeAll("ALTER TABLE ");
                 try writer.writeAll(cmd.table);
@@ -557,19 +436,607 @@ pub const AstEncoder = struct {
                 try writer.writeAll("DROP INDEX IF EXISTS ");
                 try writer.writeAll(cmd.table);
             },
+            .create_view => {
+                try writer.writeAll("CREATE VIEW ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" AS ");
+                if (cmd.source_query_sql) |source_sql| {
+                    try writer.writeAll(source_sql);
+                } else if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else {
+                    return error.MissingViewSourceQuery;
+                }
+            },
+            .drop_view => {
+                try writer.writeAll("DROP VIEW IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .create_materialized_view => {
+                try writer.writeAll("CREATE MATERIALIZED VIEW ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" AS ");
+                if (cmd.source_query_sql) |source_sql| {
+                    try writer.writeAll(source_sql);
+                } else if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else {
+                    return error.MissingMaterializedViewSourceQuery;
+                }
+            },
+            .refresh_materialized_view => {
+                try writer.writeAll("REFRESH MATERIALIZED VIEW ");
+                try writer.writeAll(cmd.table);
+            },
+            .drop_materialized_view => {
+                try writer.writeAll("DROP MATERIALIZED VIEW IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .create_function => {
+                if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else if (cmd.payload) |definition| {
+                    try writer.writeAll("CREATE FUNCTION ");
+                    try writer.writeAll(cmd.table);
+                    try writer.writeAll(" ");
+                    try writer.writeAll(definition);
+                } else {
+                    return error.MissingFunctionDefinition;
+                }
+            },
+            .drop_function => {
+                try writer.writeAll("DROP FUNCTION IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .create_trigger => {
+                if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else if (cmd.payload) |definition| {
+                    try writer.writeAll("CREATE TRIGGER ");
+                    try writer.writeAll(cmd.table);
+                    try writer.writeByte(' ');
+                    try writer.writeAll(definition);
+                } else {
+                    return error.MissingTriggerDefinition;
+                }
+            },
+            .drop_trigger => {
+                try writer.writeAll("DROP TRIGGER IF EXISTS ");
+                try writer.writeAll(cmd.table);
+                if (cmd.payload) |on_table| {
+                    try writer.writeAll(" ON ");
+                    try writer.writeAll(on_table);
+                }
+            },
+            .create_extension => {
+                try writer.writeAll("CREATE EXTENSION IF NOT EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .drop_extension => {
+                try writer.writeAll("DROP EXTENSION IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .create_sequence => {
+                try writer.writeAll("CREATE SEQUENCE ");
+                try writer.writeAll(cmd.table);
+            },
+            .drop_sequence => {
+                try writer.writeAll("DROP SEQUENCE IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .create_enum => {
+                try writer.writeAll("CREATE TYPE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" AS ENUM (");
+
+                if (cmd.insert_values.len > 0) {
+                    for (cmd.insert_values, 0..) |val, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writeValue(writer, &val);
+                    }
+                } else if (cmd.payload) |values_sql| {
+                    try writer.writeAll(values_sql);
+                } else {
+                    return error.MissingEnumValues;
+                }
+                try writer.writeByte(')');
+            },
+            .drop_enum => {
+                try writer.writeAll("DROP TYPE IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
+            .alter_enum_add_value => {
+                try writer.writeAll("ALTER TYPE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" ADD VALUE ");
+                if (cmd.payload) |val| {
+                    try writer.writeByte('\'');
+                    try writeEscapedSqlString(writer, val);
+                    try writer.writeByte('\'');
+                } else {
+                    return error.MissingEnumValue;
+                }
+            },
+            .drop_col => {
+                const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" DROP COLUMN ");
+                try writer.writeAll(col_name);
+            },
+            .rename_col => {
+                const from = firstColumnName(cmd) orelse return error.MissingColumnName;
+                const to = if (cmd.payload) |p| p else columnNameAt(cmd, 1) orelse return error.MissingRenameTarget;
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" RENAME COLUMN ");
+                try writer.writeAll(from);
+                try writer.writeAll(" TO ");
+                try writer.writeAll(to);
+            },
+            .copy_out => {
+                try writer.writeAll("COPY (");
+                try writeSelect(writer, cmd, false);
+                try writer.writeAll(") TO STDOUT");
+            },
+            .lock_table => {
+                try writer.writeAll("LOCK TABLE ");
+                try writer.writeAll(cmd.table);
+                if (cmd.payload) |mode| {
+                    try writer.writeByte(' ');
+                    try writer.writeAll(mode);
+                }
+            },
+            .explain => {
+                try writer.writeAll("EXPLAIN ");
+                if (cmd.source_query_sql) |source_sql| {
+                    try writer.writeAll(source_sql);
+                } else if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else if (cmd.table.len > 0) {
+                    try writer.writeAll("SELECT * FROM ");
+                    try writer.writeAll(cmd.table);
+                } else {
+                    return error.MissingExplainQuery;
+                }
+            },
+            .explain_analyze => {
+                try writer.writeAll("EXPLAIN ANALYZE ");
+                if (cmd.source_query_sql) |source_sql| {
+                    try writer.writeAll(source_sql);
+                } else if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else if (cmd.table.len > 0) {
+                    try writer.writeAll("SELECT * FROM ");
+                    try writer.writeAll(cmd.table);
+                } else {
+                    return error.MissingExplainQuery;
+                }
+            },
+            .comment_on => {
+                try writer.writeAll("COMMENT ON ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" IS ");
+                if (cmd.payload) |comment| {
+                    try writer.writeByte('\'');
+                    try writeEscapedSqlString(writer, comment);
+                    try writer.writeByte('\'');
+                } else {
+                    try writer.writeAll("NULL");
+                }
+            },
+            .search => try writeSelect(writer, cmd, false),
+            .scroll => {
+                if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else {
+                    try writer.writeAll("FETCH ");
+                    if (cmd.limit_val) |n| {
+                        try writer.print("FORWARD {d} ", .{n});
+                    } else {
+                        try writer.writeAll("NEXT ");
+                    }
+                    try writer.writeAll("FROM ");
+                    try writer.writeAll(cmd.table);
+                }
+            },
+            .over => try writeSelect(writer, cmd, false),
+            .json_table => {
+                if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else {
+                    return error.UnsupportedCommandForPostgres;
+                }
+            },
+            .create_collection, .delete_collection, .gen => {
+                if (cmd.raw_sql) |raw| {
+                    try writer.writeAll(raw);
+                } else {
+                    return error.UnsupportedCommandForPostgres;
+                }
+            },
+            .alter_set_not_null => {
+                const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" ALTER COLUMN ");
+                try writer.writeAll(col_name);
+                try writer.writeAll(" SET NOT NULL");
+            },
+            .alter_drop_not_null => {
+                const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" ALTER COLUMN ");
+                try writer.writeAll(col_name);
+                try writer.writeAll(" DROP NOT NULL");
+            },
+            .alter_set_default => {
+                const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" ALTER COLUMN ");
+                try writer.writeAll(col_name);
+                try writer.writeAll(" SET DEFAULT ");
+                try writer.writeAll(cmd.payload orelse "NULL");
+            },
+            .alter_drop_default => {
+                const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" ALTER COLUMN ");
+                try writer.writeAll(col_name);
+                try writer.writeAll(" DROP DEFAULT");
+            },
+            .alter_enable_rls => {
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" ENABLE ROW LEVEL SECURITY");
+            },
+            .alter_disable_rls => {
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" DISABLE ROW LEVEL SECURITY");
+            },
+            .alter_force_rls => {
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" FORCE ROW LEVEL SECURITY");
+            },
+            .alter_no_force_rls => {
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" NO FORCE ROW LEVEL SECURITY");
+            },
+            .call => {
+                try writer.writeAll("CALL ");
+                try writer.writeAll(cmd.table);
+            },
+            .do_block => {
+                const lang = if (cmd.table.len == 0) "plpgsql" else cmd.table;
+                try writer.writeAll("DO $$ ");
+                try writer.writeAll(cmd.payload orelse "");
+                try writer.writeAll(" $$ LANGUAGE ");
+                try writer.writeAll(lang);
+            },
+            .session_set => {
+                try writer.writeAll("SET ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" = '");
+                try writeEscapedSqlString(writer, cmd.payload orelse "");
+                try writer.writeByte('\'');
+            },
+            .session_show => {
+                try writer.writeAll("SHOW ");
+                try writer.writeAll(cmd.table);
+            },
+            .session_reset => {
+                try writer.writeAll("RESET ");
+                try writer.writeAll(cmd.table);
+            },
+            .create_database => {
+                try writer.writeAll("CREATE DATABASE ");
+                try writer.writeAll(cmd.table);
+            },
+            .drop_database => {
+                try writer.writeAll("DROP DATABASE IF EXISTS ");
+                try writer.writeAll(cmd.table);
+            },
             // Raw SQL (for backwards compat - should be avoided!)
             .raw => {
                 if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 }
             },
-            else => {
-                // Unhandled command type - log warning
-                std.debug.print("Warning: unhandled CmdKind in AST encoder\n", .{});
-            },
         }
     }
 };
+
+fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
+    try writeCtePrefix(writer, cmd);
+
+    try writer.writeAll("SELECT ");
+
+    if (!count_only and cmd.distinct) {
+        try writer.writeAll("DISTINCT ");
+    }
+
+    if (count_only) {
+        try writer.writeAll("COUNT(*)");
+    } else if (cmd.columns.len == 0) {
+        try writer.writeAll("*");
+    } else {
+        for (cmd.columns, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeExpr(writer, &col);
+        }
+    }
+
+    if (cmd.only_table) {
+        try writer.writeAll(" FROM ONLY ");
+    } else {
+        try writer.writeAll(" FROM ");
+    }
+    try writer.writeAll(cmd.table);
+
+    if (cmd.sample_method) |method| {
+        try writer.print(" TABLESAMPLE {s}(", .{method.toSql()});
+        if (cmd.sample_percent) |pct| {
+            try writer.print("{d}", .{pct});
+        }
+        try writer.writeAll(")");
+        if (cmd.sample_seed) |seed| {
+            try writer.print(" REPEATABLE({d})", .{seed});
+        }
+    }
+
+    if (cmd.table_alias) |alias| {
+        try writer.writeAll(" AS ");
+        try writer.writeAll(alias);
+    }
+
+    for (cmd.joins) |join| {
+        try writer.print(" {s} ", .{join.kind.toSql()});
+        try writer.writeAll(join.table);
+        if (join.alias) |alias| {
+            try writer.writeAll(" AS ");
+            try writer.writeAll(alias);
+        }
+        try writer.writeAll(" ON ");
+        try writer.writeAll(join.on_left);
+        try writer.writeAll(" = ");
+        try writer.writeAll(join.on_right);
+    }
+
+    if (cmd.where_clauses.len > 0) {
+        try writer.writeAll(" WHERE ");
+        for (cmd.where_clauses, 0..) |clause, i| {
+            if (i > 0) {
+                try writer.print(" {s} ", .{clause.logical_op.toSql()});
+            }
+            try writer.writeAll(clause.condition.column);
+            try writer.print(" {s} ", .{clause.condition.op.toSql()});
+            try writeValue(writer, &clause.condition.value);
+        }
+    }
+
+    if (cmd.group_by.len > 0) {
+        try writer.writeAll(" GROUP BY ");
+        for (cmd.group_by, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(col);
+        }
+    }
+
+    if (cmd.having_clauses.len > 0) {
+        try writer.writeAll(" HAVING ");
+        for (cmd.having_clauses, 0..) |clause, i| {
+            if (i > 0) {
+                try writer.print(" {s} ", .{clause.logical_op.toSql()});
+            }
+            try writer.writeAll(clause.condition.column);
+            try writer.print(" {s} ", .{clause.condition.op.toSql()});
+            try writeValue(writer, &clause.condition.value);
+        }
+    }
+
+    if (cmd.order_by.len > 0) {
+        try writer.writeAll(" ORDER BY ");
+        for (cmd.order_by, 0..) |order, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(order.column);
+            try writer.print(" {s}", .{order.order.toSql()});
+        }
+    }
+
+    if (cmd.limit_val) |limit| {
+        try writer.print(" LIMIT {d}", .{limit});
+    }
+
+    if (cmd.offset_val) |offset| {
+        try writer.print(" OFFSET {d}", .{offset});
+    }
+
+    if (cmd.fetch_count) |count| {
+        if (cmd.fetch_with_ties) {
+            try writer.print(" FETCH FIRST {d} ROWS WITH TIES", .{count});
+        } else {
+            try writer.print(" FETCH FIRST {d} ROWS ONLY", .{count});
+        }
+    }
+
+    if (cmd.lock_mode) |lock| {
+        try writer.print(" {s}", .{lock.toSql()});
+    }
+}
+
+fn writeCtePrefix(writer: anytype, cmd: *const QailCmd) !void {
+    if (cmd.ctes.len == 0) return;
+
+    try writer.writeAll("WITH ");
+
+    var has_recursive = false;
+    for (cmd.ctes) |cte| {
+        if (cte.recursive) {
+            has_recursive = true;
+            break;
+        }
+    }
+    if (has_recursive) {
+        try writer.writeAll("RECURSIVE ");
+    }
+
+    for (cmd.ctes, 0..) |cte, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.writeAll(cte.name);
+
+        if (cte.columns.len > 0) {
+            try writer.writeAll("(");
+            for (cte.columns, 0..) |col, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writer.writeAll(col);
+            }
+            try writer.writeAll(")");
+        }
+
+        try writer.writeAll(" AS (");
+        try writer.writeAll(cte.base_sql);
+        try writer.writeAll(")");
+    }
+
+    try writer.writeAll(" ");
+}
+
+fn firstColumnName(cmd: *const QailCmd) ?[]const u8 {
+    if (cmd.columns.len == 0) return null;
+
+    return switch (cmd.columns[0]) {
+        .named => |name| name,
+        .column_def => |def| def.name,
+        .aliased => |a| a.name,
+        else => null,
+    };
+}
+
+fn columnNameAt(cmd: *const QailCmd, idx: usize) ?[]const u8 {
+    if (idx >= cmd.columns.len) return null;
+    return switch (cmd.columns[idx]) {
+        .named => |name| name,
+        .column_def => |def| def.name,
+        .aliased => |a| a.name,
+        else => null,
+    };
+}
+
+fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) !void {
+    try writer.writeAll("INSERT INTO ");
+    try writer.writeAll(cmd.table);
+
+    // Column list (skip for DEFAULT VALUES and INSERT .. SELECT without explicit target columns)
+    if (!cmd.default_values and cmd.columns.len > 0) {
+        try writer.writeAll(" (");
+        for (cmd.columns, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeExpr(writer, &col);
+        }
+        try writer.writeByte(')');
+    } else if (!cmd.default_values and cmd.columns.len == 0 and cmd.assignments.len > 0) {
+        try writer.writeAll(" (");
+        for (cmd.assignments, 0..) |assign, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(assign.column);
+        }
+        try writer.writeByte(')');
+    }
+
+    if (cmd.overriding) |ovr| {
+        try writer.print(" {s}", .{ovr.toSql()});
+    }
+
+    if (cmd.default_values) {
+        try writer.writeAll(" DEFAULT VALUES");
+    } else if (cmd.source_query_sql) |source_sql| {
+        try writer.writeByte(' ');
+        try writer.writeAll(source_sql);
+    } else if (cmd.insert_values.len > 0) {
+        try writer.writeAll(" VALUES (");
+        for (cmd.insert_values, 0..) |val, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeValue(writer, &val);
+        }
+        try writer.writeByte(')');
+    } else if (cmd.assignments.len > 0) {
+        try writer.writeAll(" VALUES (");
+        for (cmd.assignments, 0..) |assign, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeValue(writer, &assign.value);
+        }
+        try writer.writeByte(')');
+    } else {
+        return error.MissingInsertValues;
+    }
+
+    if (include_conflict) {
+        if (cmd.on_conflict) |conflict| {
+            try writer.writeAll(" ON CONFLICT");
+            if (conflict.columns.len > 0) {
+                try writer.writeAll(" (");
+                for (conflict.columns, 0..) |col, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(col);
+                }
+                try writer.writeByte(')');
+            }
+
+            switch (conflict.action) {
+                .do_nothing => try writer.writeAll(" DO NOTHING"),
+                .do_update => {
+                    const updates = conflict.update_columns;
+                    if (updates.len == 0 and cmd.assignments.len == 0) {
+                        try writer.writeAll(" DO NOTHING");
+                    } else if (updates.len == 0) {
+                        try writer.writeAll(" DO UPDATE SET ");
+                        for (cmd.assignments, 0..) |assign, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            try writer.writeAll(assign.column);
+                            try writer.writeAll(" = EXCLUDED.");
+                            try writer.writeAll(assign.column);
+                        }
+                    } else {
+                        try writer.writeAll(" DO UPDATE SET ");
+                        for (updates, 0..) |assign, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            try writer.writeAll(assign.column);
+                            try writer.writeAll(" = ");
+                            try writeValue(writer, &assign.value);
+                        }
+                    }
+                },
+            }
+        } else {
+            // PUT/UPSERT defaults to conflict-tolerant behavior when no clause is provided.
+            try writer.writeAll(" ON CONFLICT DO NOTHING");
+        }
+    }
+
+    if (cmd.returning.len > 0) {
+        try writer.writeAll(" RETURNING ");
+        for (cmd.returning, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeExpr(writer, &col);
+        }
+    }
+}
+
+fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
+    for (value) |c| {
+        if (c == '\'') {
+            try writer.writeAll("''");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+}
 
 fn writeExpr(writer: anytype, expr: *const Expr) !void {
     switch (expr.*) {
@@ -746,4 +1213,64 @@ test "ast encoder aggregates" {
     const bytes = encoder.getWritten();
 
     try std.testing.expect(bytes.len > 20);
+}
+
+test "ast encoder put defaults to conflict do nothing" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "id", .value = Value.fromInt(1) },
+        .{ .column = "name", .value = Value.fromString("alpha") },
+    };
+    const cmd = QailCmd.put("users").values(&assigns);
+
+    try encoder.encodeQuery(&cmd);
+    const bytes = encoder.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ON CONFLICT DO NOTHING") != null);
+}
+
+test "ast encoder create enum from insert values" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const values = [_]Value{
+        Value.fromString("todo"),
+        Value.fromString("done"),
+    };
+    var cmd = QailCmd{
+        .kind = .create_enum,
+        .table = "task_status",
+        .insert_values = &values,
+    };
+
+    try encoder.encodeQuery(&cmd);
+    const bytes = encoder.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "CREATE TYPE task_status AS ENUM") != null);
+}
+
+test "ast encoder explain analyze" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var cmd = QailCmd{
+        .kind = .explain_analyze,
+        .table = "users",
+    };
+
+    try encoder.encodeQuery(&cmd);
+    const bytes = encoder.getWritten();
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "EXPLAIN ANALYZE SELECT * FROM users") != null);
+}
+
+test "ast encoder rejects non-postgres command without raw sql" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var cmd = QailCmd{
+        .kind = .create_collection,
+        .table = "vec_docs",
+    };
+
+    try std.testing.expectError(error.UnsupportedCommandForPostgres, encoder.encodeQuery(&cmd));
 }

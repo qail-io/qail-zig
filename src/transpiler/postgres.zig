@@ -7,6 +7,7 @@
 // The primary path is AST → Wire Protocol via ast_encoder.zig
 
 const std = @import("std");
+const io = @import("../compat/io.zig");
 const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");
@@ -25,12 +26,12 @@ const Value = ast.Value;
 
 /// Convert a QAIL AST command to PostgreSQL SQL string
 pub fn toSql(allocator: std.mem.Allocator, cmd: *const QailCmd) ![]const u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{};
-    errdefer buf.deinit(allocator);
+    var writer = io.AllocatingWriter.init(allocator);
+    defer writer.deinit();
 
-    try writeCmd(buf.writer(allocator), cmd);
+    try writeCmd(writer.writer(), cmd);
 
-    return try buf.toOwnedSlice(allocator);
+    return try writer.toOwnedSlice();
 }
 
 fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {

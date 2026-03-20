@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const time = qail.compat.time;
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 const Value = qail.ast.Value;
@@ -312,13 +313,13 @@ fn bench(
     std.mem.doNotOptimizeAway(&sink);
 
     // Timed run
-    const start = std.time.Instant.now() catch unreachable;
+    const start = time.now() catch unreachable;
     for (0..ITERATIONS) |_| {
         sink +%= run_fn(alloc);
         _ = arena.reset(.retain_capacity);
     }
     std.mem.doNotOptimizeAway(&sink);
-    const end = std.time.Instant.now() catch unreachable;
+    const end = time.now() catch unreachable;
     const elapsed_ns = end.since(start);
     const ns_per = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS));
     const ops_per_sec = @as(f64, @floatFromInt(ITERATIONS)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);

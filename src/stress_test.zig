@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const net = qail.compat.net;
+const time = qail.compat.time;
 
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;
@@ -22,8 +24,8 @@ pub fn main() !void {
     // Connect to PostgreSQL using raw TCP
     std.debug.print("🔌 Connecting to PostgreSQL...\n", .{});
 
-    const address = try std.net.Address.parseIp4("127.0.0.1", 5432);
-    var stream = try std.net.tcpConnectToAddress(address);
+    const address = try net.parseIp4("127.0.0.1", 5432);
+    var stream = try net.tcpConnectToAddress(address);
     defer stream.close();
 
     var encoder = Encoder.init(allocator);
@@ -72,8 +74,8 @@ pub fn main() !void {
     std.debug.print("\n✅ Pipelined stress test complete!\n", .{});
 }
 
-fn runPipelinedBenchmark(stream: *std.net.Stream, encoder: *Encoder, read_buf: *[8192]u8, iterations: u64, batch_size: u64) !u64 {
-    const start = std.time.Instant.now() catch unreachable;
+fn runPipelinedBenchmark(stream: *net.Stream, encoder: *Encoder, read_buf: *[8192]u8, iterations: u64, batch_size: u64) !u64 {
+    const start = time.now() catch unreachable;
 
     var completed: u64 = 0;
     while (completed < iterations) {
@@ -107,11 +109,11 @@ fn runPipelinedBenchmark(stream: *std.net.Stream, encoder: *Encoder, read_buf: *
         }
     }
 
-    const end = std.time.Instant.now() catch unreachable;
+    const end = time.now() catch unreachable;
     return end.since(start);
 }
 
-fn readBatchResponses(stream: *std.net.Stream, buf: *[8192]u8, expected: u64) !void {
+fn readBatchResponses(stream: *net.Stream, buf: *[8192]u8, expected: u64) !void {
     var read_pos: usize = 0;
     var read_len: usize = 0;
     var responses: u64 = 0;
@@ -162,7 +164,7 @@ fn readBatchResponses(stream: *std.net.Stream, buf: *[8192]u8, expected: u64) !v
     }
 }
 
-fn readUntilReady(stream: *std.net.Stream, buf: *[8192]u8) !void {
+fn readUntilReady(stream: *net.Stream, buf: *[8192]u8) !void {
     var read_pos: usize = 0;
     var read_len: usize = 0;
 

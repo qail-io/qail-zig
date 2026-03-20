@@ -107,6 +107,47 @@ pub const Decoder = struct {
         return @enumFromInt(auth_type);
     }
 
+    /// Parse MD5 salt from AuthenticationMD5Password payload.
+    ///
+    /// Must be called after `parseAuthentication()` when auth type is `md5_password`.
+    pub fn parseAuthenticationMd5Salt(self: *Decoder) ![4]u8 {
+        const salt_bytes = try self.readBytes(4);
+        if (self.remaining() != 0) return error.InvalidAuthenticationPayload;
+
+        var salt: [4]u8 = undefined;
+        std.mem.copyForwards(u8, salt[0..], salt_bytes);
+        return salt;
+    }
+
+    /// Parse SASL mechanism list from AuthenticationSASL payload.
+    ///
+    /// Must be called after `parseAuthentication()` when auth type is `sasl`.
+    pub fn parseAuthenticationSaslMechanisms(self: *Decoder, allocator: std.mem.Allocator) ![][]const u8 {
+        var mechs: std.ArrayList([]const u8) = .{};
+        defer mechs.deinit(allocator);
+
+        while (true) {
+            const mechanism = try self.readCString();
+            if (mechanism.len == 0) break; // Final list terminator
+            try mechs.append(allocator, mechanism);
+        }
+
+        if (self.remaining() != 0 or mechs.items.len == 0) {
+            return error.InvalidSaslMechanismList;
+        }
+
+        return try mechs.toOwnedSlice(allocator);
+    }
+
+    /// Parse opaque SASL data payload (AuthenticationSASLContinue / AuthenticationSASLFinal).
+    ///
+    /// Must be called after `parseAuthentication()`.
+    pub fn parseAuthenticationSaslData(self: *Decoder) ![]const u8 {
+        const data = self.data[self.pos..];
+        self.pos = self.data.len;
+        return data;
+    }
+
     /// Parse ParameterStatus message
     pub fn parseParameterStatus(self: *Decoder) !struct { name: []const u8, value: []const u8 } {
         const name = try self.readCString();
@@ -119,6 +160,46 @@ pub const Decoder = struct {
         const process_id = try self.readU32();
         const secret_key = try self.readU32();
         return .{ .process_id = process_id, .secret_key = secret_key };
+    }
+
+    /// Parse NotificationResponse message.
+    ///
+    /// Payload format: i32(process_id) + cstring(channel) + cstring(payload)
+    pub fn parseNotificationResponse(self: *Decoder) !struct { process_id: i32, channel: []const u8, payload: []const u8 } {
+        const process_id = try self.readI32();
+        const channel = try self.readCString();
+        const payload = try self.readCString();
+        if (self.remaining() != 0) return error.InvalidNotificationPayload;
+        return .{
+            .process_id = process_id,
+            .channel = channel,
+            .payload = payload,
+        };
+    }
+
+    /// Parse CopyIn/CopyOut/CopyBoth response payload.
+    ///
+    /// Payload format: u8(overall_format) + i16(column_count) + i16[column_count](column_formats)
+    pub fn parseCopyResponse(self: *Decoder, allocator: std.mem.Allocator) !struct { format: u8, column_formats: []u8 } {
+        const format = try self.readByte();
+        const raw_count = try self.readI16();
+        if (raw_count < 0) return error.InvalidCopyResponse;
+
+        const column_count: usize = @intCast(raw_count);
+        var column_formats = try allocator.alloc(u8, column_count);
+        errdefer allocator.free(column_formats);
+
+        for (0..column_count) |i| {
+            const raw_format = try self.readI16();
+            if (raw_format != 0 and raw_format != 1) return error.InvalidCopyResponse;
+            column_formats[i] = @intCast(raw_format);
+        }
+
+        if (self.remaining() != 0) return error.InvalidCopyResponse;
+        return .{
+            .format = format,
+            .column_formats = column_formats,
+        };
     }
 
     /// Parse ReadyForQuery message
@@ -221,6 +302,81 @@ test "decode authentication ok" {
 
     const auth_type = try decoder.parseAuthentication();
     try std.testing.expectEqual(AuthType.ok, auth_type);
+}
+
+test "decode authentication md5 salt" {
+    const data = [_]u8{ 0, 0, 0, 5, 0x12, 0x34, 0x56, 0x78 };
+    var decoder = Decoder.init(&data);
+
+    const auth_type = try decoder.parseAuthentication();
+    try std.testing.expectEqual(AuthType.md5_password, auth_type);
+
+    const salt = try decoder.parseAuthenticationMd5Salt();
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78 }, &salt);
+}
+
+test "decode authentication sasl mechanisms" {
+    const data = [_]u8{
+        0,    0,    0,    10, // SASL auth code
+        'S',  'C',  'R',  'A', 'M', '-', 'S', 'H',
+        'A',  '-',  '2',  '5', '6', 0,
+        'S',  'C',  'R',  'A', 'M', '-', 'S', 'H',
+        'A',  '-',  '2',  '5', '6', '-', 'P', 'L',
+        'U',  'S',  0,
+        0,
+    };
+    var decoder = Decoder.init(&data);
+
+    const auth_type = try decoder.parseAuthentication();
+    try std.testing.expectEqual(AuthType.sasl, auth_type);
+
+    const mechs = try decoder.parseAuthenticationSaslMechanisms(std.testing.allocator);
+    defer std.testing.allocator.free(mechs);
+
+    try std.testing.expectEqual(@as(usize, 2), mechs.len);
+    try std.testing.expectEqualStrings("SCRAM-SHA-256", mechs[0]);
+    try std.testing.expectEqualStrings("SCRAM-SHA-256-PLUS", mechs[1]);
+}
+
+test "decode authentication sasl data" {
+    const data = [_]u8{ 0, 0, 0, 11, 'r', '=', 'a', ',', 's', '=', 'b' };
+    var decoder = Decoder.init(&data);
+
+    const auth_type = try decoder.parseAuthentication();
+    try std.testing.expectEqual(AuthType.sasl_continue, auth_type);
+
+    const sasl_data = try decoder.parseAuthenticationSaslData();
+    try std.testing.expectEqualStrings("r=a,s=b", sasl_data);
+}
+
+test "decode notification response" {
+    const data = [_]u8{
+        0,   0,   0,   123, // process id
+        'm', 'y', '_', 'c', 'h', 'a', 'n', 0, // channel
+        'h', 'e', 'l', 'l', 'o', 0, // payload
+    };
+    var decoder = Decoder.init(&data);
+
+    const notification = try decoder.parseNotificationResponse();
+    try std.testing.expectEqual(@as(i32, 123), notification.process_id);
+    try std.testing.expectEqualStrings("my_chan", notification.channel);
+    try std.testing.expectEqualStrings("hello", notification.payload);
+}
+
+test "decode copy response" {
+    const data = [_]u8{
+        0, // overall format
+        0, 2, // 2 column formats
+        0, 0, // text
+        0, 1, // binary
+    };
+    var decoder = Decoder.init(&data);
+
+    const copy = try decoder.parseCopyResponse(std.testing.allocator);
+    defer std.testing.allocator.free(copy.column_formats);
+
+    try std.testing.expectEqual(@as(u8, 0), copy.format);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1 }, copy.column_formats);
 }
 
 test "decode c string" {

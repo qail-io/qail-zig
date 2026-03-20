@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const net = qail.compat.net;
+const time = qail.compat.time;
 
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;
@@ -29,8 +31,8 @@ pub fn main() !void {
     // Connect to PostgreSQL
     std.debug.print("🔌 Connecting to PostgreSQL...\n", .{});
 
-    const address = try std.net.Address.parseIp4("127.0.0.1", 5432);
-    var stream = try std.net.tcpConnectToAddress(address);
+    const address = try net.parseIp4("127.0.0.1", 5432);
+    var stream = try net.tcpConnectToAddress(address);
     defer stream.close();
 
     var encoder = Encoder.init(allocator);
@@ -82,9 +84,9 @@ pub fn main() !void {
 
     std.debug.print("\n📊 Running 50 MILLION queries...\n\n", .{});
 
-    const start = std.time.Instant.now() catch unreachable;
+    const start = time.now() catch unreachable;
     var completed: u64 = 0;
-    var last_report = std.time.Instant.now() catch unreachable;
+    var last_report = time.now() catch unreachable;
 
     for (0..BATCHES) |batch| {
         _ = try runBatch(&stream, &encoder, &read_buf, &params_batch);
@@ -92,7 +94,7 @@ pub fn main() !void {
 
         // Progress every 1M
         if (completed % 1_000_000 == 0) {
-            const now = std.time.Instant.now() catch unreachable;
+            const now = time.now() catch unreachable;
             const elapsed_ns = now.since(start);
             const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
             const qps = @as(f64, @floatFromInt(completed)) / elapsed_s;
@@ -110,7 +112,7 @@ pub fn main() !void {
         }
     }
 
-    const end = std.time.Instant.now() catch unreachable;
+    const end = time.now() catch unreachable;
     const total_ns = end.since(start);
     const total_s = @as(f64, @floatFromInt(total_ns)) / 1_000_000_000.0;
     const final_qps = @as(f64, @floatFromInt(TOTAL_QUERIES)) / total_s;
@@ -133,7 +135,7 @@ pub fn main() !void {
     std.debug.print("\n⚡ Pure Zig - Zero FFI - Zero GC\n", .{});
 }
 
-fn runBatch(stream: *std.net.Stream, encoder: *Encoder, buf: *[16384]u8, params_batch: *const [BATCH_SIZE][1]?[]const u8) !u64 {
+fn runBatch(stream: *net.Stream, encoder: *Encoder, buf: *[16384]u8, params_batch: *const [BATCH_SIZE][1]?[]const u8) !u64 {
     // Pipeline: Send all Bind+Execute at once
     for (params_batch) |params| {
         try encoder.encodeBind("", "s1", &params);
@@ -150,7 +152,7 @@ fn runBatch(stream: *std.net.Stream, encoder: *Encoder, buf: *[16384]u8, params_
     return try readBatchResponses(stream, buf, BATCH_SIZE);
 }
 
-fn readBatchResponses(stream: *std.net.Stream, buf: *[16384]u8, _: u64) !u64 {
+fn readBatchResponses(stream: *net.Stream, buf: *[16384]u8, _: u64) !u64 {
     var read_pos: usize = 0;
     var read_len: usize = 0;
     var commands: u64 = 0;
@@ -197,7 +199,7 @@ fn readBatchResponses(stream: *std.net.Stream, buf: *[16384]u8, _: u64) !u64 {
     }
 }
 
-fn readUntilReady(stream: *std.net.Stream, buf: *[16384]u8) !void {
+fn readUntilReady(stream: *net.Stream, buf: *[16384]u8) !void {
     var read_pos: usize = 0;
     var read_len: usize = 0;
 

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const time = qail.compat.time;
 
 const AsyncConnection = qail.driver.AsyncConnection;
 const Connection = qail.driver.Connection;
@@ -20,9 +21,9 @@ pub fn main() !void {
     // Test 1: Connect timeout to non-existent host
     std.debug.print("📋 Test 1: Connection timeout (500ms to unreachable IP)...\n", .{});
     {
-        const start = std.time.Instant.now() catch unreachable;
+        const start = time.now() catch unreachable;
         const result = AsyncConnection.connect(allocator, "10.255.255.1", 5432, 500);
-        const end = std.time.Instant.now() catch unreachable;
+        const end = time.now() catch unreachable;
         const elapsed_ms = @as(f64, @floatFromInt(end.since(start))) / 1_000_000.0;
 
         if (result) |*conn| {
@@ -41,14 +42,14 @@ pub fn main() !void {
     // Test 2: Successful async connection
     std.debug.print("\n📋 Test 2: Async connection to PostgreSQL (5s timeout)...\n", .{});
     {
-        const start = std.time.Instant.now() catch unreachable;
+        const start = time.now() catch unreachable;
         var conn = AsyncConnection.connect(allocator, "127.0.0.1", 5432, 5000) catch |err| {
             std.debug.print("   ❌ FAIL: {s}\n", .{@errorName(err)});
             return;
         };
         defer conn.close();
 
-        const end = std.time.Instant.now() catch unreachable;
+        const end = time.now() catch unreachable;
         const elapsed_ms = @as(f64, @floatFromInt(end.since(start))) / 1_000_000.0;
         std.debug.print("   ✅ Connected in {d:.2}ms\n", .{elapsed_ms});
 
@@ -63,14 +64,14 @@ pub fn main() !void {
     // Test 3: Sync connection with timeout
     std.debug.print("\n📋 Test 3: Sync Connection.connectWithTimeout (5s)...\n", .{});
     {
-        const start = std.time.Instant.now() catch unreachable;
+        const start = time.now() catch unreachable;
         var conn = Connection.connectWithTimeout(allocator, "127.0.0.1", 5432, 5000) catch |err| {
             std.debug.print("   ❌ FAIL: {s}\n", .{@errorName(err)});
             return;
         };
         defer conn.close();
 
-        const end = std.time.Instant.now() catch unreachable;
+        const end = time.now() catch unreachable;
         const elapsed_ms = @as(f64, @floatFromInt(end.since(start))) / 1_000_000.0;
         std.debug.print("   ✅ Connected in {d:.2}ms\n", .{elapsed_ms});
 

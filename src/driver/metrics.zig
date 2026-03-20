@@ -4,6 +4,7 @@
 //! latency histogram, and Prometheus export.
 
 const std = @import("std");
+const io = @import("../compat/io.zig");
 
 /// Latency bucket boundaries in nanoseconds
 const BUCKET_BOUNDS_NS = [_]u64{
@@ -214,10 +215,10 @@ test "PoolMetrics prometheus export" {
     m.recordConnectionCreated();
 
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try m.toPrometheus(fbs.writer());
+    var writer = io.FixedBufferWriter.init(&buf);
+    try m.toPrometheus(writer.writer());
 
-    const output = fbs.getWritten();
+    const output = writer.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "qail_queries_total 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "qail_connections_created 1") != null);
 }

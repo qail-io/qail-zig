@@ -10,6 +10,11 @@ const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 
 /// Protocol encoder - writes PostgreSQL wire format messages
 pub const Encoder = struct {
+    pub const StartupParam = struct {
+        name: []const u8,
+        value: []const u8,
+    };
+
     buffer: std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
 
@@ -82,11 +87,23 @@ pub const Encoder = struct {
 
     /// Encode StartupMessage (no message type byte, just length + version + params)
     pub fn encodeStartup(self: *Encoder, user: []const u8, database: []const u8) !void {
+        return self.encodeStartupWithParams(user, database, &.{});
+    }
+
+    /// Encode StartupMessage with additional startup parameters.
+    pub fn encodeStartupWithParams(
+        self: *Encoder,
+        user: []const u8,
+        database: []const u8,
+        extra_params: []const StartupParam,
+    ) !void {
         self.reset();
 
-        // Calculate message length first
-        // length(4) + version(4) + "user\0" + user + "\0" + "database\0" + database + "\0" + "\0"
-        const msg_len: u32 = 4 + 4 + 5 + @as(u32, @intCast(user.len)) + 1 + 9 + @as(u32, @intCast(database.len)) + 1 + 1;
+        // length(4) + version(4) + mandatory params + extra params + final terminator
+        var msg_len: u32 = 4 + 4 + 5 + @as(u32, @intCast(user.len)) + 1 + 9 + @as(u32, @intCast(database.len)) + 1 + 1;
+        for (extra_params) |param| {
+            msg_len += @as(u32, @intCast(param.name.len + 1 + param.value.len + 1));
+        }
 
         try self.writeU32(msg_len);
         try self.writeU32(PROTOCOL_VERSION);
@@ -94,6 +111,10 @@ pub const Encoder = struct {
         try self.writeCString(user);
         try self.writeCString("database");
         try self.writeCString(database);
+        for (extra_params) |param| {
+            try self.writeCString(param.name);
+            try self.writeCString(param.value);
+        }
         try self.writeByte(0); // End of parameters
     }
 
@@ -105,6 +126,48 @@ pub const Encoder = struct {
         try self.writeByte(@intFromEnum(FrontendMessage.password));
         try self.writeU32(msg_len);
         try self.writeCString(password);
+    }
+
+    /// Encode SASLInitialResponse (SCRAM first message).
+    ///
+    /// PostgreSQL wire format:
+    /// 'p' + len + mechanism\0 + i32(initial_response_len) + initial_response
+    pub fn encodeSaslInitialResponse(
+        self: *Encoder,
+        mechanism: []const u8,
+        initial_response: ?[]const u8,
+    ) !void {
+        self.reset();
+
+        var msg_len: u32 = 4 + @as(u32, @intCast(mechanism.len)) + 1 + 4;
+        var response_len: i32 = -1;
+
+        if (initial_response) |response| {
+            msg_len += @as(u32, @intCast(response.len));
+            response_len = @intCast(response.len);
+        }
+
+        try self.writeByte(@intFromEnum(FrontendMessage.password));
+        try self.writeU32(msg_len);
+        try self.writeCString(mechanism);
+        try self.writeI32(response_len);
+
+        if (initial_response) |response| {
+            try self.writeBytes(response);
+        }
+    }
+
+    /// Encode SASLResponse (SCRAM continue/final message).
+    ///
+    /// PostgreSQL wire format:
+    /// 'p' + len + response
+    pub fn encodeSaslResponse(self: *Encoder, response: []const u8) !void {
+        self.reset();
+
+        const msg_len: u32 = 4 + @as(u32, @intCast(response.len));
+        try self.writeByte(@intFromEnum(FrontendMessage.password));
+        try self.writeU32(msg_len);
+        try self.writeBytes(response);
     }
 
     /// Encode Query (Simple Query Protocol)
@@ -277,6 +340,26 @@ test "encode startup message" {
     try std.testing.expectEqual(PROTOCOL_VERSION, version);
 }
 
+test "encode startup message with params" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try encoder.encodeStartupWithParams(
+        "postgres",
+        "testdb",
+        &.{
+            .{ .name = "replication", .value = "database" },
+            .{ .name = "application_name", .value = "qail-zig" },
+        },
+    );
+    const bytes = encoder.getWritten();
+    const len = std.mem.readInt(u32, bytes[0..4], .big);
+
+    try std.testing.expectEqual(@as(u32, @intCast(bytes.len)), len);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "replication") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "database") != null);
+}
+
 test "encode simple query" {
     var encoder = Encoder.init(std.testing.allocator);
     defer encoder.deinit();
@@ -299,4 +382,40 @@ test "encode sync" {
 
     try std.testing.expectEqual(@as(u8, 'S'), bytes[0]);
     try std.testing.expectEqual(@as(usize, 5), bytes.len);
+}
+
+test "encode sasl initial response" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try encoder.encodeSaslInitialResponse("SCRAM-SHA-256", "n,,n=user,r=nonce");
+    const bytes = encoder.getWritten();
+
+    try std.testing.expectEqual(@as(u8, 'p'), bytes[0]);
+    try std.testing.expectEqual(
+        @as(u32, 4 + "SCRAM-SHA-256".len + 1 + 4 + "n,,n=user,r=nonce".len),
+        std.mem.readInt(u32, bytes[1..5], .big),
+    );
+
+    const mechanism = bytes[5 .. 5 + "SCRAM-SHA-256".len];
+    try std.testing.expectEqualStrings("SCRAM-SHA-256", mechanism);
+
+    const response_len_off = 5 + "SCRAM-SHA-256".len + 1;
+    const response_len = std.mem.readInt(i32, bytes[response_len_off .. response_len_off + 4], .big);
+    try std.testing.expectEqual(@as(i32, "n,,n=user,r=nonce".len), response_len);
+}
+
+test "encode sasl response" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try encoder.encodeSaslResponse("c=biws,r=nonce,p=proof");
+    const bytes = encoder.getWritten();
+
+    try std.testing.expectEqual(@as(u8, 'p'), bytes[0]);
+    try std.testing.expectEqual(
+        @as(u32, 4 + "c=biws,r=nonce,p=proof".len),
+        std.mem.readInt(u32, bytes[1..5], .big),
+    );
+    try std.testing.expectEqualStrings("c=biws,r=nonce,p=proof", bytes[5..]);
 }

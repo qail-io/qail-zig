@@ -4,6 +4,7 @@
 //! Port of qail.rs/qail-pg/src/driver/cancel.rs
 
 const std = @import("std");
+const net = @import("../compat/net.zig");
 
 /// PostgreSQL CancelRequest code: 80877102
 const CANCEL_REQUEST_CODE: i32 = 80877102;
@@ -32,12 +33,8 @@ pub fn cancelQuery(
     process_id: i32,
     secret_key: i32,
 ) !void {
-    // Create address string
-    const addr_str = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
-    defer allocator.free(addr_str);
-
     // Connect using Stream
-    var stream = std.net.tcpConnectToHost(allocator, host, port) catch |err| {
+    var stream = net.tcpConnectToHost(allocator, host, port) catch |err| {
         return err;
     };
     defer stream.close();

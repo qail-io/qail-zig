@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const time = qail.compat.time;
 
 const Pipeline = qail.driver.Pipeline;
 const Connection = qail.driver.Connection;
@@ -55,11 +56,11 @@ pub fn main() !void {
         defer allocator.free(params_batch);
         @memset(params_batch, &.{});
 
-        const start = std.time.Instant.now() catch unreachable;
+        const start = time.now() catch unreachable;
 
         const completed = try pipeline.pipelinePreparedFast(&stmt, params_batch);
 
-        const end = std.time.Instant.now() catch unreachable;
+        const end = time.now() catch unreachable;
         const nanos = end.since(start);
         const ms = @as(f64, @floatFromInt(nanos)) / 1_000_000.0;
         const qps = @as(f64, @floatFromInt(completed)) / (ms / 1000.0);

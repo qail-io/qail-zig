@@ -39,7 +39,7 @@ pub fn main() !void {
         return;
     };
     defer driver.deinit();
-    std.debug.print(" ✓ Connected (PID: {d})\n", .{driver.conn.process_id});
+    std.debug.print(" ✓ Connected (PID: {d})\n", .{driver.backendProcessId()});
     passed += 1;
 
     // ── Test 2: DDL — Create Table ───────────────────────────

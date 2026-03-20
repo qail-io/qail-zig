@@ -8,6 +8,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const print = std.debug.print;
+const io = @import("compat/io.zig");
 const PgDriver = @import("driver/driver.zig").PgDriver;
 const differ = @import("parser/differ.zig");
 const MigrationCmd = differ.MigrationCmd;
@@ -30,26 +31,26 @@ pub const DestructiveOp = struct {
     };
 
     pub fn format(self: DestructiveOp, allocator: Allocator) ![]const u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(allocator);
-        const writer = buf.writer(allocator);
+        var writer = io.AllocatingWriter.init(allocator);
+        defer writer.deinit();
+        const out = writer.writer();
 
         switch (self.op_type) {
             .drop_column => {
-                try writer.print("DROP COLUMN {s}.{s} → {} values at risk", .{
+                try out.print("DROP COLUMN {s}.{s} → {} values at risk", .{
                     self.table,
                     self.column orelse "?",
                     self.rows_affected,
                 });
             },
             .drop_table => {
-                try writer.print("DROP TABLE {s} → {} rows affected", .{
+                try out.print("DROP TABLE {s} → {} rows affected", .{
                     self.table,
                     self.rows_affected,
                 });
             },
             .alter_type => {
-                try writer.print("ALTER TYPE {s}.{s} → {} values affected", .{
+                try out.print("ALTER TYPE {s}.{s} → {} values affected", .{
                     self.table,
                     self.column orelse "?",
                     self.rows_affected,
@@ -57,7 +58,7 @@ pub const DestructiveOp = struct {
             },
         }
 
-        return buf.toOwnedSlice();
+        return writer.toOwnedSlice();
     }
 };
 
@@ -265,16 +266,7 @@ pub fn promptBackupOptions() BackupChoice {
 
     // Read single line from stdin (cross-platform)
     var buf: [16]u8 = undefined;
-    const bytes_read = blk: {
-        const builtin = @import("builtin");
-        if (builtin.os.tag == .windows) {
-            // Windows: use std.fs.cwd() based stdin (skip for now, return cancel)
-            break :blk @as(usize, 0);
-        } else {
-            // Unix: use posix
-            break :blk std.posix.read(std.posix.STDIN_FILENO, &buf) catch break :blk @as(usize, 0);
-        }
-    };
+    const bytes_read = io.readStdin(&buf) catch return .cancel;
     if (bytes_read == 0) return .cancel;
 
     const trimmed = std.mem.trim(u8, buf[0..bytes_read], " \t\r\n");
@@ -325,18 +317,19 @@ pub fn snapshotColumnToDb(
 ) !u64 {
     const QailCmd = @import("ast/cmd.zig").QailCmd;
 
-    var sql_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer sql_buf.deinit(allocator);
-
-    try sql_buf.writer(allocator).print(
+    var sql_writer = io.AllocatingWriter.init(allocator);
+    defer sql_writer.deinit();
+    try sql_writer.writer().print(
         \\INSERT INTO _qail_data_snapshots 
         \\(migration_version, table_name, column_name, row_id, value_json, snapshot_type)
         \\SELECT '{s}', '{s}', '{s}', id::text, to_jsonb({s}), 'DROP_COLUMN'
         \\FROM {s} WHERE {s} IS NOT NULL
     , .{ version, table, column, column, table, column });
+    const sql = try sql_writer.toOwnedSlice();
+    defer allocator.free(sql);
 
     // AST-tracked raw SQL (not truly AST-native, but tracked)
-    const insert_cmd = QailCmd.raw(sql_buf.items);
+    const insert_cmd = QailCmd.raw(sql);
     _ = try conn.execute(&insert_cmd);
     return 0; // TODO: Get affected row count
 }
@@ -351,18 +344,19 @@ pub fn snapshotTableToDb(
 ) !u64 {
     const QailCmd = @import("ast/cmd.zig").QailCmd;
 
-    var sql_buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer sql_buf.deinit(allocator);
-
-    try sql_buf.writer(allocator).print(
+    var sql_writer = io.AllocatingWriter.init(allocator);
+    defer sql_writer.deinit();
+    try sql_writer.writer().print(
         \\INSERT INTO _qail_data_snapshots 
         \\(migration_version, table_name, column_name, row_id, value_json, snapshot_type)
         \\SELECT '{s}', '{s}', NULL, id::text, to_jsonb(t.*), 'DROP_TABLE'
         \\FROM {s} t
     , .{ version, table, table });
+    const sql = try sql_writer.toOwnedSlice();
+    defer allocator.free(sql);
 
     // AST-tracked raw SQL
-    const insert_cmd = QailCmd.raw(sql_buf.items);
+    const insert_cmd = QailCmd.raw(sql);
     _ = try conn.execute(&insert_cmd);
     return 0; // TODO: Get affected row count
 }

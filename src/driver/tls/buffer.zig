@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const tls = std.crypto.tls;
+const rand = @import("../../compat/rand.zig");
 
 /// Minimum buffer size for TLS records
 pub const TLS_BUFFER_SIZE = tls.max_ciphertext_record_len;
@@ -26,7 +27,7 @@ pub const TlsBuffers = struct {
     /// Initialize with cryptographic random entropy
     pub fn initSecure() Self {
         var self = Self{};
-        std.crypto.random.bytes(&self.entropy);
+        rand.bytes(&self.entropy);
         return self;
     }
 

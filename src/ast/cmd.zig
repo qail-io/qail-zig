@@ -27,7 +27,7 @@ pub const CmdKind = enum {
     // Schema operations (DDL)
     make, // CREATE TABLE
     drop, // DROP TABLE
-    @"mod", // ALTER TABLE (general modification)
+    mod, // ALTER TABLE (general modification)
     alter, // ALTER TABLE ADD COLUMN
     alter_drop, // ALTER TABLE DROP COLUMN
     alter_type, // ALTER TABLE ALTER COLUMN TYPE
@@ -128,6 +128,8 @@ pub const CmdKind = enum {
     session_set, // SET session variable
     session_show, // SHOW session variable
     session_reset, // RESET session variable
+    create_database, // CREATE DATABASE
+    drop_database, // DROP DATABASE
 
     // Raw SQL (for migrations, DDL, etc.)
     raw, // Raw SQL string
@@ -517,6 +519,16 @@ pub const QailCmd = struct {
     /// RESET session variable
     pub fn sessionReset(name: []const u8) QailCmd {
         return .{ .kind = .session_reset, .table = name };
+    }
+
+    /// CREATE DATABASE
+    pub fn createDatabase(name: []const u8) QailCmd {
+        return .{ .kind = .create_database, .table = name };
+    }
+
+    /// DROP DATABASE
+    pub fn dropDatabase(name: []const u8) QailCmd {
+        return .{ .kind = .drop_database, .table = name };
     }
 
     /// ALTER TABLE ADD COLUMN

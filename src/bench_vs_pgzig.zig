@@ -5,7 +5,7 @@
 const std = @import("std");
 const pg = @import("pg_zig");
 const qail = @import("qail.zig");
-const net = std.net;
+const net = @import("compat/net.zig");
 
 const QUERIES: usize = 10_000;
 
@@ -47,7 +47,7 @@ pub fn main() !void {
     // ========== Test 2: QAIL-Zig (Rust FFI) ==========
     std.debug.print("📊 [2/2] QAIL-Zig (Rust FFI + socket)...\n", .{});
 
-    const address = try net.Address.parseIp4("127.0.0.1", 5432);
+    const address = try net.parseIp4("127.0.0.1", 5432);
     var stream = try net.tcpConnectToAddress(address);
     defer stream.close();
 

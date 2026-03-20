@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const io = @import("../compat/io.zig");
 
 // ============================================================================
 // Types
@@ -85,8 +86,9 @@ pub const TableDef = struct {
 
     /// Generate CREATE TABLE DDL
     pub fn toDdl(self: *const TableDef, allocator: Allocator) ![]const u8 {
-        var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
-        const writer = buf.writer(allocator);
+        var ddl_writer = io.AllocatingWriter.init(allocator);
+        defer ddl_writer.deinit();
+        const writer = ddl_writer.writer();
 
         try writer.print("CREATE TABLE IF NOT EXISTS {s} (\n", .{self.name});
 
@@ -125,7 +127,7 @@ pub const TableDef = struct {
         }
 
         try writer.writeAll(")");
-        return buf.toOwnedSlice(allocator);
+        return ddl_writer.toOwnedSlice();
     }
 };
 

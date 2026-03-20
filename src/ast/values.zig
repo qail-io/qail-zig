@@ -3,6 +3,7 @@
 // Port of Rust qail-core/src/ast/values.rs
 
 const std = @import("std");
+const io = @import("../compat/io.zig");
 
 /// Time interval unit for duration expressions
 pub const IntervalUnit = enum {
@@ -175,26 +176,26 @@ pub const Value = union(enum) {
 // Tests
 test "value format null" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var writer = io.FixedBufferWriter.init(&buf);
     const v: Value = .null;
-    try std.fmt.format(fbs.writer(), "{f}", .{v});
-    try std.testing.expectEqualStrings("NULL", fbs.getWritten());
+    try std.fmt.format(writer.writer(), "{f}", .{v});
+    try std.testing.expectEqualStrings("NULL", writer.getWritten());
 }
 
 test "value format string escapes quotes" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var writer = io.FixedBufferWriter.init(&buf);
     const v: Value = .{ .string = "it's" };
-    try std.fmt.format(fbs.writer(), "{f}", .{v});
-    try std.testing.expectEqualStrings("'it''s'", fbs.getWritten());
+    try std.fmt.format(writer.writer(), "{f}", .{v});
+    try std.testing.expectEqualStrings("'it''s'", writer.getWritten());
 }
 
 test "value format param" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var writer = io.FixedBufferWriter.init(&buf);
     const v: Value = .{ .param = 1 };
-    try v.format(fbs.writer());
-    try std.testing.expectEqualStrings("$1", fbs.getWritten());
+    try v.format(writer.writer());
+    try std.testing.expectEqualStrings("$1", writer.getWritten());
 }
 
 // ==================== Comptime Exhaustive Tests ====================
@@ -233,8 +234,8 @@ test "property: Value.format covers all variants" {
     };
 
     for (test_values) |val| {
-        var fbs = std.io.fixedBufferStream(&buf);
-        try val.format(fbs.writer());
-        try std.testing.expect(fbs.getWritten().len > 0);
+        var writer = io.FixedBufferWriter.init(&buf);
+        try val.format(writer.writer());
+        try std.testing.expect(writer.getWritten().len > 0);
     }
 }

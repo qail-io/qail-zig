@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const tls = std.crypto.tls;
+const net = @import("../../compat/net.zig");
 
 /// Minimum buffer size for TLS records (per std.crypto.tls spec)
 pub const MIN_BUFFER_LEN = tls.max_ciphertext_record_len;
@@ -12,14 +13,14 @@ pub const MIN_BUFFER_LEN = tls.max_ciphertext_record_len;
 /// Reader wrapper for std.net.Stream
 /// Implements the interface expected by std.crypto.tls.Client
 pub const StreamReader = struct {
-    stream: std.net.Stream,
+    stream: net.Stream,
     buffer: []u8,
     start: usize = 0,
     end: usize = 0,
 
     const Self = @This();
 
-    pub fn init(stream: std.net.Stream, buffer: []u8) Self {
+    pub fn init(stream: net.Stream, buffer: []u8) Self {
         std.debug.assert(buffer.len >= MIN_BUFFER_LEN);
         return .{
             .stream = stream,
@@ -85,13 +86,13 @@ pub const StreamReader = struct {
 /// Writer wrapper for std.net.Stream
 /// Implements buffered writing for TLS records
 pub const StreamWriter = struct {
-    stream: std.net.Stream,
+    stream: net.Stream,
     buffer: []u8,
     pos: usize = 0,
 
     const Self = @This();
 
-    pub fn init(stream: std.net.Stream, buffer: []u8) Self {
+    pub fn init(stream: net.Stream, buffer: []u8) Self {
         return .{
             .stream = stream,
             .buffer = buffer,

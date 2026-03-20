@@ -3,17 +3,23 @@
 // TCP socket connection to PostgreSQL server.
 
 const std = @import("std");
+const net = @import("../compat/net.zig");
 const protocol = @import("../protocol/mod.zig");
+const io_backend_mod = @import("io_backend.zig");
 
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
 const BackendMessage = protocol.BackendMessage;
-const wire = protocol.wire;
+const auth = protocol.auth;
+const StartupParam = Encoder.StartupParam;
+const auth_options_mod = @import("auth_options.zig");
+pub const AuthOptions = auth_options_mod.AuthOptions;
 
 /// PostgreSQL connection over TCP
 pub const Connection = struct {
-    stream: std.net.Stream,
+    stream: io_backend_mod.Stream,
     allocator: std.mem.Allocator,
+    io_backend: io_backend_mod.Backend = .sync,
     read_buffer: [8192]u8 = undefined,
     read_pos: usize = 0,
     read_len: usize = 0,
@@ -25,83 +31,32 @@ pub const Connection = struct {
     in_transaction: bool = false,
 
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16) !Connection {
-        const address = try std.net.Address.parseIp4(host, port);
-        const stream = try std.net.tcpConnectToAddress(address);
+        const address = try net.parseIp4(host, port);
+        const selected_backend = io_backend_mod.detectWithEnv(allocator);
+        const connected = try io_backend_mod.connectToAddress(selected_backend, address);
 
         return .{
-            .stream = stream,
+            .stream = connected.stream,
             .allocator = allocator,
+            .io_backend = connected.backend,
         };
     }
 
     /// Connect with timeout (milliseconds). Uses non-blocking socket + poll.
     pub fn connectWithTimeout(allocator: std.mem.Allocator, host: []const u8, port: u16, timeout_ms: i32) !Connection {
-        const posix = std.posix;
-        const builtin = @import("builtin");
-
-        const address = try std.net.Address.parseIp4(host, port);
-
-        // Create socket (initially blocking)
-        // Note: posix.SOCK.NONBLOCK is not reliable across all platforms in socket() checks
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-        errdefer posix.close(fd);
-
-        // Set non-blocking
-        try setBlocking(fd, false);
-
-        // Attempt connect (will return EINPROGRESS/WSAEWOULDBLOCK for non-blocking)
-        const result = posix.connect(fd, &address.any, address.getOsSockLen());
-        if (result) |_| {
-            // Connected immediately
-        } else |err| {
-            if (err == error.WouldBlock) {
-                // Wait for connection with timeout using poll
-                var fds = [1]posix.pollfd{
-                    .{ .fd = if (builtin.os.tag == .windows) @ptrCast(fd) else fd, .events = posix.POLL.OUT, .revents = 0 },
-                };
-                const poll_result = try posix.poll(&fds, timeout_ms);
-                if (poll_result == 0) {
-                    return error.ConnectionTimeout;
-                }
-
-                // Check for socket error (skip on Windows - getsockopt requires libc)
-                if (builtin.os.tag != .windows) {
-                    try posix.getsockoptError(fd);
-                }
-            } else {
-                return err;
-            }
-        }
-
-        // Set socket back to blocking mode
-        try setBlocking(fd, true);
+        const selected_backend = io_backend_mod.detectWithEnv(allocator);
+        const connected = try io_backend_mod.connectToIp4WithTimeout(selected_backend, host, port, timeout_ms);
 
         return .{
-            .stream = .{ .handle = fd },
+            .stream = connected.stream,
             .allocator = allocator,
+            .io_backend = connected.backend,
         };
     }
 
-    fn setBlocking(fd: std.posix.fd_t, blocking: bool) !void {
-        const builtin = @import("builtin");
-        if (builtin.os.tag == .windows) {
-            const windows = std.os.windows;
-            // 0 = blocking, 1 = non-blocking
-            var mode: c_ulong = if (blocking) 0 else 1;
-            const socket: windows.ws2_32.SOCKET = @ptrCast(fd);
-            const res = windows.ws2_32.ioctlsocket(socket, windows.ws2_32.FIONBIO, &mode);
-            if (res != 0) return error.SocketError;
-        } else {
-            const posix = std.posix;
-            // O_NONBLOCK values: Linux=2048, macOS/BSD=4
-            const O_NONBLOCK: u32 = if (builtin.os.tag == .linux) 2048 else 4;
-            const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-            const new_flags = if (blocking)
-                flags & ~O_NONBLOCK
-            else
-                flags | O_NONBLOCK;
-            _ = try posix.fcntl(fd, posix.F.SETFL, new_flags);
-        }
+    /// Active backend selected for plain TCP transport.
+    pub fn ioBackend(self: *const Connection) io_backend_mod.Backend {
+        return self.io_backend;
     }
 
     pub fn close(self: *Connection) void {
@@ -151,11 +106,43 @@ pub const Connection = struct {
 
     /// Perform startup handshake
     pub fn startup(self: *Connection, user: []const u8, database: []const u8, password: ?[]const u8) !void {
+        return self.startupWithParamsAndAuth(user, database, password, &.{}, .{});
+    }
+
+    /// Perform startup handshake with additional startup parameters.
+    pub fn startupWithParams(
+        self: *Connection,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        extra_params: []const StartupParam,
+    ) !void {
+        return self.startupWithParamsAndAuth(user, database, password, extra_params, .{});
+    }
+
+    /// Perform startup handshake with startup parameters and auth options.
+    pub fn startupWithParamsAndAuth(
+        self: *Connection,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        extra_params: []const StartupParam,
+        auth_options: AuthOptions,
+    ) !void {
         var encoder = Encoder.init(self.allocator);
         defer encoder.deinit();
+        var scram_client: ?auth.ScramClient = null;
+        defer {
+            if (scram_client) |*client| {
+                client.deinit();
+            }
+        }
+        var waiting_for_scram_final = false;
+        var gss_mechanism: ?auth_options_mod.GssMechanism = null;
+        var gss_roundtrips: u32 = 0;
 
         // Send StartupMessage
-        try encoder.encodeStartup(user, database);
+        try encoder.encodeStartupWithParams(user, database, extra_params);
         try self.send(encoder.getWritten());
 
         // Handle authentication
@@ -168,8 +155,13 @@ pub const Connection = struct {
                     const auth_type = try decoder.parseAuthentication();
 
                     switch (auth_type) {
-                        .ok => {}, // Auth successful
+                        .ok => {
+                            if (waiting_for_scram_final) return error.InvalidScramState;
+                            gss_mechanism = null;
+                            gss_roundtrips = 0;
+                        },
                         .cleartext_password => {
+                            if (!auth_options_mod.authTypeAllowed(auth_options, .cleartext_password)) return error.AuthMechanismDisabled;
                             if (password) |pw| {
                                 try encoder.encodePassword(pw);
                                 try self.send(encoder.getWritten());
@@ -178,12 +170,87 @@ pub const Connection = struct {
                             }
                         },
                         .md5_password => {
-                            // TODO: Implement MD5 auth
-                            return error.UnsupportedAuth;
+                            if (!auth_options_mod.authTypeAllowed(auth_options, .md5_password)) return error.AuthMechanismDisabled;
+                            const salt = try decoder.parseAuthenticationMd5Salt();
+                            if (password) |pw| {
+                                const md5_password = auth.md5Password(pw, user, salt);
+                                try encoder.encodePassword(md5_password[0..]);
+                                try self.send(encoder.getWritten());
+                            } else {
+                                return error.PasswordRequired;
+                            }
+                        },
+                        .kerberos_v5, .gss, .sspi => {
+                            if (!auth_options_mod.authTypeAllowed(auth_options, auth_type)) return error.AuthMechanismDisabled;
+                            const mechanism = auth_options_mod.mechanismFromAuthType(auth_type).?;
+                            const token = try auth_options_mod.requestGssToken(auth_options, mechanism, null, self.allocator);
+                            if (token.len != 0) {
+                                try encoder.encodeSaslResponse(token);
+                                try self.send(encoder.getWritten());
+                            }
+                            gss_mechanism = mechanism;
+                            gss_roundtrips = 0;
+                        },
+                        .gss_continue => {
+                            const mechanism = gss_mechanism orelse return error.InvalidGssState;
+                            gss_roundtrips += 1;
+                            if (gss_roundtrips > auth_options.max_gss_roundtrips) return error.GssRoundtripLimitExceeded;
+
+                            const server_token = try decoder.parseAuthenticationSaslData();
+                            const token = try auth_options_mod.requestGssToken(auth_options, mechanism, server_token, self.allocator);
+                            if (token.len != 0) {
+                                try encoder.encodeSaslResponse(token);
+                                try self.send(encoder.getWritten());
+                            }
                         },
                         .sasl => {
-                            // TODO: Implement SCRAM auth
-                            return error.UnsupportedAuth;
+                            if (!auth_options_mod.authTypeAllowed(auth_options, .sasl)) return error.AuthMechanismDisabled;
+                            const mechanisms = try decoder.parseAuthenticationSaslMechanisms(self.allocator);
+                            defer self.allocator.free(mechanisms);
+
+                            if (password == null) return error.PasswordRequired;
+                            const selection = try auth_options_mod.selectScramMechanism(
+                                mechanisms,
+                                auth_options.scram_tls_server_end_point_binding,
+                                auth_options.scram_channel_binding,
+                            );
+
+                            if (scram_client) |*client| {
+                                client.deinit();
+                            }
+                            var client = if (selection.channel_binding_data) |binding|
+                                try auth.ScramClient.initWithTlsServerEndPoint(self.allocator, user, password.?, binding)
+                            else
+                                auth.ScramClient.init(self.allocator, user, password.?);
+                            const first = try client.clientFirstMessage();
+                            defer self.allocator.free(first);
+
+                            try encoder.encodeSaslInitialResponse(selection.mechanism, first);
+                            try self.send(encoder.getWritten());
+
+                            scram_client = client;
+                            waiting_for_scram_final = false;
+                            gss_mechanism = null;
+                            gss_roundtrips = 0;
+                        },
+                        .sasl_continue => {
+                            const server_first = try decoder.parseAuthenticationSaslData();
+                            if (scram_client == null) return error.InvalidScramState;
+                            const client = &scram_client.?;
+
+                            const final = try client.processServerFirst(server_first);
+                            defer self.allocator.free(final);
+
+                            try encoder.encodeSaslResponse(final);
+                            try self.send(encoder.getWritten());
+                            waiting_for_scram_final = true;
+                        },
+                        .sasl_final => {
+                            const server_final = try decoder.parseAuthenticationSaslData();
+                            if (scram_client == null) return error.InvalidScramState;
+                            const client = &scram_client.?;
+                            try client.verifyServerFinal(server_final);
+                            waiting_for_scram_final = false;
                         },
                         else => return error.UnsupportedAuth,
                     }
@@ -223,4 +290,5 @@ test "connection struct init" {
         .allocator = std.testing.allocator,
     };
     try std.testing.expect(!conn.ready);
+    try std.testing.expectEqual(@as(io_backend_mod.Backend, .sync), conn.ioBackend());
 }

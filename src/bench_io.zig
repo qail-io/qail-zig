@@ -4,8 +4,7 @@
 
 const std = @import("std");
 const qail = @import("qail.zig");
-const net = std.net;
-const posix = std.posix;
+const net = @import("compat/net.zig");
 
 const QUERIES: usize = 10_000;
 const BATCH_SIZE: usize = 100;
@@ -33,7 +32,7 @@ pub fn main() !void {
     // Connect
     std.debug.print("📡 Connecting...\n", .{});
 
-    const address = try net.Address.parseIp4(host, port);
+    const address = try net.parseIp4(host, port);
     var stream = try net.tcpConnectToAddress(address);
     defer stream.close();
 

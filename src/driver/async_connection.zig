@@ -6,11 +6,15 @@
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
+const net = @import("../compat/net.zig");
 const protocol = @import("../protocol/mod.zig");
 
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
 const BackendMessage = protocol.BackendMessage;
+const auth = protocol.auth;
+const auth_options_mod = @import("auth_options.zig");
+pub const AuthOptions = auth_options_mod.AuthOptions;
 
 /// Async PostgreSQL connection with timeout support
 pub const AsyncConnection = struct {
@@ -29,7 +33,7 @@ pub const AsyncConnection = struct {
 
     /// Connect with timeout (milliseconds). Returns error if connection takes too long.
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16, timeout_ms: i32) !AsyncConnection {
-        const address = try std.net.Address.parseIp4(host, port);
+        const address = try net.parseIp4(host, port);
 
         // Create non-blocking socket
         const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
@@ -151,8 +155,28 @@ pub const AsyncConnection = struct {
 
     /// Perform startup handshake with timeout
     pub fn startup(self: *AsyncConnection, user: []const u8, database: []const u8, password: ?[]const u8) !void {
+        return self.startupWithAuthOptions(user, database, password, .{});
+    }
+
+    /// Perform startup handshake with auth options.
+    pub fn startupWithAuthOptions(
+        self: *AsyncConnection,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        auth_options: AuthOptions,
+    ) !void {
         var encoder = Encoder.init(self.allocator);
         defer encoder.deinit();
+        var scram_client: ?auth.ScramClient = null;
+        defer {
+            if (scram_client) |*client| {
+                client.deinit();
+            }
+        }
+        var waiting_for_scram_final = false;
+        var gss_mechanism: ?auth_options_mod.GssMechanism = null;
+        var gss_roundtrips: u32 = 0;
 
         // Send StartupMessage
         try encoder.encodeStartup(user, database);
@@ -168,14 +192,102 @@ pub const AsyncConnection = struct {
                     const auth_type = try decoder.parseAuthentication();
 
                     switch (auth_type) {
-                        .ok => {},
+                        .ok => {
+                            if (waiting_for_scram_final) return error.InvalidScramState;
+                            gss_mechanism = null;
+                            gss_roundtrips = 0;
+                        },
                         .cleartext_password => {
+                            if (!auth_options_mod.authTypeAllowed(auth_options, .cleartext_password)) return error.AuthMechanismDisabled;
                             if (password) |pw| {
                                 try encoder.encodePassword(pw);
                                 try self.send(encoder.getWritten());
                             } else {
                                 return error.PasswordRequired;
                             }
+                        },
+                        .md5_password => {
+                            if (!auth_options_mod.authTypeAllowed(auth_options, .md5_password)) return error.AuthMechanismDisabled;
+                            const salt = try decoder.parseAuthenticationMd5Salt();
+                            if (password) |pw| {
+                                const md5_password = auth.md5Password(pw, user, salt);
+                                try encoder.encodePassword(md5_password[0..]);
+                                try self.send(encoder.getWritten());
+                            } else {
+                                return error.PasswordRequired;
+                            }
+                        },
+                        .kerberos_v5, .gss, .sspi => {
+                            if (!auth_options_mod.authTypeAllowed(auth_options, auth_type)) return error.AuthMechanismDisabled;
+                            const mechanism = auth_options_mod.mechanismFromAuthType(auth_type).?;
+                            const token = try auth_options_mod.requestGssToken(auth_options, mechanism, null, self.allocator);
+                            if (token.len != 0) {
+                                try encoder.encodeSaslResponse(token);
+                                try self.send(encoder.getWritten());
+                            }
+                            gss_mechanism = mechanism;
+                            gss_roundtrips = 0;
+                        },
+                        .gss_continue => {
+                            const mechanism = gss_mechanism orelse return error.InvalidGssState;
+                            gss_roundtrips += 1;
+                            if (gss_roundtrips > auth_options.max_gss_roundtrips) return error.GssRoundtripLimitExceeded;
+
+                            const server_token = try decoder.parseAuthenticationSaslData();
+                            const token = try auth_options_mod.requestGssToken(auth_options, mechanism, server_token, self.allocator);
+                            if (token.len != 0) {
+                                try encoder.encodeSaslResponse(token);
+                                try self.send(encoder.getWritten());
+                            }
+                        },
+                        .sasl => {
+                            if (!auth_options_mod.authTypeAllowed(auth_options, .sasl)) return error.AuthMechanismDisabled;
+                            const mechanisms = try decoder.parseAuthenticationSaslMechanisms(self.allocator);
+                            defer self.allocator.free(mechanisms);
+
+                            if (password == null) return error.PasswordRequired;
+                            const selection = try auth_options_mod.selectScramMechanism(
+                                mechanisms,
+                                auth_options.scram_tls_server_end_point_binding,
+                                auth_options.scram_channel_binding,
+                            );
+
+                            if (scram_client) |*client| {
+                                client.deinit();
+                            }
+                            var client = if (selection.channel_binding_data) |binding|
+                                try auth.ScramClient.initWithTlsServerEndPoint(self.allocator, user, password.?, binding)
+                            else
+                                auth.ScramClient.init(self.allocator, user, password.?);
+                            const first = try client.clientFirstMessage();
+                            defer self.allocator.free(first);
+
+                            try encoder.encodeSaslInitialResponse(selection.mechanism, first);
+                            try self.send(encoder.getWritten());
+
+                            scram_client = client;
+                            waiting_for_scram_final = false;
+                            gss_mechanism = null;
+                            gss_roundtrips = 0;
+                        },
+                        .sasl_continue => {
+                            const server_first = try decoder.parseAuthenticationSaslData();
+                            if (scram_client == null) return error.InvalidScramState;
+                            const client = &scram_client.?;
+
+                            const final = try client.processServerFirst(server_first);
+                            defer self.allocator.free(final);
+
+                            try encoder.encodeSaslResponse(final);
+                            try self.send(encoder.getWritten());
+                            waiting_for_scram_final = true;
+                        },
+                        .sasl_final => {
+                            const server_final = try decoder.parseAuthenticationSaslData();
+                            if (scram_client == null) return error.InvalidScramState;
+                            const client = &scram_client.?;
+                            try client.verifyServerFinal(server_final);
+                            waiting_for_scram_final = false;
                         },
                         else => return error.UnsupportedAuth,
                     }

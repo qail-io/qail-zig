@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const qail = @import("qail");
+const time = qail.compat.time;
 
 const QailCmd = qail.QailCmd;
 const Expr = qail.Expr;
@@ -42,7 +43,7 @@ fn benchmarkEncoding(allocator: std.mem.Allocator, iterations: u64) !u64 {
     // Build a representative query
     const cols = [_]Expr{ Expr.col("id"), Expr.col("name"), Expr.col("email") };
 
-    const start = std.time.Instant.now() catch unreachable;
+    const start = time.now() catch unreachable;
 
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
@@ -50,7 +51,7 @@ fn benchmarkEncoding(allocator: std.mem.Allocator, iterations: u64) !u64 {
         try encoder.encodeQuery(&cmd);
     }
 
-    const end = std.time.Instant.now() catch unreachable;
+    const end = time.now() catch unreachable;
     return end.since(start);
 }
 

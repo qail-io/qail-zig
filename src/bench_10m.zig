@@ -5,7 +5,7 @@
 const std = @import("std");
 const pg = @import("pg_zig");
 const qail = @import("qail.zig");
-const net = std.net;
+const net = @import("compat/net.zig");
 
 const TOTAL_QUERIES: usize = 10_000_000;
 const BATCH_SIZE: usize = 1000;
@@ -52,7 +52,7 @@ pub fn main() !void {
     std.debug.print("📊 [2/2] QAIL-Zig (Rust FFI + Pipeline)...\n", .{});
     std.debug.print("   Running full 10M queries...\n", .{});
 
-    const address = try net.Address.parseIp4("127.0.0.1", 5432);
+    const address = try net.parseIp4("127.0.0.1", 5432);
     var stream = try net.tcpConnectToAddress(address);
     defer stream.close();
 
