@@ -6,6 +6,13 @@
 
 const std = @import("std");
 const Connection = @import("connection.zig").Connection;
+const protocol = @import("../protocol/mod.zig");
+const rls_mod = @import("rls.zig");
+const Encoder = protocol.Encoder;
+const Decoder = protocol.Decoder;
+
+/// Callback type for scoped pool helpers (`withRls`, `withTenant`, etc.).
+pub const ScopedPoolOp = *const fn (*PooledConnection) anyerror!void;
 
 /// Connection pool configuration
 pub const PoolConfig = struct {
@@ -86,6 +93,7 @@ const PooledConn = struct {
 pub const PooledConnection = struct {
     conn: ?Connection,
     pool: *PgPool,
+    reset_on_release: bool = false,
 
     /// Get a reference to the underlying connection
     pub fn get(self: *PooledConnection) *Connection {
@@ -94,17 +102,28 @@ pub const PooledConnection = struct {
 
     /// Release the connection back to the pool
     pub fn release(self: *PooledConnection) void {
-        if (self.conn) |conn| {
+        if (self.conn) |conn_value| {
+            var conn = conn_value;
+            if (self.reset_on_release) {
+                self.pool.resetScopedConnection(&conn) catch {
+                    self.pool.discardConnection(conn);
+                    self.conn = null;
+                    self.reset_on_release = false;
+                    return;
+                };
+            }
             self.pool.returnConnection(conn);
             self.conn = null;
+            self.reset_on_release = false;
         }
     }
 
     /// Close without returning to pool (for bad connections)
     pub fn discard(self: *PooledConnection) void {
-        if (self.conn) |*conn| {
-            conn.close();
+        if (self.conn) |conn| {
+            self.pool.discardConnection(conn);
             self.conn = null;
+            self.reset_on_release = false;
         }
     }
 };
@@ -232,6 +251,7 @@ pub const PgPool = struct {
             return .{
                 .conn = pooled.conn,
                 .pool = self,
+                .reset_on_release = false,
             };
         }
 
@@ -245,6 +265,7 @@ pub const PgPool = struct {
             return .{
                 .conn = conn,
                 .pool = self,
+                .reset_on_release = false,
             };
         }
 
@@ -274,6 +295,16 @@ pub const PgPool = struct {
         }
     }
 
+    /// Close and drop an active connection without returning it to idle pool.
+    fn discardConnection(self: *PgPool, conn: Connection) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.active_count -= 1;
+        var c = conn;
+        c.close();
+    }
+
     /// Get number of idle connections
     pub fn idleCount(self: *PgPool) usize {
         self.mutex.lock();
@@ -286,6 +317,73 @@ pub const PgPool = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.active_count;
+    }
+
+    // ==================== RLS Scoped Acquisition ====================
+
+    /// Acquire a connection and configure tenant/user/session RLS context.
+    ///
+    /// Connection is marked for auto-reset (`COMMIT`) on `release()`.
+    pub fn acquireWithRls(self: *PgPool, ctx: rls_mod.RlsContext) !PooledConnection {
+        const sql = try rls_mod.contextToSql(self.allocator, &ctx);
+        defer self.allocator.free(sql);
+        return try self.acquireWithScopedSql(sql);
+    }
+
+    /// Acquire with RLS context and statement timeout (milliseconds).
+    pub fn acquireWithRlsTimeout(self: *PgPool, ctx: rls_mod.RlsContext, timeout_ms: u32) !PooledConnection {
+        const sql = try rls_mod.contextToSqlWithTimeout(self.allocator, &ctx, timeout_ms);
+        defer self.allocator.free(sql);
+        return try self.acquireWithScopedSql(sql);
+    }
+
+    /// Acquire with RLS context, statement timeout, and optional lock timeout.
+    pub fn acquireWithRlsTimeouts(
+        self: *PgPool,
+        ctx: rls_mod.RlsContext,
+        statement_timeout_ms: u32,
+        lock_timeout_ms: u32,
+    ) !PooledConnection {
+        const sql = try rls_mod.contextToSqlWithTimeouts(self.allocator, &ctx, statement_timeout_ms, lock_timeout_ms);
+        defer self.allocator.free(sql);
+        return try self.acquireWithScopedSql(sql);
+    }
+
+    /// Acquire a system-scoped connection (`RlsContext.empty()`).
+    pub fn acquireSystem(self: *PgPool) !PooledConnection {
+        return self.acquireWithRls(rls_mod.RlsContext.empty());
+    }
+
+    /// Acquire a global/platform-scoped connection (`RlsContext.global()`).
+    pub fn acquireGlobal(self: *PgPool) !PooledConnection {
+        return self.acquireWithRls(rls_mod.RlsContext.global());
+    }
+
+    /// Acquire a connection scoped to one tenant.
+    pub fn acquireForTenant(self: *PgPool, tenant_id: []const u8) !PooledConnection {
+        return self.acquireWithRls(rls_mod.RlsContext.tenant(tenant_id));
+    }
+
+    /// Run a callback with an RLS-scoped connection and always release it.
+    pub fn withRls(self: *PgPool, ctx: rls_mod.RlsContext, op: ScopedPoolOp) !void {
+        var pooled = try self.acquireWithRls(ctx);
+        defer pooled.release();
+        try op(&pooled);
+    }
+
+    /// Run a callback with `RlsContext.empty()`.
+    pub fn withSystem(self: *PgPool, op: ScopedPoolOp) !void {
+        return self.withRls(rls_mod.RlsContext.empty(), op);
+    }
+
+    /// Run a callback with `RlsContext.global()`.
+    pub fn withGlobal(self: *PgPool, op: ScopedPoolOp) !void {
+        return self.withRls(rls_mod.RlsContext.global(), op);
+    }
+
+    /// Run a callback with tenant-scoped context.
+    pub fn withTenant(self: *PgPool, tenant_id: []const u8, op: ScopedPoolOp) !void {
+        return self.withRls(rls_mod.RlsContext.tenant(tenant_id), op);
     }
 
     // ==================== Convenience Methods (AST-Native) ====================
@@ -338,7 +436,57 @@ pub const PgPool = struct {
 
         return conn;
     }
+
+    fn acquireWithScopedSql(self: *PgPool, sql: []const u8) !PooledConnection {
+        var pooled = try self.acquire();
+        errdefer pooled.discard();
+
+        if (pooled.conn) |*conn| {
+            try self.executeSimple(conn, sql);
+        } else {
+            return error.PoolConnectionUnavailable;
+        }
+
+        pooled.reset_on_release = true;
+        return pooled;
+    }
+
+    fn resetScopedConnection(self: *PgPool, conn: *Connection) !void {
+        try executeSimpleConn(self.allocator, conn, rls_mod.resetSql());
+    }
+
+    fn executeSimple(self: *PgPool, conn: *Connection, sql: []const u8) !void {
+        try executeSimpleConn(self.allocator, conn, sql);
+    }
 };
+
+fn executeSimpleConn(allocator: std.mem.Allocator, conn: *Connection, sql: []const u8) !void {
+    var encoder = Encoder.init(allocator);
+    defer encoder.deinit();
+    try encoder.encodeQuery(sql);
+    try conn.send(encoder.getWritten());
+
+    while (true) {
+        const msg = try conn.readMessage();
+        switch (msg.msg_type) {
+            .command_complete, .row_description, .data_row, .empty_query, .notice, .parameter_status, .notification => {},
+            .ready_for_query => {
+                var decoder = Decoder.init(msg.payload);
+                const tx_status = try decoder.parseReadyForQuery();
+                conn.ready = true;
+                conn.in_transaction = tx_status == .in_transaction;
+                return;
+            },
+            .error_response => {
+                var decoder = Decoder.init(msg.payload);
+                const err_info = try decoder.parseErrorResponse();
+                std.debug.print("Pool scoped SQL error: {s}\n", .{err_info.message orelse "unknown"});
+                return error.PoolScopedSqlFailed;
+            },
+            else => {},
+        }
+    }
+}
 
 // ==================== Tests ====================
 

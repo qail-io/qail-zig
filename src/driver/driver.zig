@@ -14,6 +14,7 @@ const row_mod = @import("row.zig");
 const query_mod = @import("query.zig");
 const copy_mod = @import("copy.zig");
 const io_backend_mod = @import("io_backend.zig");
+const rls_mod = @import("rls.zig");
 const transpiler = @import("../transpiler/postgres.zig");
 
 const QailCmd = ast.QailCmd;
@@ -1046,6 +1047,37 @@ pub const PgDriver = struct {
     }
 
     // ==================== RLS Helpers ====================
+
+    /// Configure transaction-local RLS session context (`BEGIN; SET LOCAL ...`).
+    pub fn setRlsContext(self: *PgDriver, ctx: *const rls_mod.RlsContext) !void {
+        const sql = try rls_mod.contextToSql(self.allocator, ctx);
+        defer self.allocator.free(sql);
+        _ = try self.executeRaw(sql);
+    }
+
+    /// Configure RLS context and statement timeout in one roundtrip.
+    pub fn setRlsContextWithTimeout(self: *PgDriver, ctx: *const rls_mod.RlsContext, timeout_ms: u32) !void {
+        const sql = try rls_mod.contextToSqlWithTimeout(self.allocator, ctx, timeout_ms);
+        defer self.allocator.free(sql);
+        _ = try self.executeRaw(sql);
+    }
+
+    /// Configure RLS context plus statement/lock timeout in one roundtrip.
+    pub fn setRlsContextWithTimeouts(
+        self: *PgDriver,
+        ctx: *const rls_mod.RlsContext,
+        statement_timeout_ms: u32,
+        lock_timeout_ms: u32,
+    ) !void {
+        const sql = try rls_mod.contextToSqlWithTimeouts(self.allocator, ctx, statement_timeout_ms, lock_timeout_ms);
+        defer self.allocator.free(sql);
+        _ = try self.executeRaw(sql);
+    }
+
+    /// Reset transaction-local RLS/session context.
+    pub fn clearRlsContext(self: *PgDriver) !void {
+        _ = try self.executeRaw(rls_mod.resetSql());
+    }
 
     /// ALTER TABLE ... ENABLE ROW LEVEL SECURITY.
     pub fn enableRls(self: *PgDriver, table: []const u8) !void {

@@ -21,6 +21,7 @@ pub const io = @import("io.zig");
 pub const query = @import("query.zig");
 pub const metrics = @import("metrics.zig");
 pub const auth_options = @import("auth_options.zig");
+pub const rls = @import("rls.zig");
 
 // Re-export main types
 pub const Connection = connection.Connection;
@@ -34,6 +35,7 @@ pub const Pipeline = pipeline.Pipeline;
 pub const PgPool = pool.PgPool;
 pub const PoolConfig = pool.PoolConfig;
 pub const PooledConnection = pool.PooledConnection;
+pub const ScopedPoolOp = pool.ScopedPoolOp;
 
 // New type exports
 pub const CancelKey = cancel.CancelKey;
@@ -67,6 +69,13 @@ pub const CancelToken = driver.CancelToken;
 pub const GssMechanism = auth_options.GssMechanism;
 pub const GssTokenProvider = auth_options.GssTokenProvider;
 pub const ScramChannelBindingMode = auth_options.ScramChannelBindingMode;
+pub const RlsContext = rls.RlsContext;
+pub const SuperAdminToken = rls.SuperAdminToken;
+pub const sanitizeGucValue = rls.sanitizeGucValue;
+pub const contextToSql = rls.contextToSql;
+pub const contextToSqlWithTimeout = rls.contextToSqlWithTimeout;
+pub const contextToSqlWithTimeouts = rls.contextToSqlWithTimeouts;
+pub const resetRlsSql = rls.resetSql;
 
 // COPY protocol functions
 pub const copyIn = copy.copyIn;

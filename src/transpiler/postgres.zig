@@ -77,6 +77,90 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
             try writer.writeAll("ROLLBACK TO SAVEPOINT ");
             if (cmd.savepoint_name) |name| try writer.writeAll(name);
         },
+        .create_database => {
+            try writer.writeAll("CREATE DATABASE ");
+            try writer.writeAll(cmd.table);
+        },
+        .drop_database => {
+            try writer.writeAll("DROP DATABASE IF EXISTS ");
+            try writer.writeAll(cmd.table);
+        },
+        .grant => {
+            const role = cmd.payload orelse return error.MissingGrantRole;
+            if (cmd.privileges.len == 0) return error.MissingGrantPrivileges;
+            if (cmd.table.len == 0) return error.MissingGrantObject;
+
+            try writer.writeAll("GRANT ");
+            for (cmd.privileges, 0..) |privilege, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.writeAll(privilege);
+            }
+            try writer.writeAll(" ON ");
+            try writer.writeAll(cmd.table);
+            try writer.writeAll(" TO ");
+            try writer.writeAll(role);
+        },
+        .revoke => {
+            const role = cmd.payload orelse return error.MissingRevokeRole;
+            if (cmd.privileges.len == 0) return error.MissingRevokePrivileges;
+            if (cmd.table.len == 0) return error.MissingRevokeObject;
+
+            try writer.writeAll("REVOKE ");
+            for (cmd.privileges, 0..) |privilege, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.writeAll(privilege);
+            }
+            try writer.writeAll(" ON ");
+            try writer.writeAll(cmd.table);
+            try writer.writeAll(" FROM ");
+            try writer.writeAll(role);
+        },
+        .create_policy => {
+            const policy = cmd.policy_def orelse return error.MissingPolicyDefinition;
+            if (policy.name.len == 0) return error.MissingPolicyName;
+            if (policy.table.len == 0) return error.MissingPolicyTable;
+
+            try writer.writeAll("CREATE POLICY ");
+            try writer.writeAll(policy.name);
+            try writer.writeAll(" ON ");
+            try writer.writeAll(policy.table);
+            if (policy.permissiveness == .restrictive) {
+                try writer.writeAll(" AS RESTRICTIVE");
+            }
+            try writer.writeAll(" FOR ");
+            try writer.writeAll(policy.target.toSql());
+            if (policy.role) |role| {
+                try writer.writeAll(" TO ");
+                try writer.writeAll(role);
+            }
+            if (policy.using_sql) |using_sql| {
+                try writer.writeAll(" USING (");
+                try writer.writeAll(using_sql);
+                try writer.writeByte(')');
+            }
+            if (policy.with_check_sql) |with_check_sql| {
+                try writer.writeAll(" WITH CHECK (");
+                try writer.writeAll(with_check_sql);
+                try writer.writeByte(')');
+            }
+        },
+        .drop_policy => {
+            const policy_name = if (cmd.policy_def) |policy|
+                policy.name
+            else
+                cmd.payload orelse return error.MissingPolicyName;
+            const policy_table = if (cmd.policy_def) |policy|
+                policy.table
+            else if (cmd.table.len > 0)
+                cmd.table
+            else
+                return error.MissingPolicyTable;
+
+            try writer.writeAll("DROP POLICY IF EXISTS ");
+            try writer.writeAll(policy_name);
+            try writer.writeAll(" ON ");
+            try writer.writeAll(policy_table);
+        },
         else => {},
     }
 }
@@ -647,4 +731,40 @@ test "transpile string escaping" {
         "INSERT INTO users (name) VALUES ('O''Brien')",
         sql,
     );
+}
+
+test "transpile grant revoke and policy commands" {
+    const privs = [_][]const u8{ "SELECT", "INSERT" };
+
+    const grant_cmd = QailCmd.grant("users", &privs, "app_role");
+    const grant_sql = try toSql(std.testing.allocator, &grant_cmd);
+    defer std.testing.allocator.free(grant_sql);
+    try std.testing.expectEqualStrings("GRANT SELECT, INSERT ON users TO app_role", grant_sql);
+
+    const revoke_cmd = QailCmd.revoke("users", &privs, "app_role");
+    const revoke_sql = try toSql(std.testing.allocator, &revoke_cmd);
+    defer std.testing.allocator.free(revoke_sql);
+    try std.testing.expectEqualStrings("REVOKE SELECT, INSERT ON users FROM app_role", revoke_sql);
+
+    const policy = ast.cmd.PolicyDef{
+        .name = "orders_tenant_isolation",
+        .table = "orders",
+        .target = .all,
+        .permissiveness = .restrictive,
+        .role = "app_user",
+        .using_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
+        .with_check_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
+    };
+    const create_policy_cmd = QailCmd.createPolicy(policy);
+    const create_policy_sql = try toSql(std.testing.allocator, &create_policy_cmd);
+    defer std.testing.allocator.free(create_policy_sql);
+    try std.testing.expectEqualStrings(
+        "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = current_setting('app.tenant_id')::uuid) WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid)",
+        create_policy_sql,
+    );
+
+    const drop_policy_cmd = QailCmd.dropPolicy("orders_tenant_isolation", "orders");
+    const drop_policy_sql = try toSql(std.testing.allocator, &drop_policy_cmd);
+    defer std.testing.allocator.free(drop_policy_sql);
+    try std.testing.expectEqualStrings("DROP POLICY IF EXISTS orders_tenant_isolation ON orders", drop_policy_sql);
 }

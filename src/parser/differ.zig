@@ -9,6 +9,9 @@ const schema = @import("schema.zig");
 const Schema = schema.Schema;
 const TableDef = schema.TableDef;
 const ColumnDef = schema.ColumnDef;
+const PolicyDef = schema.PolicyDef;
+const GrantDef = schema.GrantDef;
+const GrantAction = schema.GrantAction;
 
 // ============================================================================
 // Migration Commands
@@ -19,6 +22,8 @@ pub const MigrationCmd = struct {
     table: []const u8,
     column: ?ColumnDef = null,
     index: ?IndexInfo = null,
+    policy: ?PolicyDef = null,
+    grant: ?GrantDef = null,
     table_columns: []const ColumnDef = &.{}, // For CREATE TABLE (AST-native, no raw SQL!)
     ddl_sql: ?[]const u8 = null, // DEPRECATED: only for backwards compatibility
 
@@ -30,6 +35,10 @@ pub const MigrationCmd = struct {
         alter_column,
         create_index,
         drop_index,
+        create_policy,
+        drop_policy,
+        grant,
+        revoke,
     };
 
     /// Convert to QailCmd for AST-native execution (preferred method)
@@ -121,6 +130,30 @@ pub const MigrationCmd = struct {
                 }
                 break :blk QailCmd.dropIndex(self.table);
             },
+            .create_policy => blk: {
+                if (self.policy) |policy| {
+                    break :blk QailCmd.createPolicy(policy);
+                }
+                return error.MissingPolicyDefinition;
+            },
+            .drop_policy => blk: {
+                if (self.policy) |policy| {
+                    break :blk QailCmd.dropPolicy(policy.name, policy.table);
+                }
+                return error.MissingPolicyDefinition;
+            },
+            .grant => blk: {
+                if (self.grant) |grant_cmd| {
+                    break :blk QailCmd.grant(grant_cmd.on_object, grant_cmd.privileges, grant_cmd.role);
+                }
+                return error.MissingGrantDefinition;
+            },
+            .revoke => blk: {
+                if (self.grant) |grant_cmd| {
+                    break :blk QailCmd.revoke(grant_cmd.on_object, grant_cmd.privileges, grant_cmd.role);
+                }
+                return error.MissingGrantDefinition;
+            },
         };
     }
 
@@ -211,6 +244,45 @@ pub const MigrationCmd = struct {
                     try w.print("DROP INDEX {s}", .{idx.name});
                 }
             },
+            .create_policy => {
+                const policy = self.policy orelse return error.MissingPolicyDefinition;
+                try w.print("CREATE POLICY {s} ON {s}", .{ policy.name, policy.table });
+                if (policy.permissiveness == .restrictive) {
+                    try w.writeAll(" AS RESTRICTIVE");
+                }
+                try w.print(" FOR {s}", .{policy.target.toSql()});
+                if (policy.role) |role| {
+                    try w.print(" TO {s}", .{role});
+                }
+                if (policy.using_sql) |using_sql| {
+                    try w.print(" USING ({s})", .{using_sql});
+                }
+                if (policy.with_check_sql) |with_check_sql| {
+                    try w.print(" WITH CHECK ({s})", .{with_check_sql});
+                }
+            },
+            .drop_policy => {
+                const policy = self.policy orelse return error.MissingPolicyDefinition;
+                try w.print("DROP POLICY IF EXISTS {s} ON {s}", .{ policy.name, policy.table });
+            },
+            .grant => {
+                const grant_cmd = self.grant orelse return error.MissingGrantDefinition;
+                try w.writeAll("GRANT ");
+                for (grant_cmd.privileges, 0..) |privilege, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try w.writeAll(privilege);
+                }
+                try w.print(" ON {s} TO {s}", .{ grant_cmd.on_object, grant_cmd.role });
+            },
+            .revoke => {
+                const grant_cmd = self.grant orelse return error.MissingGrantDefinition;
+                try w.writeAll("REVOKE ");
+                for (grant_cmd.privileges, 0..) |privilege, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try w.writeAll(privilege);
+                }
+                try w.print(" ON {s} FROM {s}", .{ grant_cmd.on_object, grant_cmd.role });
+            },
         }
 
         return writer.toOwnedSlice();
@@ -255,6 +327,57 @@ pub const MigrationCmd = struct {
                 // DROP INDEX -> cannot auto-rollback (need original definition)
                 try w.print("-- Cannot auto-rollback DROP INDEX (need original definition)", .{});
             },
+            .create_policy => {
+                if (self.policy) |policy| {
+                    try w.print("DROP POLICY IF EXISTS {s} ON {s}", .{ policy.name, policy.table });
+                } else {
+                    try w.print("-- Cannot auto-rollback CREATE POLICY (definition missing)", .{});
+                }
+            },
+            .drop_policy => {
+                if (self.policy) |policy| {
+                    try w.print("CREATE POLICY {s} ON {s}", .{ policy.name, policy.table });
+                    if (policy.permissiveness == .restrictive) {
+                        try w.writeAll(" AS RESTRICTIVE");
+                    }
+                    try w.print(" FOR {s}", .{policy.target.toSql()});
+                    if (policy.role) |role| {
+                        try w.print(" TO {s}", .{role});
+                    }
+                    if (policy.using_sql) |using_sql| {
+                        try w.print(" USING ({s})", .{using_sql});
+                    }
+                    if (policy.with_check_sql) |with_check_sql| {
+                        try w.print(" WITH CHECK ({s})", .{with_check_sql});
+                    }
+                } else {
+                    try w.print("-- Cannot auto-rollback DROP POLICY (definition missing)", .{});
+                }
+            },
+            .grant => {
+                if (self.grant) |grant_cmd| {
+                    try w.writeAll("REVOKE ");
+                    for (grant_cmd.privileges, 0..) |privilege, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.writeAll(privilege);
+                    }
+                    try w.print(" ON {s} FROM {s}", .{ grant_cmd.on_object, grant_cmd.role });
+                } else {
+                    try w.print("-- Cannot auto-rollback GRANT (definition missing)", .{});
+                }
+            },
+            .revoke => {
+                if (self.grant) |grant_cmd| {
+                    try w.writeAll("GRANT ");
+                    for (grant_cmd.privileges, 0..) |privilege, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.writeAll(privilege);
+                    }
+                    try w.print(" ON {s} TO {s}", .{ grant_cmd.on_object, grant_cmd.role });
+                } else {
+                    try w.print("-- Cannot auto-rollback REVOKE (definition missing)", .{});
+                }
+            },
         }
 
         return writer.toOwnedSlice();
@@ -267,6 +390,33 @@ pub const IndexInfo = struct {
     columns: []const u8,
     unique: bool = false,
 };
+
+fn optionalStrEq(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
+fn policyEquals(a: *const PolicyDef, b: *const PolicyDef) bool {
+    return std.mem.eql(u8, a.name, b.name) and
+        std.mem.eql(u8, a.table, b.table) and
+        a.target == b.target and
+        a.permissiveness == b.permissiveness and
+        optionalStrEq(a.role, b.role) and
+        optionalStrEq(a.using_sql, b.using_sql) and
+        optionalStrEq(a.with_check_sql, b.with_check_sql);
+}
+
+fn grantEquals(a: *const GrantDef, b: *const GrantDef) bool {
+    if (a.action != b.action) return false;
+    if (!std.mem.eql(u8, a.on_object, b.on_object)) return false;
+    if (!std.mem.eql(u8, a.role, b.role)) return false;
+    if (a.privileges.len != b.privileges.len) return false;
+    for (a.privileges, 0..) |privilege, i| {
+        if (!std.mem.eql(u8, privilege, b.privileges[i])) return false;
+    }
+    return true;
+}
 
 // ============================================================================
 // Differ
@@ -340,6 +490,90 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
                     }
                 }
             }
+        }
+    }
+
+    // 4. Detect policy changes
+    for (new.policies.items) |*new_policy| {
+        if (old.findPolicy(new_policy.name, new_policy.table)) |old_policy| {
+            if (!policyEquals(old_policy, new_policy)) {
+                try cmds.append(allocator, MigrationCmd{
+                    .action = .drop_policy,
+                    .table = old_policy.table,
+                    .policy = old_policy.*,
+                });
+                try cmds.append(allocator, MigrationCmd{
+                    .action = .create_policy,
+                    .table = new_policy.table,
+                    .policy = new_policy.*,
+                });
+            }
+        } else {
+            try cmds.append(allocator, MigrationCmd{
+                .action = .create_policy,
+                .table = new_policy.table,
+                .policy = new_policy.*,
+            });
+        }
+    }
+
+    for (old.policies.items) |*old_policy| {
+        if (new.findPolicy(old_policy.name, old_policy.table) == null) {
+            try cmds.append(allocator, MigrationCmd{
+                .action = .drop_policy,
+                .table = old_policy.table,
+                .policy = old_policy.*,
+            });
+        }
+    }
+
+    // 5. Detect grant/revoke changes
+    for (new.grants.items) |*new_grant| {
+        var exists = false;
+        for (old.grants.items) |*old_grant| {
+            if (grantEquals(old_grant, new_grant)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            const cmd_action: MigrationCmd.Action = switch (new_grant.action) {
+                .grant => .grant,
+                .revoke => .revoke,
+            };
+            try cmds.append(allocator, MigrationCmd{
+                .action = cmd_action,
+                .table = new_grant.on_object,
+                .grant = new_grant.*,
+            });
+        }
+    }
+
+    for (old.grants.items) |*old_grant| {
+        var exists = false;
+        for (new.grants.items) |*new_grant| {
+            if (grantEquals(old_grant, new_grant)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            var inverse_grant = old_grant.*;
+            const cmd_action: MigrationCmd.Action = switch (old_grant.action) {
+                .grant => blk: {
+                    inverse_grant.action = .revoke;
+                    break :blk .revoke;
+                },
+                .revoke => blk: {
+                    inverse_grant.action = .grant;
+                    break :blk .grant;
+                },
+            };
+            try cmds.append(allocator, MigrationCmd{
+                .action = cmd_action,
+                .table = old_grant.on_object,
+                .grant = inverse_grant,
+            });
         }
     }
 
@@ -539,4 +773,68 @@ test "generate sql" {
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "CREATE TABLE") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "id uuid") != null);
+}
+
+test "diff policy create and drop" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+        \\policy orders_tenant_isolation on orders
+        \\  for all
+        \\  restrictive
+        \\  using (tenant_id = current_setting('app.tenant_id')::uuid)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    var has_create_policy = false;
+    for (cmds.items) |cmd| {
+        if (cmd.action == .create_policy) {
+            has_create_policy = true;
+            const sql = try cmd.toSql(allocator);
+            defer allocator.free(sql);
+            try std.testing.expect(std.mem.indexOf(u8, sql, "CREATE POLICY orders_tenant_isolation ON orders") != null);
+        }
+    }
+    try std.testing.expect(has_create_policy);
+}
+
+test "diff grant removal emits revoke" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\grant select, insert on users to app_role
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input = "";
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.revoke, cmds.items[0].action);
+
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "REVOKE select, insert ON users FROM app_role") != null);
 }

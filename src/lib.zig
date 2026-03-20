@@ -45,6 +45,11 @@ pub const GssTokenProvider = driver.GssTokenProvider;
 pub const ScramChannelBindingMode = driver.ScramChannelBindingMode;
 pub const IoBackend = driver.IoBackend;
 pub const IoBackendPolicy = driver.IoBackendPolicy;
+pub const RlsContext = driver.RlsContext;
+pub const SuperAdminToken = driver.SuperAdminToken;
+pub const rlsSqlWithTimeout = driver.contextToSqlWithTimeout;
+pub const rlsSqlWithTimeouts = driver.contextToSqlWithTimeouts;
+pub const ScopedPoolOp = driver.ScopedPoolOp;
 
 // Re-export builders for convenience
 pub const builders = ast.builders;

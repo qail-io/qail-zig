@@ -1,0 +1,31 @@
+name: Parity Guards
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout qail-zig
+        uses: actions/checkout@v4
+
+      - name: Checkout qail.rs reference
+        uses: actions/checkout@v4
+        with:
+          repository: qail-io/qail
+          path: qail.rs
+          fetch-depth: 1
+
+      - name: Run AST/encoder parity checks
+        run: ./scripts/check_parity.sh ./qail.rs
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify generated AST files are up to date
+        run: ./scripts/check_codegen_sync.sh ./qail.rs

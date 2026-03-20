@@ -742,6 +742,90 @@ pub const AstEncoder = struct {
                 try writer.writeAll("DROP DATABASE IF EXISTS ");
                 try writer.writeAll(cmd.table);
             },
+            .grant => {
+                const role = cmd.payload orelse return error.MissingGrantRole;
+                if (cmd.table.len == 0) return error.MissingGrantObject;
+                if (cmd.privileges.len == 0) return error.MissingGrantPrivileges;
+
+                try writer.writeAll("GRANT ");
+                for (cmd.privileges, 0..) |privilege, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(privilege);
+                }
+                try writer.writeAll(" ON ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" TO ");
+                try writer.writeAll(role);
+            },
+            .revoke => {
+                const role = cmd.payload orelse return error.MissingRevokeRole;
+                if (cmd.table.len == 0) return error.MissingRevokeObject;
+                if (cmd.privileges.len == 0) return error.MissingRevokePrivileges;
+
+                try writer.writeAll("REVOKE ");
+                for (cmd.privileges, 0..) |privilege, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(privilege);
+                }
+                try writer.writeAll(" ON ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" FROM ");
+                try writer.writeAll(role);
+            },
+            .create_policy => {
+                const policy = cmd.policy_def orelse return error.MissingPolicyDefinition;
+                if (policy.name.len == 0) return error.MissingPolicyName;
+                if (policy.table.len == 0) return error.MissingPolicyTable;
+
+                try writer.writeAll("CREATE POLICY ");
+                try writer.writeAll(policy.name);
+                try writer.writeAll(" ON ");
+                try writer.writeAll(policy.table);
+
+                if (policy.permissiveness == .restrictive) {
+                    try writer.writeAll(" AS RESTRICTIVE");
+                }
+
+                try writer.writeAll(" FOR ");
+                try writer.writeAll(policy.target.toSql());
+
+                if (policy.role) |role| {
+                    try writer.writeAll(" TO ");
+                    try writer.writeAll(role);
+                }
+
+                if (policy.using_sql) |using_expr| {
+                    try writer.writeAll(" USING (");
+                    try writer.writeAll(using_expr);
+                    try writer.writeByte(')');
+                }
+
+                if (policy.with_check_sql) |with_check_expr| {
+                    try writer.writeAll(" WITH CHECK (");
+                    try writer.writeAll(with_check_expr);
+                    try writer.writeByte(')');
+                }
+            },
+            .drop_policy => {
+                const policy_name = if (cmd.policy_def) |policy|
+                    policy.name
+                else
+                    cmd.payload orelse return error.MissingPolicyName;
+                const policy_table = if (cmd.policy_def) |policy|
+                    policy.table
+                else if (cmd.table.len > 0)
+                    cmd.table
+                else
+                    return error.MissingPolicyTable;
+
+                if (policy_name.len == 0) return error.MissingPolicyName;
+                if (policy_table.len == 0) return error.MissingPolicyTable;
+
+                try writer.writeAll("DROP POLICY IF EXISTS ");
+                try writer.writeAll(policy_name);
+                try writer.writeAll(" ON ");
+                try writer.writeAll(policy_table);
+            },
             // Raw SQL (for backwards compat - should be avoided!)
             .raw => {
                 if (cmd.raw_sql) |raw| {
@@ -1261,6 +1345,76 @@ test "ast encoder explain analyze" {
     try encoder.encodeQuery(&cmd);
     const bytes = encoder.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, bytes, "EXPLAIN ANALYZE SELECT * FROM users") != null);
+}
+
+test "ast encoder grant and revoke" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const privs = [_][]const u8{ "SELECT", "INSERT" };
+    const grant_cmd = QailCmd.grant("users", &privs, "app_role");
+    try encoder.encodeQuery(&grant_cmd);
+    try std.testing.expect(std.mem.indexOf(u8, encoder.getWritten(), "GRANT SELECT, INSERT ON users TO app_role") != null);
+
+    const revoke_cmd = QailCmd.revoke("users", &privs, "app_role");
+    try encoder.encodeQuery(&revoke_cmd);
+    try std.testing.expect(std.mem.indexOf(u8, encoder.getWritten(), "REVOKE SELECT, INSERT ON users FROM app_role") != null);
+}
+
+test "ast encoder create and drop policy" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const policy = ast.cmd.PolicyDef{
+        .name = "orders_tenant_isolation",
+        .table = "orders",
+        .target = .all,
+        .permissiveness = .restrictive,
+        .role = "app_user",
+        .using_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
+        .with_check_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
+    };
+
+    const create_cmd = QailCmd.createPolicy(policy);
+    try encoder.encodeQuery(&create_cmd);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoder.getWritten(),
+        "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = current_setting('app.tenant_id')::uuid) WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid)",
+    ) != null);
+
+    const drop_cmd = QailCmd.dropPolicy("orders_tenant_isolation", "orders");
+    try encoder.encodeQuery(&drop_cmd);
+    try std.testing.expect(std.mem.indexOf(u8, encoder.getWritten(), "DROP POLICY IF EXISTS orders_tenant_isolation ON orders") != null);
+}
+
+test "ast encoder privilege and policy validation" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var grant_missing_role = QailCmd{
+        .kind = .grant,
+        .table = "users",
+    };
+    try std.testing.expectError(error.MissingGrantRole, encoder.encodeQuery(&grant_missing_role));
+
+    var grant_missing_privileges = QailCmd{
+        .kind = .grant,
+        .table = "users",
+        .payload = "app_role",
+    };
+    try std.testing.expectError(error.MissingGrantPrivileges, encoder.encodeQuery(&grant_missing_privileges));
+
+    const drop_missing_table = QailCmd{
+        .kind = .drop_policy,
+        .payload = "orders_tenant_isolation",
+    };
+    try std.testing.expectError(error.MissingPolicyTable, encoder.encodeQuery(&drop_missing_table));
+
+    const create_missing_def = QailCmd{
+        .kind = .create_policy,
+    };
+    try std.testing.expectError(error.MissingPolicyDefinition, encoder.encodeQuery(&create_missing_def));
 }
 
 test "ast encoder rejects non-postgres command without raw sql" {

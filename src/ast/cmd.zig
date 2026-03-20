@@ -130,6 +130,10 @@ pub const CmdKind = enum {
     session_reset, // RESET session variable
     create_database, // CREATE DATABASE
     drop_database, // DROP DATABASE
+    grant, // GRANT privileges
+    revoke, // REVOKE privileges
+    create_policy, // CREATE POLICY
+    drop_policy, // DROP POLICY
 
     // Raw SQL (for migrations, DDL, etc.)
     raw, // Raw SQL string
@@ -254,6 +258,42 @@ pub const GroupByMode = enum {
     cube,
 };
 
+/// Target operation for CREATE POLICY
+pub const PolicyTarget = enum {
+    all,
+    select,
+    insert,
+    update,
+    delete,
+
+    pub fn toSql(self: PolicyTarget) []const u8 {
+        return switch (self) {
+            .all => "ALL",
+            .select => "SELECT",
+            .insert => "INSERT",
+            .update => "UPDATE",
+            .delete => "DELETE",
+        };
+    }
+};
+
+/// Policy permissiveness (PostgreSQL RLS)
+pub const PolicyPermissiveness = enum {
+    permissive,
+    restrictive,
+};
+
+/// Row-level security policy definition
+pub const PolicyDef = struct {
+    name: []const u8,
+    table: []const u8,
+    target: PolicyTarget = .all,
+    permissiveness: PolicyPermissiveness = .permissive,
+    role: ?[]const u8 = null,
+    using_sql: ?[]const u8 = null,
+    with_check_sql: ?[]const u8 = null,
+};
+
 /// The primary QAIL command structure
 pub const QailCmd = struct {
     kind: CmdKind = .get,
@@ -293,6 +333,12 @@ pub const QailCmd = struct {
     // Pub/Sub fields (LISTEN/NOTIFY)
     channel: ?[]const u8 = null,
     payload: ?[]const u8 = null,
+
+    // Privilege fields (GRANT/REVOKE)
+    privileges: []const []const u8 = &.{},
+
+    // Policy fields (CREATE/DROP POLICY)
+    policy_def: ?PolicyDef = null,
 
     // INSERT values (for add command)
     insert_values: []const Value = &.{},
@@ -529,6 +575,44 @@ pub const QailCmd = struct {
     /// DROP DATABASE
     pub fn dropDatabase(name: []const u8) QailCmd {
         return .{ .kind = .drop_database, .table = name };
+    }
+
+    /// GRANT privileges ON object TO role
+    pub fn grant(on_object: []const u8, privs: []const []const u8, role: []const u8) QailCmd {
+        return .{
+            .kind = .grant,
+            .table = on_object,
+            .privileges = privs,
+            .payload = role,
+        };
+    }
+
+    /// REVOKE privileges ON object FROM role
+    pub fn revoke(on_object: []const u8, privs: []const []const u8, role: []const u8) QailCmd {
+        return .{
+            .kind = .revoke,
+            .table = on_object,
+            .privileges = privs,
+            .payload = role,
+        };
+    }
+
+    /// CREATE POLICY
+    pub fn createPolicy(policy: PolicyDef) QailCmd {
+        return .{
+            .kind = .create_policy,
+            .table = policy.table,
+            .policy_def = policy,
+        };
+    }
+
+    /// DROP POLICY IF EXISTS <name> ON <table>
+    pub fn dropPolicy(name: []const u8, table: []const u8) QailCmd {
+        return .{
+            .kind = .drop_policy,
+            .table = table,
+            .payload = name,
+        };
     }
 
     /// ALTER TABLE ADD COLUMN
@@ -918,6 +1002,35 @@ test "qailcmd set creates update" {
 test "qailcmd del creates delete" {
     const cmd = QailCmd.del("users");
     try std.testing.expectEqual(CmdKind.del, cmd.kind);
+}
+
+test "qailcmd grant constructor" {
+    const privs = [_][]const u8{ "select", "insert" };
+    const cmd = QailCmd.grant("users", &privs, "app_role");
+    try std.testing.expectEqual(CmdKind.grant, cmd.kind);
+    try std.testing.expectEqualStrings("users", cmd.table);
+    try std.testing.expectEqual(@as(usize, 2), cmd.privileges.len);
+    try std.testing.expectEqualStrings("app_role", cmd.payload.?);
+}
+
+test "qailcmd create and drop policy constructors" {
+    const policy = PolicyDef{
+        .name = "orders_tenant_isolation",
+        .table = "orders",
+        .target = .all,
+        .permissiveness = .restrictive,
+        .role = "app_user",
+        .using_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
+    };
+    const create_cmd = QailCmd.createPolicy(policy);
+    try std.testing.expectEqual(CmdKind.create_policy, create_cmd.kind);
+    try std.testing.expect(create_cmd.policy_def != null);
+    try std.testing.expectEqualStrings("orders_tenant_isolation", create_cmd.policy_def.?.name);
+
+    const drop_cmd = QailCmd.dropPolicy("orders_tenant_isolation", "orders");
+    try std.testing.expectEqual(CmdKind.drop_policy, drop_cmd.kind);
+    try std.testing.expectEqualStrings("orders", drop_cmd.table);
+    try std.testing.expectEqualStrings("orders_tenant_isolation", drop_cmd.payload.?);
 }
 
 test "filter creates where clause" {

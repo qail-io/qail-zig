@@ -13,6 +13,30 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const io = @import("../compat/io.zig");
+const ast_cmd = @import("../ast/cmd.zig");
+
+pub const PolicyTarget = ast_cmd.PolicyTarget;
+pub const PolicyPermissiveness = ast_cmd.PolicyPermissiveness;
+pub const PolicyDef = ast_cmd.PolicyDef;
+
+pub const GrantAction = enum {
+    grant,
+    revoke,
+};
+
+pub const GrantDef = struct {
+    action: GrantAction,
+    privileges: []const []const u8,
+    on_object: []const u8,
+    role: []const u8,
+
+    pub fn deinit(self: *const GrantDef, allocator: Allocator) void {
+        for (self.privileges) |p| allocator.free(p);
+        allocator.free(self.privileges);
+        allocator.free(self.on_object);
+        allocator.free(self.role);
+    }
+};
 
 // ============================================================================
 // Types
@@ -21,11 +45,15 @@ const io = @import("../compat/io.zig");
 /// Schema containing all table definitions
 pub const Schema = struct {
     tables: std.ArrayList(TableDef),
+    policies: std.ArrayList(PolicyDef),
+    grants: std.ArrayList(GrantDef),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) Schema {
         return .{
             .tables = std.ArrayList(TableDef).initCapacity(allocator, 0) catch unreachable,
+            .policies = std.ArrayList(PolicyDef).initCapacity(allocator, 0) catch unreachable,
+            .grants = std.ArrayList(GrantDef).initCapacity(allocator, 0) catch unreachable,
             .allocator = allocator,
         };
     }
@@ -34,7 +62,19 @@ pub const Schema = struct {
         for (self.tables.items) |*table| {
             table.deinit(self.allocator);
         }
+        for (self.policies.items) |policy| {
+            self.allocator.free(policy.name);
+            self.allocator.free(policy.table);
+            if (policy.role) |role| self.allocator.free(role);
+            if (policy.using_sql) |using_sql| self.allocator.free(using_sql);
+            if (policy.with_check_sql) |with_check_sql| self.allocator.free(with_check_sql);
+        }
+        for (self.grants.items) |grant| {
+            grant.deinit(self.allocator);
+        }
         self.tables.deinit(self.allocator);
+        self.policies.deinit(self.allocator);
+        self.grants.deinit(self.allocator);
     }
 
     /// Parse a schema from .qail format
@@ -48,6 +88,15 @@ pub const Schema = struct {
         for (self.tables.items) |*table| {
             if (std.ascii.eqlIgnoreCase(table.name, name)) {
                 return table;
+            }
+        }
+        return null;
+    }
+
+    pub fn findPolicy(self: *const Schema, name: []const u8, table: []const u8) ?*const PolicyDef {
+        for (self.policies.items) |*policy| {
+            if (std.ascii.eqlIgnoreCase(policy.name, name) and std.ascii.eqlIgnoreCase(policy.table, table)) {
+                return policy;
             }
         }
         return null;
@@ -211,7 +260,7 @@ const Parser = struct {
 
         while (self.pos < self.input.len) {
             const c = self.input[self.pos];
-            if (std.ascii.isAlphanumeric(c) or c == '_') {
+            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.') {
                 self.pos += 1;
             } else {
                 break;
@@ -246,6 +295,185 @@ const Parser = struct {
             }
         }
         return false;
+    }
+
+    fn parsePolicyTarget(self: *Parser) !PolicyTarget {
+        if (self.matchKeyword("all")) return .all;
+        if (self.matchKeyword("select")) return .select;
+        if (self.matchKeyword("insert")) return .insert;
+        if (self.matchKeyword("update")) return .update;
+        if (self.matchKeyword("delete")) return .delete;
+        return error.ExpectedPolicyTarget;
+    }
+
+    fn parseParenthesizedExpr(self: *Parser) ![]const u8 {
+        self.skipWhitespace();
+        try self.expectChar('(');
+        const expr_start = self.pos;
+
+        var depth: usize = 1;
+        while (self.current()) |ch| {
+            if (ch == '(') {
+                depth += 1;
+            } else if (ch == ')') {
+                depth -= 1;
+                if (depth == 0) break;
+            }
+            self.advance();
+        }
+
+        if (self.current() == null) return error.UnterminatedExpression;
+        const expr_end = self.pos;
+        self.advance(); // Skip closing ')'
+
+        const expr = std.mem.trim(u8, self.input[expr_start..expr_end], " \t\r\n");
+        return self.allocator.dupe(u8, expr);
+    }
+
+    fn parsePolicy(self: *Parser) !PolicyDef {
+        if (!self.matchKeyword("policy")) return error.ExpectedPolicy;
+
+        const name = try self.parseIdentifier();
+        errdefer self.allocator.free(name);
+
+        if (!self.matchKeyword("on")) return error.ExpectedOnKeyword;
+        const table = try self.parseIdentifier();
+        errdefer self.allocator.free(table);
+
+        var policy = PolicyDef{
+            .name = name,
+            .table = table,
+            .target = .all,
+            .permissiveness = .permissive,
+            .role = null,
+            .using_sql = null,
+            .with_check_sql = null,
+        };
+        errdefer {
+            self.allocator.free(policy.name);
+            self.allocator.free(policy.table);
+            if (policy.role) |role| self.allocator.free(role);
+            if (policy.using_sql) |using_sql| self.allocator.free(using_sql);
+            if (policy.with_check_sql) |with_check_sql| self.allocator.free(with_check_sql);
+        }
+
+        while (true) {
+            const restore = self.pos;
+
+            if (self.matchKeyword("for")) {
+                policy.target = try self.parsePolicyTarget();
+                continue;
+            }
+
+            if (self.matchKeyword("to")) {
+                const role = try self.parseIdentifier();
+                if (policy.role) |old_role| self.allocator.free(old_role);
+                policy.role = role;
+                continue;
+            }
+
+            if (self.matchKeyword("using")) {
+                const using_sql = try self.parseParenthesizedExpr();
+                if (policy.using_sql) |old_using| self.allocator.free(old_using);
+                policy.using_sql = using_sql;
+                continue;
+            }
+
+            if (self.matchKeyword("with_check")) {
+                const with_check_sql = try self.parseParenthesizedExpr();
+                if (policy.with_check_sql) |old_with_check| self.allocator.free(old_with_check);
+                policy.with_check_sql = with_check_sql;
+                continue;
+            }
+
+            if (self.matchKeyword("with")) {
+                if (self.matchKeyword("check")) {
+                    const with_check_sql = try self.parseParenthesizedExpr();
+                    if (policy.with_check_sql) |old_with_check| self.allocator.free(old_with_check);
+                    policy.with_check_sql = with_check_sql;
+                    continue;
+                }
+                self.pos = restore;
+                break;
+            }
+
+            if (self.matchKeyword("restrictive")) {
+                policy.permissiveness = .restrictive;
+                continue;
+            }
+            if (self.matchKeyword("permissive")) {
+                policy.permissiveness = .permissive;
+                continue;
+            }
+
+            self.pos = restore;
+            break;
+        }
+
+        return policy;
+    }
+
+    fn parsePrivilegesUntilOn(self: *Parser) ![]const []const u8 {
+        var privileges: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (privileges.items) |p| self.allocator.free(p);
+            privileges.deinit(self.allocator);
+        }
+
+        while (true) {
+            self.skipWhitespace();
+            if (self.matchKeyword("on")) break;
+
+            const start = self.pos;
+            while (self.current()) |ch| {
+                if (ch == ',' or std.ascii.isWhitespace(ch)) break;
+                self.advance();
+            }
+
+            if (self.pos == start) return error.ExpectedPrivilege;
+
+            const raw = std.mem.trim(u8, self.input[start..self.pos], " \t\r\n");
+            if (raw.len == 0) return error.ExpectedPrivilege;
+            try privileges.append(self.allocator, try self.allocator.dupe(u8, raw));
+
+            self.skipWhitespace();
+            if (self.current() == ',') self.advance();
+        }
+
+        if (privileges.items.len == 0) return error.ExpectedPrivilege;
+        return try privileges.toOwnedSlice(self.allocator);
+    }
+
+    fn parseGrantLike(self: *Parser, action: GrantAction) !GrantDef {
+        const ok = switch (action) {
+            .grant => self.matchKeyword("grant"),
+            .revoke => self.matchKeyword("revoke"),
+        };
+        if (!ok) return error.ExpectedGrantOrRevoke;
+
+        const privileges = try self.parsePrivilegesUntilOn();
+        errdefer {
+            for (privileges) |p| self.allocator.free(p);
+            self.allocator.free(privileges);
+        }
+
+        const on_object = try self.parseIdentifier();
+        errdefer self.allocator.free(on_object);
+
+        const role_kw = switch (action) {
+            .grant => "to",
+            .revoke => "from",
+        };
+        if (!self.matchKeyword(role_kw)) return error.ExpectedGrantRole;
+
+        const role = try self.parseIdentifier();
+
+        return .{
+            .action = action,
+            .privileges = privileges,
+            .on_object = on_object,
+            .role = role,
+        };
     }
 
     fn parseTypeInfo(self: *Parser) !struct {
@@ -468,6 +696,18 @@ const Parser = struct {
                 self.pos -= 5; // rewind "table"
                 const table = try self.parseTable();
                 try schema.tables.append(self.allocator, table);
+            } else if (self.matchKeyword("policy")) {
+                self.pos -= 6; // rewind "policy"
+                const policy = try self.parsePolicy();
+                try schema.policies.append(self.allocator, policy);
+            } else if (self.matchKeyword("grant")) {
+                self.pos -= 5; // rewind "grant"
+                const grant = try self.parseGrantLike(.grant);
+                try schema.grants.append(self.allocator, grant);
+            } else if (self.matchKeyword("revoke")) {
+                self.pos -= 6; // rewind "revoke"
+                const revoke = try self.parseGrantLike(.revoke);
+                try schema.grants.append(self.allocator, revoke);
             } else {
                 break;
             }
@@ -572,4 +812,64 @@ test "parse type params" {
     const name = items.findColumn("name").?;
     try std.testing.expectEqualStrings("varchar", name.typ);
     try std.testing.expectEqualStrings("255", name.type_params.?);
+}
+
+test "parse policy block" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+        \\
+        \\policy orders_tenant_isolation on orders
+        \\    for all
+        \\    to app_user
+        \\    restrictive
+        \\    using (tenant_id = current_setting('app.tenant_id')::uuid)
+        \\    with_check (tenant_id = current_setting('app.tenant_id')::uuid)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), schema.policies.items.len);
+    const policy = schema.policies.items[0];
+    try std.testing.expectEqualStrings("orders_tenant_isolation", policy.name);
+    try std.testing.expectEqualStrings("orders", policy.table);
+    try std.testing.expectEqual(PolicyTarget.all, policy.target);
+    try std.testing.expectEqual(PolicyPermissiveness.restrictive, policy.permissiveness);
+    try std.testing.expectEqualStrings("app_user", policy.role.?);
+    try std.testing.expect(policy.using_sql != null);
+    try std.testing.expect(policy.with_check_sql != null);
+}
+
+test "parse grant and revoke statements" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\grant select, insert on users to app_role
+        \\revoke update on users from app_role
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), schema.grants.items.len);
+
+    const grant = schema.grants.items[0];
+    try std.testing.expectEqual(GrantAction.grant, grant.action);
+    try std.testing.expectEqual(@as(usize, 2), grant.privileges.len);
+    try std.testing.expectEqualStrings("select", grant.privileges[0]);
+    try std.testing.expectEqualStrings("insert", grant.privileges[1]);
+    try std.testing.expectEqualStrings("users", grant.on_object);
+    try std.testing.expectEqualStrings("app_role", grant.role);
+
+    const revoke = schema.grants.items[1];
+    try std.testing.expectEqual(GrantAction.revoke, revoke.action);
+    try std.testing.expectEqual(@as(usize, 1), revoke.privileges.len);
+    try std.testing.expectEqualStrings("update", revoke.privileges[0]);
+    try std.testing.expectEqualStrings("users", revoke.on_object);
+    try std.testing.expectEqualStrings("app_role", revoke.role);
 }

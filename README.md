@@ -98,9 +98,11 @@ pub fn main() !void {
 AST types are auto-generated from the Rust source to maintain parity:
 
 ```bash
-# From qail.rs/codegen/
-cargo run
-# → generates 7 files in qail-zig/src/ast/generated/
+# From qail-zig/
+./scripts/regenerate_codegen.sh ../qail.rs
+
+# CI-style drift check (ignores only timestamp header line)
+./scripts/check_codegen_sync.sh ../qail.rs
 ```
 
 | Source (Rust) | Generated (Zig) | Contents |
@@ -199,6 +201,22 @@ var conn = try pool.acquire();
 defer conn.release();
 
 const rows = try conn.fetchAll(&cmd);
+```
+
+### RLS Context (Centralized)
+
+```zig
+const token = qail.SuperAdminToken.forSystemProcess("migration");
+const admin_ctx = qail.RlsContext.superAdmin(token);
+const tenant_ctx = qail.RlsContext.tenant("550e8400-e29b-41d4-a716-446655440000");
+
+// Direct driver path
+try driver.setRlsContext(&tenant_ctx);
+defer driver.clearRlsContext() catch {};
+
+// Pooled path (auto COMMIT/reset on release)
+var scoped = try pool.acquireWithRlsTimeout(tenant_ctx, 5_000);
+defer scoped.release();
 ```
 
 ### Prepared Statements
