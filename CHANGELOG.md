@@ -2,6 +2,13 @@
 
 This changelog tracks qail-zig releases separately from qail.rs.
 
+## v0.6.1 — 2026-03-28
+
+### Fixed
+
+- SQL transpiler now groups mixed `AND` + `OR` where clauses as `AND ( ... OR ... )` to match qail.rs `or_filter` semantics.
+- Added transpiler regressions for mixed `AND`/`OR` and pure-OR where clause rendering.
+
 ## v0.6.0 — 2026-03-27
 
 ### Added
