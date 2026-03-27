@@ -314,6 +314,7 @@ pub const Pipeline = struct {
                     var pair: [2]?[]const u8 = .{ null, null };
                     if (columns.len > 0) pair[0] = columns[0];
                     if (columns.len > 1) pair[1] = columns[1];
+                    self.allocator.free(columns);
 
                     try results.append(self.allocator, pair);
                 },
@@ -323,7 +324,10 @@ pub const Pipeline = struct {
                         return try results.toOwnedSlice(self.allocator);
                     }
                 },
-                .error_response => return error.QueryError,
+                .error_response => {
+                    self.drainUntilReadyAfterError();
+                    return error.QueryError;
+                },
                 else => {},
             }
         }
@@ -395,7 +399,10 @@ pub const Pipeline = struct {
                 .ready_for_query => {
                     if (completed >= expected) return completed;
                 },
-                .error_response => return error.QueryError,
+                .error_response => {
+                    self.drainUntilReadyAfterError();
+                    return error.QueryError;
+                },
                 else => {},
             }
         }
@@ -422,7 +429,8 @@ pub const Pipeline = struct {
             current_rows.deinit(self.allocator);
         }
 
-        var field_names: [][]const u8 = &.{};
+        var field_names_template: []const []const u8 = &.{};
+        errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
 
         while (true) {
             const msg = try self.conn.readMessage();
@@ -432,35 +440,53 @@ pub const Pipeline = struct {
                 .row_description => {
                     var decoder = protocol.Decoder.init(msg.payload);
                     const fields = try decoder.parseRowDescription(self.allocator);
+                    defer self.allocator.free(fields);
 
-                    field_names = try self.allocator.alloc([]const u8, fields.len);
-                    for (fields, 0..) |fd, i| {
-                        field_names[i] = fd.name;
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
                     }
+
+                    var field_names = try self.allocator.alloc([]const u8, fields.len);
+                    var copied: usize = 0;
+                    errdefer {
+                        for (field_names[0..copied]) |name| self.allocator.free(name);
+                        self.allocator.free(field_names);
+                    }
+                    for (fields, 0..) |fd, i| {
+                        field_names[i] = try self.allocator.dupe(u8, fd.name);
+                        copied += 1;
+                    }
+                    field_names_template = field_names;
                 },
                 .data_row => {
                     var decoder = protocol.Decoder.init(msg.payload);
-                    const columns = try decoder.parseDataRow(self.allocator);
+                    const columns = try decoder.parseDataRowOwned(self.allocator);
+                    const row = try PgRow.initOwned(self.allocator, columns, field_names_template);
 
-                    try current_rows.append(self.allocator, .{
-                        .columns = columns,
-                        .field_names = field_names,
-                        .allocator = self.allocator,
-                    });
+                    try current_rows.append(self.allocator, row);
                 },
                 .command_complete => {
                     try all_results.append(self.allocator, try current_rows.toOwnedSlice(self.allocator));
                     current_rows = .{};
                 },
                 .no_data => {
-                    try all_results.append(self.allocator, &.{});
+                    const empty = try self.allocator.alloc(PgRow, 0);
+                    try all_results.append(self.allocator, empty);
                 },
                 .ready_for_query => {
                     if (all_results.items.len >= expected) {
+                        if (field_names_template.len > 0) {
+                            PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                            field_names_template = &.{};
+                        }
                         return try all_results.toOwnedSlice(self.allocator);
                     }
                 },
-                .error_response => return error.QueryError,
+                .error_response => {
+                    self.drainUntilReadyAfterError();
+                    return error.QueryError;
+                },
                 else => {},
             }
         }
@@ -475,6 +501,13 @@ pub const Pipeline = struct {
                 .error_response => return error.ServerError,
                 else => {},
             }
+        }
+    }
+
+    fn drainUntilReadyAfterError(self: *Pipeline) void {
+        while (true) {
+            const msg = self.conn.readMessage() catch return;
+            if (msg.msg_type == .ready_for_query) return;
         }
     }
 };

@@ -183,6 +183,7 @@ pub const Encoder = struct {
     /// Encode Parse (Extended Query Protocol)
     pub fn encodeParse(self: *Encoder, stmt_name: []const u8, sql: []const u8, param_types: []const u32) !void {
         self.reset();
+        if (param_types.len > std.math.maxInt(i16)) return error.TooManyParameters;
 
         const msg_len: u32 = 4 + @as(u32, @intCast(stmt_name.len)) + 1 + @as(u32, @intCast(sql.len)) + 1 + 2 + @as(u32, @intCast(param_types.len * 4));
 
@@ -205,6 +206,7 @@ pub const Encoder = struct {
         params: []const ?[]const u8,
     ) !void {
         self.reset();
+        if (params.len > std.math.maxInt(i16)) return error.TooManyParameters;
 
         var params_size: u32 = 0;
         for (params) |param| {
@@ -294,6 +296,7 @@ pub const Encoder = struct {
         stmt_name: []const u8,
         params: []const ?[]const u8,
     ) !void {
+        if (params.len > std.math.maxInt(i16)) return error.TooManyParameters;
         var params_size: u32 = 0;
         for (params) |param| {
             params_size += 4;

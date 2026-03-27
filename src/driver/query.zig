@@ -50,10 +50,11 @@ pub const StatementCache = struct {
     }
 
     pub fn deinit(self: *StatementCache) void {
-        // Free all allocated statement names
+        // Free all allocated statement names and SQL keys
         var iter = self.entries.valueIterator();
         while (iter.next()) |entry| {
             self.allocator.free(entry.name);
+            self.allocator.free(entry.sql);
         }
         self.entries.deinit();
     }
@@ -81,23 +82,30 @@ pub const StatementCache = struct {
 
         // Generate new statement name
         const name = try sqlToStmtName(self.allocator, sql);
+        errdefer self.allocator.free(name);
 
         // Evict if at capacity
         if (self.entries.count() >= self.max_size) {
             // Simple eviction: remove first entry
             var iter = self.entries.iterator();
             if (iter.next()) |first| {
+                const evicted = first.value_ptr.*;
                 _ = self.entries.remove(first.key_ptr.*);
+                self.allocator.free(evicted.name);
+                self.allocator.free(evicted.sql);
             }
         }
+
+        const sql_key = try self.allocator.dupe(u8, sql);
+        errdefer self.allocator.free(sql_key);
 
         // Insert new entry
         const entry = CacheEntry{
             .name = name,
-            .sql = sql,
+            .sql = sql_key,
             .param_count = countParams(sql),
         };
-        try self.entries.put(sql, entry);
+        try self.entries.put(sql_key, entry);
 
         return .{ .name = name, .was_hit = false };
     }
@@ -126,6 +134,7 @@ pub fn sqlToStmtName(allocator: std.mem.Allocator, sql: []const u8) ![]const u8 
 
 /// Count $N parameters in SQL
 pub fn countParams(sql: []const u8) usize {
+    if (sql.len < 2) return 0;
     var count: usize = 0;
     var i: usize = 0;
     while (i < sql.len - 1) : (i += 1) {
@@ -172,12 +181,12 @@ pub fn buildExtendedQuery(
 
     for (params) |param| {
         if (param) |p| {
-            std.mem.writeInt(i32, buf.items[buf.items.len..][0..4], @intCast(p.len), .big);
             try buf.appendNTimes(0, 4);
+            std.mem.writeInt(i32, buf.items[buf.items.len - 4 ..][0..4], @intCast(p.len), .big);
             try buf.appendSlice(p);
         } else {
-            std.mem.writeInt(i32, buf.items[buf.items.len..][0..4], -1, .big);
             try buf.appendNTimes(0, 4);
+            std.mem.writeInt(i32, buf.items[buf.items.len - 4 ..][0..4], -1, .big);
         }
     }
     try buf.appendNTimes(0, 2); // result format codes

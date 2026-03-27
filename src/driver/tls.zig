@@ -116,7 +116,8 @@ pub const TlsConnection = struct {
         try self.tcp_stream.writeAll(&buf);
 
         var response: [1]u8 = undefined;
-        _ = try self.tcp_stream.read(&response);
+        const read_n = try self.tcp_stream.read(&response);
+        if (read_n != 1) return error.EndOfStream;
 
         return response[0] == 'S';
     }
@@ -273,6 +274,10 @@ pub const TlsConnection = struct {
         var waiting_for_scram_final = false;
         var gss_mechanism: ?auth_options_mod.GssMechanism = null;
         var gss_roundtrips: u32 = 0;
+        const AuthFlow = enum { none, cleartext, md5, sasl, gss };
+        var auth_flow: AuthFlow = .none;
+        var auth_ok = false;
+        var sasl_complete = false;
 
         try encoder.encodeStartupWithParams(user, database, extra_params);
         try self.send(encoder.getWritten());
@@ -284,14 +289,20 @@ pub const TlsConnection = struct {
                 .authentication => {
                     var decoder = Decoder.init(msg.payload);
                     const auth_type = try decoder.parseAuthentication();
+                    if (auth_ok) return error.AuthenticationAfterOk;
 
                     switch (auth_type) {
                         .ok => {
+                            if (auth_flow == .sasl and !sasl_complete) return error.AuthenticationOkBeforeSaslFinal;
                             if (waiting_for_scram_final) return error.InvalidScramState;
                             gss_mechanism = null;
                             gss_roundtrips = 0;
+                            auth_flow = .none;
+                            auth_ok = true;
                         },
                         .cleartext_password => {
+                            if (auth_flow != .none and auth_flow != .cleartext) return error.AuthenticationMethodSwitch;
+                            auth_flow = .cleartext;
                             if (!auth_options_mod.authTypeAllowed(effective_auth_options, .cleartext_password)) return error.AuthMechanismDisabled;
                             if (password) |pw| {
                                 try encoder.encodePassword(pw);
@@ -301,6 +312,8 @@ pub const TlsConnection = struct {
                             }
                         },
                         .md5_password => {
+                            if (auth_flow != .none and auth_flow != .md5) return error.AuthenticationMethodSwitch;
+                            auth_flow = .md5;
                             if (!auth_options_mod.authTypeAllowed(effective_auth_options, .md5_password)) return error.AuthMechanismDisabled;
                             const salt = try decoder.parseAuthenticationMd5Salt();
                             if (password) |pw| {
@@ -312,6 +325,8 @@ pub const TlsConnection = struct {
                             }
                         },
                         .kerberos_v5, .gss, .sspi => {
+                            if (auth_flow != .none and auth_flow != .gss) return error.AuthenticationMethodSwitch;
+                            auth_flow = .gss;
                             if (!auth_options_mod.authTypeAllowed(effective_auth_options, auth_type)) return error.AuthMechanismDisabled;
                             const mechanism = auth_options_mod.mechanismFromAuthType(auth_type).?;
                             const token = try auth_options_mod.requestGssToken(effective_auth_options, mechanism, null, self.allocator);
@@ -323,6 +338,7 @@ pub const TlsConnection = struct {
                             gss_roundtrips = 0;
                         },
                         .gss_continue => {
+                            if (auth_flow != .gss) return error.InvalidGssState;
                             const mechanism = gss_mechanism orelse return error.InvalidGssState;
                             gss_roundtrips += 1;
                             if (gss_roundtrips > effective_auth_options.max_gss_roundtrips) return error.GssRoundtripLimitExceeded;
@@ -335,6 +351,9 @@ pub const TlsConnection = struct {
                             }
                         },
                         .sasl => {
+                            if (auth_flow != .none and auth_flow != .sasl) return error.AuthenticationMethodSwitch;
+                            auth_flow = .sasl;
+                            sasl_complete = false;
                             if (!auth_options_mod.authTypeAllowed(effective_auth_options, .sasl)) return error.AuthMechanismDisabled;
                             const mechanisms = try decoder.parseAuthenticationSaslMechanisms(self.allocator);
                             defer self.allocator.free(mechanisms);
@@ -365,6 +384,8 @@ pub const TlsConnection = struct {
                             gss_roundtrips = 0;
                         },
                         .sasl_continue => {
+                            if (auth_flow != .sasl) return error.InvalidScramState;
+                            sasl_complete = false;
                             const server_first = try decoder.parseAuthenticationSaslData();
                             if (scram_client == null) return error.InvalidScramState;
                             const client = &scram_client.?;
@@ -377,23 +398,29 @@ pub const TlsConnection = struct {
                             waiting_for_scram_final = true;
                         },
                         .sasl_final => {
+                            if (auth_flow != .sasl) return error.InvalidScramState;
                             const server_final = try decoder.parseAuthenticationSaslData();
                             if (scram_client == null) return error.InvalidScramState;
                             const client = &scram_client.?;
                             try client.verifyServerFinal(server_final);
                             waiting_for_scram_final = false;
+                            sasl_complete = true;
                         },
                         else => return error.UnsupportedAuth,
                     }
                 },
-                .parameter_status => {},
+                .parameter_status => {
+                    if (!auth_ok) return error.ParameterStatusBeforeAuthOk;
+                },
                 .backend_key_data => {
+                    if (!auth_ok) return error.BackendKeyBeforeAuthOk;
                     var decoder = Decoder.init(msg.payload);
                     const key_data = try decoder.parseBackendKeyData();
                     self.process_id = key_data.process_id;
                     self.secret_key = key_data.secret_key;
                 },
                 .ready_for_query => {
+                    if (!auth_ok) return error.StartupCompletedWithoutAuthOk;
                     self.ready = true;
                 },
                 .error_response => {

@@ -5,15 +5,15 @@
 [![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.5.0)
+[![Version](https://img.shields.io/badge/version-0.6.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.6.0)
 
-> ⚠️ **Status: Deferred** — Paused until Zig stabilizes `std.io` (expected **0.16**). All networking modules are complete; wiring them to the stable I/O interface is days of work, not months.
+> ✅ **Status: Active** — qail-zig is under active development again. The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live and tracked against qail.rs parity.
 >
 > **What's done:** ~19,800 lines of pure Zig covering wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, codegen-ported types, 10 builder modules, fuzz tests, and benchmarks.
 >
-> **Active development continues on [qail.rs](https://github.com/qail-io/qail)** (Rust), which serves as the production implementation and battle-tested reference.
+> **[qail.rs](https://github.com/qail-io/qail)** remains the production reference and parity target; qail-zig is the active pure-Zig implementation.
 
-> 🚀 **1M+ queries/second** pooled, **316K** single connection — Pure Zig, zero FFI, zero GC
+> 🚀 Pure Zig, zero FFI, zero GC. Latest isolated medians against `pgx` and qail.rs: **48.6K** single, **542K** pipeline, **147K** pool10.
 
 ## Highlights
 
@@ -30,12 +30,17 @@
 
 ### I/O: PostgreSQL Query Throughput
 
-| Benchmark | qail-zig | qail.rs (Rust) |
-|-----------|----------|----------------|
-| **Pooled (10 workers)** | 1,016,729 q/s | 1,200,000 q/s |
-| **Pipeline (single)** | 316,872 q/s | 331,885 q/s |
-| **Build time** | <2s | ~30s |
-| **Binary size** | ~200KB | ~2MB |
+Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_staging` (`SELECT id, name FROM harbors WHERE id = $1`), measured on March 27, 2026.
+
+| Benchmark | pgx (Go) | qail.rs (Rust) | qail-zig |
+|-----------|----------|----------------|----------|
+| **Single (prepared, 1 conn)** | 35,530 q/s | 39,303 q/s | **48,561 q/s** |
+| **Pipeline (prepared batch, 1 conn)** | 456,955 q/s | **572,791 q/s** | 542,388 q/s |
+| **Pool10 (prepared singles, 10 conns)** | 96,741 q/s | 135,182 q/s | **147,078 q/s** |
+| **Build time** | n/a | ~30s | <2s |
+| **Binary size** | n/a | ~2MB | ~200KB |
+
+> Current shape: Zig leads on single-query and pool throughput; Rust still leads on prepared pipeline throughput.
 
 ### CPU: AST Build + Transpile (1M iterations)
 

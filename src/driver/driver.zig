@@ -165,18 +165,22 @@ pub const CopyChunkHandler = *const fn (
 
 /// TLS policy parsed from libpq-style URL options.
 ///
-/// `PgDriver` currently supports plain TCP only; `.prefer`/`.require` are
-/// accepted by URL/builder parsing but rejected at connect time.
+/// `verify_ca`/`verify_full` require explicit certificate verification config
+/// (for example via `sslrootcert`) and fail closed otherwise.
 pub const TlsMode = enum {
     disable,
     prefer,
     require,
+    verify_ca,
+    verify_full,
 
     pub fn parseSslMode(value: []const u8) ?TlsMode {
         const trimmed = std.mem.trim(u8, value, " \t\r\n");
         if (std.ascii.eqlIgnoreCase(trimmed, "disable")) return .disable;
         if (std.ascii.eqlIgnoreCase(trimmed, "allow") or std.ascii.eqlIgnoreCase(trimmed, "prefer")) return .prefer;
-        if (std.ascii.eqlIgnoreCase(trimmed, "require") or std.ascii.eqlIgnoreCase(trimmed, "verify-ca") or std.ascii.eqlIgnoreCase(trimmed, "verify-full")) return .require;
+        if (std.ascii.eqlIgnoreCase(trimmed, "require")) return .require;
+        if (std.ascii.eqlIgnoreCase(trimmed, "verify-ca")) return .verify_ca;
+        if (std.ascii.eqlIgnoreCase(trimmed, "verify-full")) return .verify_full;
         return null;
     }
 };
@@ -791,15 +795,23 @@ pub const PgDriver = struct {
                     try Connection.connect(allocator, host, port);
                 break :blk .{ .plain = conn };
             },
-            .prefer, .require => blk: {
+            .prefer, .require, .verify_ca, .verify_full => blk: {
                 var config = tls_config orelse TlsConfig{};
                 if (config.server_name == null) config.server_name = host;
+                switch (tls_mode) {
+                    .verify_ca, .verify_full => {
+                        if (config.verify == .no_verification) {
+                            return error.TlsVerificationRequired;
+                        }
+                    },
+                    else => {},
+                }
 
                 var tls_conn = if (timeout_ms) |ms|
                     try TlsConnection.connectWithTimeout(allocator, host, port, config, ms)
                 else
                     try TlsConnection.connect(allocator, host, port, config);
-                if (tls_mode == .require and !tls_conn.sslAccepted()) {
+                if ((tls_mode == .require or tls_mode == .verify_ca or tls_mode == .verify_full) and !tls_conn.sslAccepted()) {
                     tls_conn.close();
                     return error.TlsRequired;
                 }
@@ -834,8 +846,8 @@ pub const PgDriver = struct {
             rows.deinit(self.allocator);
         }
 
-        var field_descriptions: []FieldDescription = &.{};
-        var field_names: [][]const u8 = &.{};
+        var field_names_template: []const []const u8 = &.{};
+        errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
 
         // Read responses
         while (true) {
@@ -845,31 +857,47 @@ pub const PgDriver = struct {
                 .parse_complete, .bind_complete => {},
                 .row_description => {
                     var decoder = Decoder.init(msg.payload);
-                    field_descriptions = try decoder.parseRowDescription(self.allocator);
-                    defer self.allocator.free(field_descriptions); // Free after extracting names
+                    const field_descriptions = try decoder.parseRowDescription(self.allocator);
+                    defer self.allocator.free(field_descriptions);
 
-                    // Extract field names (names are already allocated separately in FieldDescription)
-                    field_names = try self.allocator.alloc([]const u8, field_descriptions.len);
-                    for (field_descriptions, 0..) |fd, i| {
-                        field_names[i] = fd.name;
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
                     }
+
+                    var names = try self.allocator.alloc([]const u8, field_descriptions.len);
+                    var copied: usize = 0;
+                    errdefer {
+                        for (names[0..copied]) |name| {
+                            self.allocator.free(name);
+                        }
+                        self.allocator.free(names);
+                    }
+                    for (field_descriptions, 0..) |fd, i| {
+                        names[i] = try self.allocator.dupe(u8, fd.name);
+                        copied += 1;
+                    }
+                    field_names_template = names;
                 },
                 .data_row => {
                     var decoder = Decoder.init(msg.payload);
-                    const columns = try decoder.parseDataRow(self.allocator);
-
-                    try rows.append(self.allocator, PgRow{
-                        .columns = columns,
-                        .field_names = field_names,
-                        .allocator = self.allocator,
-                    });
+                    const columns = try decoder.parseDataRowOwned(self.allocator);
+                    const row = try PgRow.initOwned(self.allocator, columns, field_names_template);
+                    try rows.append(self.allocator, row);
                 },
                 .command_complete => {},
-                .ready_for_query => break,
+                .ready_for_query => {
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
+                    }
+                    break;
+                },
                 .error_response => {
                     var decoder = Decoder.init(msg.payload);
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
                     return error.QueryError;
                 },
                 .notification => try self.bufferNotification(msg.payload),
@@ -922,6 +950,7 @@ pub const PgDriver = struct {
                     var decoder = Decoder.init(msg.payload);
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Execute error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
                     return error.ExecuteError;
                 },
                 .notification => try self.bufferNotification(msg.payload),
@@ -1309,11 +1338,19 @@ pub const PgDriver = struct {
             const msg = try self.conn.readMessage();
             switch (msg.msg_type) {
                 .copy_data => {
-                    var parsed = try parseReplicationCopyData(self.allocator, msg.payload);
+                    var parsed = parseReplicationCopyData(self.allocator, msg.payload) catch |err| {
+                        self.replication_stream_active = false;
+                        self.last_replication_wal_end = null;
+                        return err;
+                    };
                     errdefer parsed.deinit();
                     switch (parsed) {
-                        .xlog_data => |x| try self.advanceReplicationWalEnd("XLogData", x.wal_end),
-                        .keepalive => |k| try self.advanceReplicationWalEnd("keepalive", k.wal_end),
+                        .xlog_data => |x| self.advanceReplicationWalEnd("XLogData", x.wal_end) catch |err| {
+                            return err;
+                        },
+                        .keepalive => |k| self.advanceReplicationWalEnd("keepalive", k.wal_end) catch |err| {
+                            return err;
+                        },
                         .raw => {},
                     }
                     return parsed;
@@ -1428,6 +1465,7 @@ pub const PgDriver = struct {
                     var decoder = Decoder.init(msg.payload);
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Prepare error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
                     return error.PrepareError;
                 },
                 .notification => try self.bufferNotification(msg.payload),
@@ -1465,6 +1503,7 @@ pub const PgDriver = struct {
                     var decoder = Decoder.init(msg.payload);
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Prepare error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
                     return error.PrepareError;
                 },
                 .notification => try self.bufferNotification(msg.payload),
@@ -1498,6 +1537,7 @@ pub const PgDriver = struct {
                     var decoder = Decoder.init(msg.payload);
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Execute error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
                     return error.ExecuteError;
                 },
                 .notification => try self.bufferNotification(msg.payload),
@@ -1519,8 +1559,8 @@ pub const PgDriver = struct {
             rows.deinit(self.allocator);
         }
 
-        var field_descriptions: []FieldDescription = &.{};
-        var field_names: [][]const u8 = &.{};
+        var field_names_template: []const []const u8 = &.{};
+        errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
 
         while (true) {
             const msg = try self.conn.readMessage();
@@ -1528,29 +1568,47 @@ pub const PgDriver = struct {
                 .bind_complete => {},
                 .row_description => {
                     var decoder = Decoder.init(msg.payload);
-                    field_descriptions = try decoder.parseRowDescription(self.allocator);
+                    const field_descriptions = try decoder.parseRowDescription(self.allocator);
                     defer self.allocator.free(field_descriptions);
 
-                    field_names = try self.allocator.alloc([]const u8, field_descriptions.len);
-                    for (field_descriptions, 0..) |fd, i| {
-                        field_names[i] = fd.name;
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
                     }
+
+                    var names = try self.allocator.alloc([]const u8, field_descriptions.len);
+                    var copied: usize = 0;
+                    errdefer {
+                        for (names[0..copied]) |name| {
+                            self.allocator.free(name);
+                        }
+                        self.allocator.free(names);
+                    }
+                    for (field_descriptions, 0..) |fd, i| {
+                        names[i] = try self.allocator.dupe(u8, fd.name);
+                        copied += 1;
+                    }
+                    field_names_template = names;
                 },
                 .data_row => {
                     var decoder = Decoder.init(msg.payload);
-                    const columns = try decoder.parseDataRow(self.allocator);
-                    try rows.append(self.allocator, PgRow{
-                        .columns = columns,
-                        .field_names = field_names,
-                        .allocator = self.allocator,
-                    });
+                    const columns = try decoder.parseDataRowOwned(self.allocator);
+                    const row = try PgRow.initOwned(self.allocator, columns, field_names_template);
+                    try rows.append(self.allocator, row);
                 },
                 .command_complete => {},
-                .ready_for_query => break,
+                .ready_for_query => {
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
+                    }
+                    break;
+                },
                 .error_response => {
                     var decoder = Decoder.init(msg.payload);
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
                     return error.QueryError;
                 },
                 .notification => try self.bufferNotification(msg.payload),
@@ -1582,6 +1640,17 @@ pub const PgDriver = struct {
         var notification = try self.decodeNotification(payload);
         errdefer notification.deinit();
         try self.notifications.append(self.allocator, notification);
+    }
+
+    fn drainUntilReadyForQuery(self: *PgDriver) !void {
+        while (true) {
+            const msg = try self.conn.readMessage();
+            switch (msg.msg_type) {
+                .ready_for_query => return,
+                .notification => try self.bufferNotification(msg.payload),
+                else => {},
+            }
+        }
     }
 
     fn popBufferedNotification(self: *PgDriver) ?Notification {
@@ -2239,6 +2308,7 @@ fn buildStandbyStatusUpdatePayload(
 }
 
 fn sendCopyData(conn: anytype, data: []const u8) !void {
+    if (data.len > std.math.maxInt(u32) - 4) return error.CopyDataTooLarge;
     const len: u32 = @intCast(data.len + 4);
     var header: [5]u8 = undefined;
     header[0] = 'd';
@@ -2301,6 +2371,24 @@ test "parse connection url rejects invalid sslmode" {
         error.InvalidTlsMode,
         parseConnectionUrl(arena, "postgres://alice@localhost/db?sslmode=bogus"),
     );
+}
+
+test "parse connection url preserves strict sslmode variants" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const parsed_verify_ca = try parseConnectionUrl(
+        arena,
+        "postgres://alice@localhost/db?sslmode=verify-ca",
+    );
+    try std.testing.expectEqual(TlsMode.verify_ca, parsed_verify_ca.options.tls_mode);
+
+    const parsed_verify_full = try parseConnectionUrl(
+        arena,
+        "postgres://alice@localhost/db?sslmode=verify-full",
+    );
+    try std.testing.expectEqual(TlsMode.verify_full, parsed_verify_full.options.tls_mode);
 }
 
 test "parse connection url loads tls server end point cert der path" {
@@ -2387,6 +2475,25 @@ test "connect with options accepts tls timeout path" {
     }
 }
 
+test "connect with verify-full requires verification config" {
+    const options = ConnectOptions{
+        .tls_mode = .verify_full,
+    };
+
+    try std.testing.expectError(
+        error.TlsVerificationRequired,
+        PgDriver.connectWithOptions(
+            std.testing.allocator,
+            "127.0.0.1",
+            5432,
+            "user",
+            "db",
+            null,
+            options,
+        ),
+    );
+}
+
 test "quote identifier alloc" {
     const quoted = try quoteIdentifierAlloc(std.testing.allocator, "a\"b");
     defer std.testing.allocator.free(quoted);
@@ -2414,6 +2521,113 @@ test "build start logical replication sql with options" {
     try std.testing.expectEqualStrings(
         "START_REPLICATION SLOT slot_main LOGICAL 0/16B6C50 (proto_version '1', publication_names 'pub1,pub2')",
         sql,
+    );
+}
+
+test "build start logical replication sql escapes quoted option values" {
+    const sql = try buildStartLogicalReplicationSql(
+        std.testing.allocator,
+        "slot_main",
+        "0/16B6C50",
+        &.{
+            .{ .key = "publication_names", .value = "pub'one" },
+        },
+    );
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "START_REPLICATION SLOT slot_main LOGICAL 0/16B6C50 (publication_names 'pub''one')",
+        sql,
+    );
+}
+
+test "build start logical replication sql rejects invalid slot identifier" {
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        buildStartLogicalReplicationSql(
+            std.testing.allocator,
+            "slot-main",
+            "0/16B6C50",
+            &.{},
+        ),
+    );
+}
+
+test "build start logical replication sql rejects invalid lsn" {
+    try std.testing.expectError(
+        error.InvalidLsn,
+        buildStartLogicalReplicationSql(
+            std.testing.allocator,
+            "slot_main",
+            "invalid",
+            &.{},
+        ),
+    );
+}
+
+test "build start logical replication sql rejects option value with embedded nul" {
+    const invalid_value = [_]u8{ 'b', 'a', 'd', 0, 'x' };
+    try std.testing.expectError(
+        error.InvalidReplicationOption,
+        buildStartLogicalReplicationSql(
+            std.testing.allocator,
+            "slot_main",
+            "0/16B6C50",
+            &.{
+                .{ .key = "publication_names", .value = invalid_value[0..] },
+            },
+        ),
+    );
+}
+
+test "build create logical replication slot sql with flags" {
+    const sql = try buildCreateLogicalReplicationSlotSql(
+        std.testing.allocator,
+        "slot_main",
+        "pgoutput",
+        true,
+        true,
+    );
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "CREATE_REPLICATION_SLOT slot_main TEMPORARY LOGICAL pgoutput TWO_PHASE",
+        sql,
+    );
+}
+
+test "build create logical replication slot sql rejects invalid plugin identifier" {
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        buildCreateLogicalReplicationSlotSql(
+            std.testing.allocator,
+            "slot_main",
+            "pg-output",
+            false,
+            false,
+        ),
+    );
+}
+
+test "build drop replication slot sql with wait" {
+    const sql = try buildDropReplicationSlotSql(
+        std.testing.allocator,
+        "slot_main",
+        true,
+    );
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings("DROP_REPLICATION_SLOT slot_main WAIT", sql);
+}
+
+test "build drop replication slot sql rejects invalid slot identifier" {
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        buildDropReplicationSlotSql(
+            std.testing.allocator,
+            "slot-main",
+            false,
+        ),
     );
 }
 
@@ -2470,6 +2684,173 @@ test "extract copy columns falls back to assignments" {
     try std.testing.expectEqualStrings("name", extracted[1]);
 }
 
+fn makeOwnedTestRow(columns: []const ?[]const u8, field_names: []const []const u8) !PgRow {
+    var owned_columns = try std.testing.allocator.alloc(?[]const u8, columns.len);
+    errdefer {
+        for (owned_columns) |maybe_col| {
+            if (maybe_col) |col| std.testing.allocator.free(col);
+        }
+        std.testing.allocator.free(owned_columns);
+    }
+
+    for (columns, 0..) |maybe_col, i| {
+        owned_columns[i] = if (maybe_col) |col|
+            try std.testing.allocator.dupe(u8, col)
+        else
+            null;
+    }
+
+    return PgRow.initOwned(std.testing.allocator, owned_columns, field_names);
+}
+
+test "parse identify system row" {
+    var row = try makeOwnedTestRow(
+        &[_]?[]const u8{ "sysid", "7", "0/16B6C50", "appdb" },
+        &.{ "systemid", "timeline", "xlogpos", "dbname" },
+    );
+    defer row.deinit();
+
+    var info = try parseIdentifySystemRow(std.testing.allocator, &row);
+    defer info.deinit();
+
+    try std.testing.expectEqualStrings("sysid", info.system_id);
+    try std.testing.expectEqual(@as(u32, 7), info.timeline);
+    try std.testing.expectEqualStrings("0/16B6C50", info.xlog_pos);
+    try std.testing.expect(info.dbname != null);
+    try std.testing.expectEqualStrings("appdb", info.dbname.?);
+}
+
+test "parse identify system row allows empty dbname" {
+    var row = try makeOwnedTestRow(
+        &[_]?[]const u8{ "sysid", "7", "0/16B6C50", "" },
+        &.{ "systemid", "timeline", "xlogpos", "dbname" },
+    );
+    defer row.deinit();
+
+    var info = try parseIdentifySystemRow(std.testing.allocator, &row);
+    defer info.deinit();
+
+    try std.testing.expect(info.dbname == null);
+}
+
+test "parse identify system row rejects invalid timeline" {
+    var row = try makeOwnedTestRow(
+        &[_]?[]const u8{ "sysid", "bad", "0/16B6C50", "appdb" },
+        &.{ "systemid", "timeline", "xlogpos", "dbname" },
+    );
+    defer row.deinit();
+
+    try std.testing.expectError(error.InvalidReplicationResponse, parseIdentifySystemRow(std.testing.allocator, &row));
+}
+
+test "parse create slot row" {
+    var row = try makeOwnedTestRow(
+        &[_]?[]const u8{ "slot_main", "0/16B6C50", "snap_a", "pgoutput" },
+        &.{ "slot_name", "consistent_point", "snapshot_name", "output_plugin" },
+    );
+    defer row.deinit();
+
+    var info = try parseCreateSlotRow(std.testing.allocator, &row);
+    defer info.deinit();
+
+    try std.testing.expectEqualStrings("slot_main", info.slot_name);
+    try std.testing.expectEqualStrings("0/16B6C50", info.consistent_point);
+    try std.testing.expect(info.snapshot_name != null);
+    try std.testing.expectEqualStrings("snap_a", info.snapshot_name.?);
+    try std.testing.expectEqualStrings("pgoutput", info.output_plugin);
+}
+
+test "parse create slot row allows empty snapshot" {
+    var row = try makeOwnedTestRow(
+        &[_]?[]const u8{ "slot_main", "0/16B6C50", "", "pgoutput" },
+        &.{ "slot_name", "consistent_point", "snapshot_name", "output_plugin" },
+    );
+    defer row.deinit();
+
+    var info = try parseCreateSlotRow(std.testing.allocator, &row);
+    defer info.deinit();
+
+    try std.testing.expect(info.snapshot_name == null);
+}
+
+test "parse create slot row rejects missing output plugin" {
+    var row = try makeOwnedTestRow(
+        &[_]?[]const u8{ "slot_main", "0/16B6C50", "snap_a", null },
+        &.{ "slot_name", "consistent_point", "snapshot_name", "output_plugin" },
+    );
+    defer row.deinit();
+
+    try std.testing.expectError(error.InvalidReplicationResponse, parseCreateSlotRow(std.testing.allocator, &row));
+}
+
+fn makeHardeningTestDriver() PgDriver {
+    return .{
+        .conn = .{ .plain = undefined },
+        .allocator = std.testing.allocator,
+        .encoder = undefined,
+        .cache = undefined,
+        .connect_host = null,
+        .connect_port = null,
+        .notifications = .{},
+        .replication_mode_enabled = false,
+        .replication_stream_active = false,
+        .last_replication_wal_end = null,
+    };
+}
+
+test "replication hardening: ensure replication mode required" {
+    var driver = makeHardeningTestDriver();
+    try std.testing.expectError(error.ReplicationModeRequired, driver.ensureReplicationMode("IDENTIFY_SYSTEM"));
+}
+
+test "replication hardening: control operations blocked while stream active" {
+    var driver = makeHardeningTestDriver();
+    driver.replication_mode_enabled = true;
+    driver.replication_stream_active = true;
+
+    try std.testing.expectError(error.ReplicationStreamAlreadyActive, driver.ensureReplicationControlIdle("DROP_REPLICATION_SLOT"));
+}
+
+test "replication hardening: wal end must be monotonic" {
+    var driver = makeHardeningTestDriver();
+    driver.replication_mode_enabled = true;
+    driver.replication_stream_active = true;
+    driver.last_replication_wal_end = 100;
+
+    try std.testing.expectError(error.InvalidReplicationWalEnd, driver.advanceReplicationWalEnd("XLogData", 99));
+    try std.testing.expect(!driver.replication_stream_active);
+    try std.testing.expect(driver.last_replication_wal_end == null);
+}
+
+test "replication hardening: standby update validates lsn ordering" {
+    var driver = makeHardeningTestDriver();
+    driver.replication_mode_enabled = true;
+    driver.replication_stream_active = true;
+    driver.last_replication_wal_end = 100;
+
+    try std.testing.expectError(error.InvalidStandbyStatusUpdate, driver.sendStandbyStatusUpdate(90, 91, 91, false));
+    try std.testing.expectError(error.InvalidStandbyStatusUpdate, driver.sendStandbyStatusUpdate(90, 90, 91, false));
+    try std.testing.expectError(error.InvalidStandbyStatusUpdate, driver.sendStandbyStatusUpdate(101, 100, 100, false));
+}
+
+const CopyDataMockConn = struct {
+    send_count: usize = 0,
+
+    fn send(self: *CopyDataMockConn, bytes: []const u8) !void {
+        _ = bytes;
+        self.send_count += 1;
+    }
+};
+
+test "replication hardening: sendCopyData rejects oversized payload" {
+    var conn = CopyDataMockConn{};
+    const too_large_len = @as(usize, std.math.maxInt(u32)) - 3;
+    const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.CopyDataTooLarge, sendCopyData(&conn, payload));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_count);
+}
+
 test "parse replication copy data xlog data" {
     var payload: [25 + 3]u8 = undefined;
     payload[0] = 'w';
@@ -2489,6 +2870,60 @@ test "parse replication copy data xlog data" {
             try std.testing.expectEqual(@as(u64, 0x20), x.wal_end);
             try std.testing.expectEqual(@as(i64, 1234), x.server_time_micros);
             try std.testing.expectEqualStrings("abc", x.data);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "parse replication copy data keepalive" {
+    var payload: [18]u8 = undefined;
+    payload[0] = 'k';
+    std.mem.writeInt(u64, payload[1..9], 0x20, .big);
+    std.mem.writeInt(i64, payload[9..17], 5678, .big);
+    payload[17] = 1;
+
+    var msg = try parseReplicationCopyData(std.testing.allocator, &payload);
+    defer msg.deinit();
+
+    switch (msg) {
+        .keepalive => |k| {
+            try std.testing.expectEqual(@as(u64, 0x20), k.wal_end);
+            try std.testing.expectEqual(@as(i64, 5678), k.server_time_micros);
+            try std.testing.expect(k.reply_requested);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "parse replication copy data rejects wal end regression" {
+    var payload: [25]u8 = undefined;
+    payload[0] = 'w';
+    std.mem.writeInt(u64, payload[1..9], 0x20, .big);
+    std.mem.writeInt(u64, payload[9..17], 0x10, .big);
+    std.mem.writeInt(i64, payload[17..25], 0, .big);
+
+    try std.testing.expectError(error.InvalidReplicationCopyData, parseReplicationCopyData(std.testing.allocator, &payload));
+}
+
+test "parse replication copy data rejects invalid keepalive reply flag" {
+    var payload: [18]u8 = undefined;
+    payload[0] = 'k';
+    std.mem.writeInt(u64, payload[1..9], 0x20, .big);
+    std.mem.writeInt(i64, payload[9..17], 0, .big);
+    payload[17] = 2;
+
+    try std.testing.expectError(error.InvalidReplicationCopyData, parseReplicationCopyData(std.testing.allocator, &payload));
+}
+
+test "parse replication copy data preserves unknown tags" {
+    const payload = [_]u8{ 'z', 'a', 'b', 'c' };
+    var msg = try parseReplicationCopyData(std.testing.allocator, &payload);
+    defer msg.deinit();
+
+    switch (msg) {
+        .raw => |r| {
+            try std.testing.expectEqual(@as(u8, 'z'), r.tag);
+            try std.testing.expectEqualStrings("abc", r.payload);
         },
         else => return error.TestExpectedEqual,
     }

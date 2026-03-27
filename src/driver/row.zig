@@ -4,18 +4,73 @@
 //! Provides typed access to column values, similar to pg.zig.
 
 const std = @import("std");
-const protocol = @import("../protocol/mod.zig");
 const pg_types = @import("types/mod.zig");
-const types = protocol.types;
 
 /// A row of data from PostgreSQL
 pub const PgRow = struct {
     columns: []?[]const u8,
     field_names: []const []const u8,
     allocator: std.mem.Allocator,
+    owns_columns: bool = false,
+    owns_field_names: bool = false,
 
     pub fn deinit(self: *PgRow) void {
-        self.allocator.free(self.columns);
+        if (self.owns_columns) {
+            freeOwnedColumns(self.allocator, self.columns);
+            self.owns_columns = false;
+        }
+        if (self.owns_field_names) {
+            freeOwnedFieldNames(self.allocator, self.field_names);
+            self.owns_field_names = false;
+        }
+        self.columns = &.{};
+        self.field_names = &.{};
+    }
+
+    /// Construct a row that takes ownership of column bytes and clones field names.
+    ///
+    /// `columns` must be allocated with `allocator`, and every non-null column slice
+    /// must also be allocated with the same allocator.
+    pub fn initOwned(
+        allocator: std.mem.Allocator,
+        columns: []?[]const u8,
+        field_names_template: []const []const u8,
+    ) !PgRow {
+        errdefer freeOwnedColumns(allocator, columns);
+
+        var owned_field_names = try allocator.alloc([]const u8, field_names_template.len);
+        var copied: usize = 0;
+        errdefer {
+            for (owned_field_names[0..copied]) |name| {
+                allocator.free(name);
+            }
+            allocator.free(owned_field_names);
+        }
+
+        for (field_names_template, 0..) |name, i| {
+            owned_field_names[i] = try allocator.dupe(u8, name);
+            copied += 1;
+        }
+
+        return .{
+            .columns = columns,
+            .field_names = owned_field_names,
+            .allocator = allocator,
+            .owns_columns = true,
+            .owns_field_names = true,
+        };
+    }
+
+    pub fn freeOwnedColumns(allocator: std.mem.Allocator, columns: []?[]const u8) void {
+        for (columns) |maybe_col| {
+            if (maybe_col) |col| allocator.free(col);
+        }
+        allocator.free(columns);
+    }
+
+    pub fn freeOwnedFieldNames(allocator: std.mem.Allocator, field_names: []const []const u8) void {
+        for (field_names) |name| allocator.free(name);
+        allocator.free(@constCast(field_names));
     }
 
     /// Generic typed getter by column index

@@ -229,7 +229,10 @@ pub const Decoder = struct {
         return fields;
     }
 
-    /// Parse DataRow message, returns column values (null for NULL)
+    /// Parse DataRow message, returns borrowed column slices (null for NULL).
+    ///
+    /// Returned byte slices alias the decoder input buffer and are only valid
+    /// until the underlying message buffer is reused.
     pub fn parseDataRow(self: *Decoder, allocator: std.mem.Allocator) ![]?[]const u8 {
         const col_count = try self.readU16();
         var columns = try allocator.alloc(?[]const u8, col_count);
@@ -242,6 +245,35 @@ pub const Decoder = struct {
             } else {
                 columns[i] = try self.readBytes(@intCast(len));
             }
+        }
+
+        return columns;
+    }
+
+    /// Parse DataRow message and deep-copy all non-null column bytes.
+    ///
+    /// Returned slices are allocator-owned and must be freed by caller:
+    /// free each non-null column value, then free the columns slice.
+    pub fn parseDataRowOwned(self: *Decoder, allocator: std.mem.Allocator) ![]?[]const u8 {
+        const col_count = try self.readU16();
+        var columns = try allocator.alloc(?[]const u8, col_count);
+        var copied: usize = 0;
+        errdefer {
+            for (columns[0..copied]) |maybe_col| {
+                if (maybe_col) |col| allocator.free(col);
+            }
+            allocator.free(columns);
+        }
+
+        for (0..col_count) |i| {
+            const len = try self.readI32();
+            if (len < 0) {
+                columns[i] = null;
+            } else {
+                const borrowed = try self.readBytes(@intCast(len));
+                columns[i] = try allocator.dupe(u8, borrowed);
+            }
+            copied += 1;
         }
 
         return columns;
@@ -317,13 +349,16 @@ test "decode authentication md5 salt" {
 
 test "decode authentication sasl mechanisms" {
     const data = [_]u8{
-        0,    0,    0,    10, // SASL auth code
-        'S',  'C',  'R',  'A', 'M', '-', 'S', 'H',
-        'A',  '-',  '2',  '5', '6', 0,
-        'S',  'C',  'R',  'A', 'M', '-', 'S', 'H',
-        'A',  '-',  '2',  '5', '6', '-', 'P', 'L',
-        'U',  'S',  0,
-        0,
+        0,   0,   0,   10, // SASL auth code
+        'S', 'C', 'R', 'A',
+        'M', '-', 'S', 'H',
+        'A', '-', '2', '5',
+        '6', 0,   'S', 'C',
+        'R', 'A', 'M', '-',
+        'S', 'H', 'A', '-',
+        '2', '5', '6', '-',
+        'P', 'L', 'U', 'S',
+        0,   0,
     };
     var decoder = Decoder.init(&data);
 
@@ -351,7 +386,7 @@ test "decode authentication sasl data" {
 
 test "decode notification response" {
     const data = [_]u8{
-        0,   0,   0,   123, // process id
+        0, 0, 0, 123, // process id
         'm', 'y', '_', 'c', 'h', 'a', 'n', 0, // channel
         'h', 'e', 'l', 'l', 'o', 0, // payload
     };

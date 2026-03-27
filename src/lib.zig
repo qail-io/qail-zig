@@ -9,6 +9,7 @@ pub const transpiler = @import("transpiler/mod.zig");
 pub const parser = @import("parser/mod.zig");
 pub const analyzer = @import("analyzer/mod.zig");
 pub const validator = @import("validator.zig");
+pub const sanitize = @import("sanitize.zig");
 pub const fmt = @import("fmt.zig");
 pub const compat = @import("compat/mod.zig");
 // LSP is built as a standalone binary, not exported from lib
@@ -50,6 +51,7 @@ pub const SuperAdminToken = driver.SuperAdminToken;
 pub const rlsSqlWithTimeout = driver.contextToSqlWithTimeout;
 pub const rlsSqlWithTimeouts = driver.contextToSqlWithTimeouts;
 pub const ScopedPoolOp = driver.ScopedPoolOp;
+pub const validateAst = sanitize.validateCmd;
 
 // Re-export builders for convenience
 pub const builders = ast.builders;
@@ -61,4 +63,7 @@ test {
     _ = @import("fuzz/fuzz_decoder.zig");
     _ = @import("fuzz/fuzz_value.zig");
     _ = @import("fuzz/fuzz_transpiler.zig");
+    _ = @import("hardening/protocol_hardening.zig");
+    _ = @import("hardening/replication_hardening.zig");
+    _ = @import("hardening/startup_hardening.zig");
 }

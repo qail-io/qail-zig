@@ -232,7 +232,6 @@ pub const PgPool = struct {
     /// Acquire a connection from the pool
     pub fn acquire(self: *PgPool) !PooledConnection {
         self.mutex.lock();
-        defer self.mutex.unlock();
 
         const now = std.time.milliTimestamp();
 
@@ -248,6 +247,7 @@ pub const PgPool = struct {
             }
 
             self.active_count += 1;
+            self.mutex.unlock();
             return .{
                 .conn = pooled.conn,
                 .pool = self,
@@ -259,8 +259,12 @@ pub const PgPool = struct {
         if (self.active_count < self.config.max_connections) {
             self.active_count += 1;
             self.mutex.unlock();
-            const conn = try self.createConnection();
-            self.mutex.lock();
+            const conn = self.createConnection() catch |err| {
+                self.mutex.lock();
+                self.active_count -= 1;
+                self.mutex.unlock();
+                return err;
+            };
 
             return .{
                 .conn = conn,
@@ -270,6 +274,7 @@ pub const PgPool = struct {
         }
 
         // Pool exhausted
+        self.mutex.unlock();
         return error.PoolExhausted;
     }
 
