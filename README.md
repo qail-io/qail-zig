@@ -7,20 +7,20 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.6.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.6.0)
 
-> ✅ **Status: Active** — qail-zig is under active development again. The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live and tracked against qail.rs parity.
+> **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
-> **What's done:** ~19,800 lines of pure Zig covering wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, codegen-ported types, 10 builder modules, fuzz tests, and benchmarks.
+> **Scope:** ~22K lines of pure Zig code across 120 files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, builders, and benchmarks.
 >
-> **[qail.rs](https://github.com/qail-io/qail)** remains the production reference and parity target; qail-zig is the active pure-Zig implementation.
+> **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated pure-Zig driver implementation.
 
-> 🚀 Pure Zig, zero FFI, zero GC. Latest isolated medians against `pgx` and qail.rs: **48.6K** single, **542K** pipeline, **147K** pool10.
+> Pure Zig, zero FFI, zero GC. Latest isolated medians against `pgx` and qail.rs: **48.6K** single, **542K** pipeline, **147K** pool10.
 
 - Docs: `dev.qail.io/zig/docs`
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 
 ## Highlights
 
-- **~19,800 lines of pure Zig** — No C, no FFI, no dependencies
+- **~22K lines of pure Zig** — 120 tracked `.zig` files, no C, no FFI, no dependencies
 - **AST-Native Queries** — Type-safe query building, not string concatenation
 - **Codegen Parity** — 26 enums + 9 structs auto-generated from [qail.rs](https://github.com/qail-io/qail) AST
 - **Full PostgreSQL Driver** — Connection pooling, pipelining, TLS, COPY
@@ -43,7 +43,7 @@ Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_st
 | **Build time** | n/a | ~30s | <2s |
 | **Binary size** | n/a | ~2MB | ~200KB |
 
-> Current shape: Zig leads on single-query and pool throughput; Rust still leads on prepared pipeline throughput.
+> Performance topology: Zig maximizes single-query latencies and pool concurrency; Rust optimizes for throughput via intermediate pipeline caching.
 
 ### CPU: AST Build + Transpile (1M iterations)
 
@@ -316,39 +316,26 @@ src/
 └── lsp/                 # Language Server Protocol
 ```
 
-## Module Summary
 
-| Module | Lines | Purpose |
-|--------|-------|---------|
-| **driver/** | 4,723 | PostgreSQL driver, pool, pipeline, COPY |
-| **ast/** | 4,479 | Query AST types, 10 builders, generated codegen |
-| **parser/** | 2,284 | QAIL text syntax parser |
-| **protocol/** | 1,725 | Wire protocol, auth, encoding |
-| **cli.zig** | 760 | CLI commands |
-| **transpiler/** | 660 | SQL output (PostgreSQL dialect) |
-| **analyzer/** | 659 | Code scanner, migration impact |
-| **lsp/** | 554 | Language server |
-| **fuzz/** | 240 | Fuzz test targets |
-| **Total** | **~19,800** | |
 
 ## Comparison with qail.rs
 
 | Feature | qail-zig | qail.rs |
 |---------|----------|---------|
-| Lines of Code | ~19,800 | ~30,000 |
+| Lines of code | ~22K | ~130K |
 | Dependencies | 0 | 15+ crates |
 | Build Time | <2s | ~30s |
 | Binary Size | ~200KB | ~2MB |
-| Codegen | ✅ (generated from Rust) | ✅ (source of truth) |
-| CLI | ✅ | ✅ |
-| LSP | ✅ | ✅ |
-| Connection Pool | ✅ | ✅ |
-| TLS | ✅ (std.crypto) | ✅ (rustls) |
-| COPY Protocol | ✅ | ✅ |
-| Fuzz Testing | ✅ (3 targets) | ✅ (proptest) |
-| Python Bindings | ❌ | ✅ (PyO3) |
-| PHP Bindings | ❌ | ✅ |
-| WASM | ❌ | ✅ |
+| Codegen | Yes (generated from Rust) | Yes (source of truth) |
+| CLI | Yes | Yes |
+| LSP | Yes | Yes |
+| Connection Pool | Yes | Yes |
+| TLS | Yes (std.crypto) | Yes (rustls) |
+| COPY Protocol | Yes | Yes |
+| Fuzz Testing | Yes (3 targets) | Yes (proptest) |
+| Python Bindings | No | Yes (PyO3) |
+| PHP Bindings | No | Yes |
+| WASM | No | Yes |
 
 ### When to Use Each
 
@@ -373,4 +360,4 @@ MIT — see [LICENSE](LICENSE)
 
 ---
 
-**Pure Zig PostgreSQL Driver** | Zero Dependencies | ~19,800 Lines | 1M+ queries/second
+**Pure Zig PostgreSQL Driver** | Zero Dependencies | ~22K Code Lines | 1M+ queries/second

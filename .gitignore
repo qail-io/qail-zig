@@ -5,3 +5,4 @@ zig-out/
 *.a
 *.so
 *.dylib
+.zig-global-cache/
