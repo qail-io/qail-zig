@@ -1,0 +1,15 @@
+[book]
+title = "QAIL Zig Documentation"
+authors = ["QAIL Team"]
+language = "en"
+
+[build]
+build-dir = "../../dev.qail.io/public/zig/docs"
+
+[output.html]
+default-theme = "coal"
+preferred-dark-theme = "coal"
+git-repository-url = "https://github.com/qail-io/qail-zig"
+edit-url-template = "https://github.com/qail-io/qail-zig/edit/main/docs/{path}"
+additional-css = ["theme/custom.css"]
+additional-js = ["theme/header.js"]

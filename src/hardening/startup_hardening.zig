@@ -62,6 +62,27 @@ fn readStartup(stream: net.Stream) !void {
     }
 }
 
+fn readFrontendMessage(stream: net.Stream) !u8 {
+    var type_buf: [1]u8 = undefined;
+    try readNoEof(stream, &type_buf);
+
+    var len_buf: [4]u8 = undefined;
+    try readNoEof(stream, &len_buf);
+    const len = std.mem.readInt(u32, &len_buf, .big);
+    if (len < 4) return error.InvalidFrontendMessage;
+
+    var remaining: usize = @intCast(len - 4);
+    var buf: [256]u8 = undefined;
+    while (remaining > 0) {
+        const chunk = @min(remaining, buf.len);
+        const n = try stream.read(buf[0..chunk]);
+        if (n == 0) return error.EndOfStream;
+        remaining -= n;
+    }
+
+    return type_buf[0];
+}
+
 fn sendAuth(stream: net.Stream, code: u32, extra: []const u8) !void {
     try writeByte(stream, 'R');
     try writeU32(stream, @intCast(8 + extra.len));
@@ -110,11 +131,13 @@ fn serverThread(ctx: *ServerCtx) void {
         },
         .auth_method_switch => {
             sendAuth(conn.stream, 3, &.{}) catch {};
+            _ = readFrontendMessage(conn.stream) catch return;
             sendAuth(conn.stream, 5, &.{ 1, 2, 3, 4 }) catch {};
         },
         .auth_ok_before_sasl_final => {
             const sasl_list = "SCRAM-SHA-256\x00\x00";
             sendAuth(conn.stream, 10, sasl_list) catch {};
+            _ = readFrontendMessage(conn.stream) catch return;
             sendAuth(conn.stream, 0, &.{}) catch {};
         },
         .auth_after_ok => {

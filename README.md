@@ -15,6 +15,9 @@
 
 > 🚀 Pure Zig, zero FFI, zero GC. Latest isolated medians against `pgx` and qail.rs: **48.6K** single, **542K** pipeline, **147K** pool10.
 
+- Docs: `dev.qail.io/zig/docs`
+- Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
+
 ## Highlights
 
 - **~19,800 lines of pure Zig** — No C, no FFI, no dependencies

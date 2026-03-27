@@ -1,0 +1,533 @@
+/* QAIL mdBook Theme - Astro navbar parity + flat docs palette */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+:root {
+    /* Override mdBook general.css font-size: 62.5% so 1rem = 16px (matching Astro) */
+    font-size: initial !important;
+
+    /* Override menu-bar-height since we hide the toolbar */
+    --menu-bar-height: 0px;
+    --nav-height: 68px;
+
+    --qail-bg: #0a0a0f;
+    --qail-surface: #111b29;
+    --qail-surface-2: #0f172a;
+    --qail-text: #e2e8f0;
+    --qail-muted: #94a3b8;
+    --qail-accent: #60a5fa;
+    --qail-accent-2: #67e8f9;
+    --qail-ok: #4ade80;
+    --qail-border: rgba(148, 163, 184, 0.22);
+    --qail-transition: all 0.3s ease;
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+}
+
+html {
+    background: var(--qail-bg) !important;
+    /* Override mdBook Open Sans with Inter to match Astro global */
+    font-family: var(--font-sans) !important;
+}
+
+.coal,
+.navy,
+.ayu,
+.rust {
+    --bg: var(--qail-bg);
+    --fg: var(--qail-text);
+    --sidebar-bg: #0d1117;
+    --sidebar-fg: #cbd5e1;
+    --sidebar-active: var(--qail-accent);
+    --links: var(--qail-accent);
+    --inline-code-color: #22c55e;
+    --theme-popup-bg: var(--qail-surface);
+    --theme-popup-border: var(--qail-border);
+    --quote-bg: rgba(96, 165, 250, 0.08);
+    --quote-border: var(--qail-accent);
+    --table-border-color: var(--qail-border);
+    --table-header-bg: #1b2435;
+    --searchbar-border-color: var(--qail-border);
+    --searchbar-bg: var(--qail-surface-2);
+}
+
+/* Astro-like navigation */
+.nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    background: rgba(10, 10, 15, 0.8);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.nav-container {
+    display: flex;
+    align-items: center;
+    max-width: 100%;
+    margin: 0;
+    padding: 16px 32px;
+}
+
+.nav-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none !important;
+    font-weight: 700;
+    font-size: 1.25rem;
+    color: var(--qail-text) !important;
+    margin-right: 32px;
+}
+
+.logo-icon {
+    font-size: 1.5rem;
+    line-height: 1;
+}
+
+.logo-text {
+    color: var(--qail-text);
+    letter-spacing: 0.01em;
+}
+
+.nav-links {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+}
+
+.nav-links a {
+    color: var(--qail-muted) !important;
+    text-decoration: none !important;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: var(--qail-transition);
+}
+
+.nav-links a:hover {
+    color: var(--qail-ok) !important;
+}
+
+.nav-links a.active {
+    color: var(--qail-ok) !important;
+    font-weight: 600;
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    text-decoration: none;
+    transition: var(--qail-transition);
+    cursor: pointer;
+    border: none;
+}
+
+.btn-github {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--qail-text) !important;
+}
+
+.btn-github:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.nav-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-left: auto;
+}
+
+.mobile-toggle {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    z-index: 200;
+}
+
+.mobile-toggle span {
+    width: 24px;
+    height: 2px;
+    background: var(--qail-text);
+    transition: var(--qail-transition);
+}
+
+.mobile-menu {
+    position: fixed;
+    top: 68px;
+    left: 0;
+    right: 0;
+    background: var(--qail-surface);
+    border-bottom: 1px solid var(--qail-border);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    transform: translateY(-150%);
+    transition: transform 0.3s ease-in-out;
+    z-index: 99;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+}
+
+.mobile-menu.active {
+    transform: translateY(0);
+}
+
+.mobile-menu a {
+    color: var(--qail-text) !important;
+    text-decoration: none !important;
+    font-size: 1.02rem;
+    font-weight: 500;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.mobile-menu a:last-child {
+    border-bottom: none;
+    color: var(--qail-accent-2) !important;
+}
+
+.mobile-menu a.active {
+    color: var(--qail-ok) !important;
+}
+
+/* Offset mdBook frame under fixed nav */
+body {
+    padding-top: var(--nav-height) !important;
+    font-family: var(--font-sans) !important;
+    font-size: 1rem !important;
+    line-height: 1.6;
+    color: var(--qail-text);
+}
+
+.sidebar {
+    top: var(--nav-height) !important;
+    height: calc(100vh - var(--nav-height)) !important;
+    background: transparent !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Hide the mdBook toolbar — it creates a double-header with our nav */
+.menu-bar,
+.menu-bar-sticky-container,
+#mdbook-menu-bar-hover-placeholder {
+    display: none !important;
+}
+
+/* Compensate for hidden menu-bar */
+.page {
+    margin-block-start: 0 !important;
+    padding-top: 1.5rem !important;
+}
+
+/* Fix page wrapper background */
+.page-wrapper {
+    background-color: var(--qail-bg) !important;
+}
+
+/* Fix prev/next chapter arrows to be below our fixed nav */
+.nav-chapters {
+    top: var(--nav-height) !important;
+}
+
+/* Fix anchor scroll targets to account for our nav */
+:target {
+    scroll-margin-top: calc(var(--nav-height) + 0.5em) !important;
+}
+
+.icon-button,
+.icon-button .fa-svg {
+    color: var(--qail-muted);
+}
+
+.icon-button:hover,
+.icon-button:hover .fa-svg {
+    color: var(--qail-accent-2);
+}
+
+/* Sidebar */
+.sidebar .sidebar-scrollbox {
+    background: transparent;
+    padding-top: 0 !important;
+}
+
+.sidebar a {
+    color: #94a3b8 !important;
+    padding: 0.4rem 1.5rem;
+    display: block;
+    font-size: 0.875rem;
+    transition: all 0.2s ease;
+}
+
+.sidebar a:hover {
+    color: #cbd5e1 !important;
+}
+
+.sidebar a.active {
+    color: #ffffff !important;
+    font-weight: 600;
+}
+
+/* Sidebar Hierarchy Tree Lines (for nested sections) */
+.sidebar .section {
+    padding-inline-start: 0 !important;
+    margin-left: 1.25rem !important;
+    border-left: none; /* Trunk is drawn on li elements */
+}
+
+.sidebar .section li {
+    position: relative;
+    margin: 0;
+}
+
+/* Horizontal branch */
+.sidebar .section li::before {
+    content: "";
+    position: absolute;
+    top: 15px;
+    left: 0;
+    width: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    z-index: 1;
+}
+
+/* Vertical trunk */
+.sidebar .section li::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Perfectly terminate vertical line on last item (└─) */
+.sidebar .section li:last-child::after {
+    bottom: auto;
+    height: 16px; /* 15px top + 1px border */
+}
+
+.sidebar .section a {
+    padding-left: 1.2rem;
+}
+
+/* Main content */
+.content {
+    background: var(--qail-bg);
+}
+
+.content main {
+    max-width: 750px;
+    font-family: var(--font-sans);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    color: #f8fafc;
+    font-family: var(--font-display);
+}
+
+h1 {
+    font-size: 2.35rem;
+    font-weight: 700;
+    margin-bottom: 2rem;
+    letter-spacing: -0.02em;
+}
+
+h2 {
+    font-size: 1.65rem;
+    border-bottom: none;
+    padding-bottom: 0;
+    margin-top: 2.5rem;
+    letter-spacing: -0.01em;
+}
+
+h3 {
+    font-size: 1.3rem;
+    color: #e2e8f0;
+    margin-top: 2rem;
+}
+
+p {
+    font-size: 1.05rem;
+    line-height: 1.8;
+    color: #bac2de;
+}
+
+a {
+    color: var(--qail-accent);
+    text-decoration: none;
+}
+
+a:hover {
+    color: var(--qail-accent-2);
+    text-decoration: underline;
+}
+
+/* Code */
+pre {
+    background: #0d1117 !important;
+    border: 1px solid #1e293b;
+    border-radius: 8px;
+    padding: 1.25rem !important;
+    box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.2);
+}
+
+code {
+    font-family: var(--font-mono) !important;
+    font-size: 0.9em;
+}
+
+:not(pre)>code {
+    background: rgba(255, 255, 255, 0.08);
+    color: #38bdf8;
+    padding: 0.16rem 0.4rem;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Tables */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    border-radius: 8px;
+    overflow: hidden;
+    margin: 2rem 0;
+}
+
+th,
+td {
+    border-top: 1px solid #1e293b;
+    border-bottom: 1px solid #1e293b;
+    padding: 0.85rem 1rem;
+    border-left: none;
+    border-right: none;
+    color: #bac2de;
+}
+
+th {
+    background: #0f172a;
+    color: #94a3b8;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 0.75rem;
+}
+
+tr:hover {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+blockquote {
+    background: linear-gradient(to right, rgba(30, 58, 138, 0.1), transparent);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-left: 1px solid rgba(255, 255, 255, 0.6);
+    padding: 1.2rem 1.5rem;
+    margin: 1.5rem 0;
+    border-radius: 8px;
+}
+
+blockquote p {
+    color: #e2e8f0;
+    margin: 0;
+}
+
+/* On-This-Page TOC */
+.on-this-page {
+    border-inline-start: none !important;
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+}
+
+.on-this-page .chapter-item {
+    border-left: 1px solid rgba(255, 255, 255, 0.05);
+    padding-left: 0.5rem;
+    margin-left: 0.5rem;
+}
+
+#searchbar {
+    background: var(--qail-surface-2) !important;
+    border: 1px solid var(--qail-border) !important;
+    border-radius: 8px !important;
+    color: var(--qail-text) !important;
+}
+
+#theme-list,
+.theme-popup {
+    display: none !important;
+}
+
+.nav-chapters {
+    background: rgba(96, 165, 250, 0.1);
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+}
+
+.nav-chapters:hover {
+    background: rgba(96, 165, 250, 0.16);
+}
+
+.content ul,
+.content ol {
+    padding-left: 1.5rem;
+}
+
+.content li {
+    margin: 0.5rem 0;
+    font-size: 1.05rem;
+    line-height: 1.8;
+    color: #bac2de;
+}
+
+/* Sidebar Section Headers */
+.sidebar .part-title {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2rem 1.5rem 0.5rem 1.5rem;
+    margin: 0;
+}
+
+::selection {
+    background: rgba(96, 165, 250, 0.3);
+}
+
+@media (max-width: 768px) {
+    .nav-container {
+        padding: 14px 16px;
+    }
+
+    .nav-links {
+        display: none;
+    }
+
+    .btn-icon-only-mobile .btn-text {
+        display: none;
+    }
+
+    .btn-icon-only-mobile {
+        padding: 8px;
+    }
+
+    .mobile-toggle {
+        display: flex;
+    }
+}
