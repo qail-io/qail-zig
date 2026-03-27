@@ -222,17 +222,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
     }
 
     // WHERE
-    if (cmd.where_clauses.len > 0) {
-        try writer.writeAll(" WHERE ");
-        for (cmd.where_clauses, 0..) |clause, i| {
-            if (i > 0) {
-                try writer.print(" {s} ", .{clause.logical_op.toSql()});
-            }
-            try writer.writeAll(clause.condition.column);
-            try writer.print(" {s} ", .{clause.condition.op.toSql()});
-            try writeValue(writer, &clause.condition.value);
-        }
-    }
+    try writeWhereClauses(writer, cmd.where_clauses);
 
     // GROUP BY
     if (cmd.group_by.len > 0) {
@@ -308,17 +298,7 @@ fn writeUpdate(writer: anytype, cmd: *const QailCmd) !void {
         try writeValue(writer, &assign.value);
     }
 
-    if (cmd.where_clauses.len > 0) {
-        try writer.writeAll(" WHERE ");
-        for (cmd.where_clauses, 0..) |clause, i| {
-            if (i > 0) {
-                try writer.print(" {s} ", .{clause.logical_op.toSql()});
-            }
-            try writer.writeAll(clause.condition.column);
-            try writer.print(" {s} ", .{clause.condition.op.toSql()});
-            try writeValue(writer, &clause.condition.value);
-        }
-    }
+    try writeWhereClauses(writer, cmd.where_clauses);
 
     if (cmd.returning.len > 0) {
         try writer.writeAll(" RETURNING ");
@@ -338,17 +318,7 @@ fn writeDelete(writer: anytype, cmd: *const QailCmd) !void {
     }
     try writer.writeAll(cmd.table);
 
-    if (cmd.where_clauses.len > 0) {
-        try writer.writeAll(" WHERE ");
-        for (cmd.where_clauses, 0..) |clause, i| {
-            if (i > 0) {
-                try writer.print(" {s} ", .{clause.logical_op.toSql()});
-            }
-            try writer.writeAll(clause.condition.column);
-            try writer.print(" {s} ", .{clause.condition.op.toSql()});
-            try writeValue(writer, &clause.condition.value);
-        }
-    }
+    try writeWhereClauses(writer, cmd.where_clauses);
 
     if (cmd.returning.len > 0) {
         try writer.writeAll(" RETURNING ");
@@ -402,6 +372,60 @@ fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
 fn writeTruncate(writer: anytype, cmd: *const QailCmd) !void {
     try writer.writeAll("TRUNCATE ");
     try writer.writeAll(cmd.table);
+}
+
+fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
+    var has_and = false;
+    var has_or = false;
+
+    for (clauses) |clause| {
+        switch (clause.logical_op) {
+            .@"and" => has_and = true,
+            .@"or" => has_or = true,
+        }
+    }
+
+    if (!has_and and !has_or) {
+        return;
+    }
+
+    try writer.writeAll(" WHERE ");
+
+    var wrote_clause = false;
+
+    if (has_and) {
+        for (clauses) |clause| {
+            if (clause.logical_op != .@"and") continue;
+            if (wrote_clause) {
+                try writer.writeAll(" AND ");
+            }
+            try writeWhereCondition(writer, clause);
+            wrote_clause = true;
+        }
+    }
+
+    if (has_or) {
+        if (wrote_clause) {
+            try writer.writeAll(" AND ");
+        }
+        try writer.writeAll("(");
+        var first = true;
+        for (clauses) |clause| {
+            if (clause.logical_op != .@"or") continue;
+            if (!first) {
+                try writer.writeAll(" OR ");
+            }
+            first = false;
+            try writeWhereCondition(writer, clause);
+        }
+        try writer.writeAll(")");
+    }
+}
+
+fn writeWhereCondition(writer: anytype, clause: ast.cmd.WhereClause) !void {
+    try writer.writeAll(clause.condition.column);
+    try writer.print(" {s} ", .{clause.condition.op.toSql()});
+    try writeValue(writer, &clause.condition.value);
 }
 
 fn writeExpr(writer: anytype, ex: *const Expr) !void {
@@ -628,6 +652,39 @@ test "transpile delete with where" {
 
     try std.testing.expectEqualStrings(
         "DELETE FROM sessions WHERE expired = true",
+        sql,
+    );
+}
+
+test "transpile where groups and + or clauses like qail.rs or_filter semantics" {
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("is_active", .eq, .{ .bool = true }),
+        ast.cmd.orFilter("topic", .ilike, .{ .string = "%test%" }),
+        ast.cmd.orFilter("question", .ilike, .{ .string = "%test%" }),
+    };
+    const cmd = QailCmd.get("kb").where(&wheres);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM kb WHERE is_active = true AND (topic ILIKE '%test%' OR question ILIKE '%test%')",
+        sql,
+    );
+}
+
+test "transpile where supports pure or-filter groups" {
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.orFilter("name", .ilike, .{ .string = "%coffee%" }),
+        ast.cmd.orFilter("description", .ilike, .{ .string = "%coffee%" }),
+    };
+    const cmd = QailCmd.get("products").where(&wheres);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM products WHERE (name ILIKE '%coffee%' OR description ILIKE '%coffee%')",
         sql,
     );
 }
