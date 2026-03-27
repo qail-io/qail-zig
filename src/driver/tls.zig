@@ -113,10 +113,10 @@ pub const TlsConnection = struct {
         var buf: [8]u8 = undefined;
         std.mem.writeInt(u32, buf[0..4], 8, .big);
         std.mem.writeInt(u32, buf[4..8], SSL_REQUEST_CODE, .big);
-        try self.tcp_stream.writeAll(&buf);
+        try net.writeAllStream(self.tcp_stream, &buf);
 
         var response: [1]u8 = undefined;
-        const read_n = try self.tcp_stream.read(&response);
+        const read_n = try net.readStream(self.tcp_stream, &response);
         if (read_n != 1) return error.EndOfStream;
 
         return response[0] == 'S';
@@ -178,7 +178,7 @@ pub const TlsConnection = struct {
             try client.writer.writeAll(bytes);
             try client.writer.flush();
         } else {
-            try self.tcp_stream.writeAll(bytes);
+            try net.writeAllStream(self.tcp_stream, bytes);
         }
     }
 
@@ -187,7 +187,7 @@ pub const TlsConnection = struct {
         if (self.tls_client) |*client| {
             return client.reader.readSliceShort(buf);
         } else {
-            return self.tcp_stream.read(buf);
+            return net.readStream(self.tcp_stream, buf);
         }
     }
 

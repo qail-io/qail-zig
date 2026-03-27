@@ -184,21 +184,21 @@ pub const Stream = union(enum) {
 
     pub fn read(self: *Stream, buffer: []u8) !usize {
         return switch (self.*) {
-            .sync => |stream| stream.read(buffer),
+            .sync => |stream| net.readStream(stream, buffer),
             .io_uring => |*stream| stream.read(buffer),
         };
     }
 
     pub fn write(self: *Stream, bytes: []const u8) !usize {
         return switch (self.*) {
-            .sync => |stream| stream.write(bytes),
+            .sync => |stream| net.writeStream(stream, bytes),
             .io_uring => |*stream| stream.write(bytes),
         };
     }
 
     pub fn writeAll(self: *Stream, bytes: []const u8) !void {
         switch (self.*) {
-            .sync => |stream| try stream.writeAll(bytes),
+            .sync => |stream| try net.writeAllStream(stream, bytes),
             .io_uring => |*stream| try stream.writeAll(bytes),
         }
     }

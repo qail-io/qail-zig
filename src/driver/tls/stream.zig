@@ -40,7 +40,7 @@ pub const StreamReader = struct {
         }
 
         // Buffer empty, read directly from stream
-        return self.stream.read(dest);
+        return net.readStream(self.stream, dest);
     }
 
     /// Peek at buffered data without consuming
@@ -62,7 +62,7 @@ pub const StreamReader = struct {
             }
 
             // Read more
-            const bytes_read = try self.stream.read(self.buffer[self.end..]);
+            const bytes_read = try net.readStream(self.stream, self.buffer[self.end..]);
             if (bytes_read == 0) return error.EndOfStream;
             self.end += bytes_read;
         }
@@ -127,7 +127,7 @@ pub const StreamWriter = struct {
     /// Flush buffer to stream
     pub fn flush(self: *Self) !void {
         if (self.pos > 0) {
-            try self.stream.writeAll(self.buffer[0..self.pos]);
+            try net.writeAllStream(self.stream, self.buffer[0..self.pos]);
             self.pos = 0;
         }
     }

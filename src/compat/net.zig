@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const tls = std.crypto.tls;
 
 pub const Address = std.net.Address;
+pub const Server = std.net.Server;
 pub const Stream = std.net.Stream;
 pub const StreamReader = std.net.Stream.Reader;
 pub const StreamWriter = std.net.Stream.Writer;
@@ -62,6 +63,76 @@ pub fn tcpConnectToAddressWithTimeout(address: Address, timeout_ms: i32) !Stream
 pub fn tcpConnectToIp4WithTimeout(host: []const u8, port: u16, timeout_ms: i32) !Stream {
     const address = try parseIp4(host, port);
     return tcpConnectToAddressWithTimeout(address, timeout_ms);
+}
+
+/// Cross-platform socket read helper.
+///
+/// `std.net.Stream.read` currently routes through `ReadFile` on Windows, which
+/// does not behave correctly for TCP sockets in our test/runtime paths. Use
+/// `recv` directly so plain socket I/O behaves consistently across platforms.
+pub fn readStream(stream: Stream, buffer: []u8) !usize {
+    if (builtin.os.tag != .windows) return stream.read(buffer);
+
+    const windows = std.os.windows;
+    const rc = windows.recvfrom(stream.handle, buffer.ptr, buffer.len, 0, null, null);
+    if (rc == windows.ws2_32.SOCKET_ERROR) {
+        switch (windows.ws2_32.WSAGetLastError()) {
+            .WSAECONNRESET => return error.ConnectionResetByPeer,
+            .WSAEFAULT => unreachable,
+            .WSAEINPROGRESS, .WSAEINTR => unreachable,
+            .WSAEINVAL => return error.SocketNotBound,
+            .WSAEMSGSIZE => return error.MessageTooBig,
+            .WSAENETDOWN => return error.NetworkSubsystemFailed,
+            .WSAENETRESET => return error.ConnectionResetByPeer,
+            .WSAENOTCONN => return error.SocketNotConnected,
+            .WSAEWOULDBLOCK => return error.WouldBlock,
+            .WSANOTINITIALISED => unreachable,
+            .WSA_IO_PENDING => unreachable,
+            .WSA_OPERATION_ABORTED => unreachable,
+            else => |err| return windows.unexpectedWSAError(err),
+        }
+    }
+    return @intCast(rc);
+}
+
+/// Cross-platform socket write helper.
+pub fn writeStream(stream: Stream, bytes: []const u8) !usize {
+    if (builtin.os.tag != .windows) return stream.write(bytes);
+
+    const windows = std.os.windows;
+    const rc = windows.sendto(stream.handle, bytes.ptr, bytes.len, 0, null, 0);
+    if (rc == windows.ws2_32.SOCKET_ERROR) {
+        switch (windows.ws2_32.WSAGetLastError()) {
+            .WSAECONNABORTED, .WSAECONNRESET => return error.ConnectionResetByPeer,
+            .WSAEFAULT => unreachable,
+            .WSAEINPROGRESS, .WSAEINTR => unreachable,
+            .WSAEINVAL => return error.SocketNotBound,
+            .WSAEMSGSIZE => return error.MessageTooBig,
+            .WSAENETDOWN => return error.NetworkSubsystemFailed,
+            .WSAENETRESET => return error.ConnectionResetByPeer,
+            .WSAENOBUFS => return error.SystemResources,
+            .WSAENOTCONN => return error.SocketNotConnected,
+            .WSAENOTSOCK => unreachable,
+            .WSAEOPNOTSUPP => unreachable,
+            .WSAESHUTDOWN => unreachable,
+            .WSAEWOULDBLOCK => return error.WouldBlock,
+            .WSANOTINITIALISED => unreachable,
+            .WSA_IO_PENDING => unreachable,
+            .WSA_OPERATION_ABORTED => unreachable,
+            else => |err| return windows.unexpectedWSAError(err),
+        }
+    }
+    return @intCast(rc);
+}
+
+/// Cross-platform socket write-all helper.
+pub fn writeAllStream(stream: Stream, bytes: []const u8) !void {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const n = try writeStream(stream, bytes[written..]);
+        if (n == 0) return error.WriteFailed;
+        written += n;
+    }
 }
 
 /// Construct the std stream reader via a compatibility shim.

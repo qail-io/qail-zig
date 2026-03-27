@@ -4,7 +4,7 @@
 //! out-of-order backend responses using a real TCP connection.
 
 const std = @import("std");
-const net = std.net;
+const net = @import("../compat/net.zig");
 const Connection = @import("../driver/connection.zig").Connection;
 const AuthOptions = @import("../driver/auth_options.zig").AuthOptions;
 const driver_mod = @import("../driver/driver.zig");
@@ -52,7 +52,7 @@ fn writeU32(writer: anytype, value: u32) !void {
 fn readNoEof(stream: net.Stream, buf: []u8) !void {
     var read_len: usize = 0;
     while (read_len < buf.len) {
-        const n = try stream.read(buf[read_len..]);
+        const n = try net.readStream(stream, buf[read_len..]);
         if (n == 0) return error.EndOfStream;
         read_len += n;
     }
@@ -60,13 +60,13 @@ fn readNoEof(stream: net.Stream, buf: []u8) !void {
 
 fn writeByte(stream: net.Stream, byte: u8) !void {
     const buf = [_]u8{byte};
-    try stream.writeAll(&buf);
+    try net.writeAllStream(stream, &buf);
 }
 
 fn sendMessage(stream: net.Stream, tag: u8, payload: []const u8) !void {
     try writeByte(stream, tag);
     try writeU32(stream, @intCast(payload.len + 4));
-    if (payload.len > 0) try stream.writeAll(payload);
+    if (payload.len > 0) try net.writeAllStream(stream, payload);
 }
 
 fn readStartup(stream: net.Stream) !void {
@@ -79,7 +79,7 @@ fn readStartup(stream: net.Stream) !void {
     var buf: [256]u8 = undefined;
     while (remaining > 0) {
         const chunk = @min(remaining, buf.len);
-        const n = try stream.read(buf[0..chunk]);
+        const n = try net.readStream(stream, buf[0..chunk]);
         if (n == 0) return error.EndOfStream;
         remaining -= n;
     }

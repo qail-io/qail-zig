@@ -4,7 +4,7 @@
 //! messages during connection startup/authentication.
 
 const std = @import("std");
-const net = std.net;
+const net = @import("../compat/net.zig");
 const Connection = @import("../driver/connection.zig").Connection;
 const AuthOptions = @import("../driver/auth_options.zig").AuthOptions;
 
@@ -35,7 +35,7 @@ fn writeU32(writer: anytype, value: u32) !void {
 fn readNoEof(stream: net.Stream, buf: []u8) !void {
     var read_len: usize = 0;
     while (read_len < buf.len) {
-        const n = try stream.read(buf[read_len..]);
+        const n = try net.readStream(stream, buf[read_len..]);
         if (n == 0) return error.EndOfStream;
         read_len += n;
     }
@@ -43,7 +43,7 @@ fn readNoEof(stream: net.Stream, buf: []u8) !void {
 
 fn writeByte(stream: net.Stream, byte: u8) !void {
     const buf = [_]u8{byte};
-    try stream.writeAll(&buf);
+    try net.writeAllStream(stream, &buf);
 }
 
 fn readStartup(stream: net.Stream) !void {
@@ -56,7 +56,7 @@ fn readStartup(stream: net.Stream) !void {
     var buf: [256]u8 = undefined;
     while (remaining > 0) {
         const chunk = @min(remaining, buf.len);
-        const n = try stream.read(buf[0..chunk]);
+        const n = try net.readStream(stream, buf[0..chunk]);
         if (n == 0) return error.EndOfStream;
         remaining -= n;
     }
@@ -75,7 +75,7 @@ fn readFrontendMessage(stream: net.Stream) !u8 {
     var buf: [256]u8 = undefined;
     while (remaining > 0) {
         const chunk = @min(remaining, buf.len);
-        const n = try stream.read(buf[0..chunk]);
+        const n = try net.readStream(stream, buf[0..chunk]);
         if (n == 0) return error.EndOfStream;
         remaining -= n;
     }
@@ -87,15 +87,15 @@ fn sendAuth(stream: net.Stream, code: u32, extra: []const u8) !void {
     try writeByte(stream, 'R');
     try writeU32(stream, @intCast(8 + extra.len));
     try writeU32(stream, code);
-    if (extra.len > 0) try stream.writeAll(extra);
+    if (extra.len > 0) try net.writeAllStream(stream, extra);
 }
 
 fn sendParameterStatus(stream: net.Stream, name: []const u8, value: []const u8) !void {
     try writeByte(stream, 'S');
     try writeU32(stream, @intCast(4 + name.len + 1 + value.len + 1));
-    try stream.writeAll(name);
+    try net.writeAllStream(stream, name);
     try writeByte(stream, 0);
-    try stream.writeAll(value);
+    try net.writeAllStream(stream, value);
     try writeByte(stream, 0);
 }
 
