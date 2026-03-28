@@ -33,7 +33,7 @@
 
 ### I/O: PostgreSQL Query Throughput
 
-Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_staging` (`SELECT id, name FROM harbors WHERE id = $1`), measured on March 27, 2026.
+Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_staging`, measured on March 27, 2026. The published table below is the narrow `point` workload (`SELECT id, name FROM harbors WHERE id = $1`), not a blanket claim about every query shape.
 
 | Benchmark | pgx (Go) | qail.rs (Rust) | qail-zig |
 |-----------|----------|----------------|----------|
@@ -44,6 +44,13 @@ Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_st
 | **Binary size** | n/a | ~2MB | ~200KB |
 
 > Performance topology: Zig maximizes single-query latencies and pool concurrency; Rust optimizes for throughput via intermediate pipeline caching.
+
+The harness now also supports two broader stress workloads:
+
+- `wide_rows` — large result sets with wide rows and mixed nullable/text/numeric columns, to test receive/decode cost
+- `many_params` — parameter-heavy prepared query, to test bind/encode overhead directly
+
+Those scenarios exist specifically to check whether the current edge survives outside tiny prepared lookups.
 
 ### CPU: AST Build + Transpile (1M iterations)
 
