@@ -276,17 +276,7 @@ pub const AstEncoder = struct {
                     try writeValue(writer, &assign.value);
                 }
 
-                if (cmd.where_clauses.len > 0) {
-                    try writer.writeAll(" WHERE ");
-                    for (cmd.where_clauses, 0..) |clause, i| {
-                        if (i > 0) {
-                            try writer.print(" {s} ", .{clause.logical_op.toSql()});
-                        }
-                        try writer.writeAll(clause.condition.column);
-                        try writer.print(" {s} ", .{clause.condition.op.toSql()});
-                        try writeValue(writer, &clause.condition.value);
-                    }
-                }
+                try writeWhereClauses(writer, cmd.where_clauses);
 
                 if (cmd.returning.len > 0) {
                     try writer.writeAll(" RETURNING ");
@@ -300,17 +290,7 @@ pub const AstEncoder = struct {
                 try writer.writeAll("DELETE FROM ");
                 try writer.writeAll(cmd.table);
 
-                if (cmd.where_clauses.len > 0) {
-                    try writer.writeAll(" WHERE ");
-                    for (cmd.where_clauses, 0..) |clause, i| {
-                        if (i > 0) {
-                            try writer.print(" {s} ", .{clause.logical_op.toSql()});
-                        }
-                        try writer.writeAll(clause.condition.column);
-                        try writer.print(" {s} ", .{clause.condition.op.toSql()});
-                        try writeValue(writer, &clause.condition.value);
-                    }
-                }
+                try writeWhereClauses(writer, cmd.where_clauses);
 
                 if (cmd.returning.len > 0) {
                     try writer.writeAll(" RETURNING ");
@@ -892,17 +872,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
         try writer.writeAll(join.on_right);
     }
 
-    if (cmd.where_clauses.len > 0) {
-        try writer.writeAll(" WHERE ");
-        for (cmd.where_clauses, 0..) |clause, i| {
-            if (i > 0) {
-                try writer.print(" {s} ", .{clause.logical_op.toSql()});
-            }
-            try writer.writeAll(clause.condition.column);
-            try writer.print(" {s} ", .{clause.condition.op.toSql()});
-            try writeValue(writer, &clause.condition.value);
-        }
-    }
+    try writeWhereClauses(writer, cmd.where_clauses);
 
     if (cmd.group_by.len > 0) {
         try writer.writeAll(" GROUP BY ");
@@ -1112,6 +1082,60 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
     }
 }
 
+fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
+    var has_and = false;
+    var has_or = false;
+
+    for (clauses) |clause| {
+        switch (clause.logical_op) {
+            .@"and" => has_and = true,
+            .@"or" => has_or = true,
+        }
+    }
+
+    if (!has_and and !has_or) {
+        return;
+    }
+
+    try writer.writeAll(" WHERE ");
+
+    var wrote_clause = false;
+
+    if (has_and) {
+        for (clauses) |clause| {
+            if (clause.logical_op != .@"and") continue;
+            if (wrote_clause) {
+                try writer.writeAll(" AND ");
+            }
+            try writeWhereCondition(writer, clause);
+            wrote_clause = true;
+        }
+    }
+
+    if (has_or) {
+        if (wrote_clause) {
+            try writer.writeAll(" AND ");
+        }
+        try writer.writeAll("(");
+        var first = true;
+        for (clauses) |clause| {
+            if (clause.logical_op != .@"or") continue;
+            if (!first) {
+                try writer.writeAll(" OR ");
+            }
+            first = false;
+            try writeWhereCondition(writer, clause);
+        }
+        try writer.writeAll(")");
+    }
+}
+
+fn writeWhereCondition(writer: anytype, clause: ast.cmd.WhereClause) !void {
+    try writer.writeAll(clause.condition.column);
+    try writer.print(" {s} ", .{clause.condition.op.toSql()});
+    try writeValue(writer, &clause.condition.value);
+}
+
 fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
     for (value) |c| {
         if (c == '\'') {
@@ -1297,6 +1321,94 @@ test "ast encoder aggregates" {
     const bytes = encoder.getWritten();
 
     try std.testing.expect(bytes.len > 20);
+}
+
+test "ast encoder where groups and + or clauses like qail.rs or_filter semantics" {
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("is_active", .eq, .{ .bool = true }),
+        ast.cmd.orFilter("topic", .ilike, .{ .string = "%test%" }),
+        ast.cmd.orFilter("question", .ilike, .{ .string = "%test%" }),
+    };
+    const cmd = QailCmd.get("kb").where(&wheres);
+
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var sql_buf: [4096]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+    const sql = writer.getWritten();
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM kb WHERE is_active = true AND (topic ILIKE '%test%' OR question ILIKE '%test%')",
+        sql,
+    );
+}
+
+test "ast encoder where supports pure or-filter groups" {
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.orFilter("name", .ilike, .{ .string = "%coffee%" }),
+        ast.cmd.orFilter("description", .ilike, .{ .string = "%coffee%" }),
+    };
+    const cmd = QailCmd.get("products").where(&wheres);
+
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var sql_buf: [4096]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+    const sql = writer.getWritten();
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM products WHERE (name ILIKE '%coffee%' OR description ILIKE '%coffee%')",
+        sql,
+    );
+}
+
+test "ast encoder update with or-filter grouping" {
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "archived", .value = .{ .bool = true } },
+    };
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.orFilter("topic", .ilike, .{ .string = "%test%" }),
+        ast.cmd.orFilter("question", .ilike, .{ .string = "%test%" }),
+    };
+    const cmd = QailCmd.set("kb").values(&assigns).where(&wheres);
+
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var sql_buf: [4096]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+    const sql = writer.getWritten();
+
+    try std.testing.expectEqualStrings(
+        "UPDATE kb SET archived = true WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')",
+        sql,
+    );
+}
+
+test "ast encoder delete with or-filter grouping" {
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.orFilter("topic", .ilike, .{ .string = "%test%" }),
+        ast.cmd.orFilter("question", .ilike, .{ .string = "%test%" }),
+    };
+    const cmd = QailCmd.del("kb").where(&wheres);
+
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var sql_buf: [4096]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+    const sql = writer.getWritten();
+
+    try std.testing.expectEqualStrings(
+        "DELETE FROM kb WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')",
+        sql,
+    );
 }
 
 test "ast encoder put defaults to conflict do nothing" {

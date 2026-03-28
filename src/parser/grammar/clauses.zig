@@ -109,8 +109,13 @@ pub fn parseWhereClause(allocator: std.mem.Allocator, input: []const u8) ParseEr
 
     // Parse first condition
     const first = try parseCondition(trimmed);
-    clauses.append(allocator, .{ .condition = first.value, .logical_op = .@"and" }) catch return ParseError.InvalidSyntax;
     trimmed = skipWhitespace(first.remaining);
+
+    var saw_and = false;
+    var saw_or = false;
+
+    var tail_conditions: std.ArrayList(Condition) = .empty;
+    defer tail_conditions.deinit(allocator);
 
     // Parse remaining conditions with AND/OR
     while (true) {
@@ -125,9 +130,27 @@ pub fn parseWhereClause(allocator: std.mem.Allocator, input: []const u8) ParseEr
             break;
         };
 
-        const cond = parseCondition(trimmed) catch break;
-        clauses.append(allocator, .{ .condition = cond.value, .logical_op = logical_op }) catch return ParseError.InvalidSyntax;
+        switch (logical_op) {
+            .@"and" => saw_and = true,
+            .@"or" => saw_or = true,
+        }
+
+        const cond = try parseCondition(trimmed);
+        tail_conditions.append(allocator, cond.value) catch return ParseError.InvalidSyntax;
         trimmed = skipWhitespace(cond.remaining);
+    }
+
+    // Keep parser semantics aligned with qail.rs:
+    // textual WHERE chains must be either pure-AND or pure-OR.
+    if (saw_and and saw_or) {
+        return ParseError.InvalidSyntax;
+    }
+
+    const chain_op: LogicalOp = if (saw_or) .@"or" else .@"and";
+
+    clauses.append(allocator, .{ .condition = first.value, .logical_op = chain_op }) catch return ParseError.InvalidSyntax;
+    for (tail_conditions.items) |cond| {
+        clauses.append(allocator, .{ .condition = cond, .logical_op = chain_op }) catch return ParseError.InvalidSyntax;
     }
 
     return .{
@@ -306,6 +329,28 @@ test "parseWhereClause" {
     try std.testing.expectEqual(@as(usize, 2), result.value.len);
     try std.testing.expectEqualStrings("active", result.value[0].condition.column);
     try std.testing.expectEqualStrings("age", result.value[1].condition.column);
+    try std.testing.expectEqual(LogicalOp.@"and", result.value[0].logical_op);
+    try std.testing.expectEqual(LogicalOp.@"and", result.value[1].logical_op);
+}
+
+test "parseWhereClause pure or chain marks all conditions as or" {
+    const allocator = std.testing.allocator;
+
+    const result = try parseWhereClause(allocator, "where topic ilike '%test%' or question ilike '%test%'");
+    defer allocator.free(result.value);
+
+    try std.testing.expectEqual(@as(usize, 2), result.value.len);
+    try std.testing.expectEqual(LogicalOp.@"or", result.value[0].logical_op);
+    try std.testing.expectEqual(LogicalOp.@"or", result.value[1].logical_op);
+}
+
+test "parseWhereClause rejects mixed and/or chains" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(
+        ParseError.InvalidSyntax,
+        parseWhereClause(allocator, "where active = true and role = 'admin' or email = 'a@b.c'"),
+    );
 }
 
 test "parseOrderByClause" {
