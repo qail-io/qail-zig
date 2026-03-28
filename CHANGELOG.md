@@ -2,6 +2,14 @@
 
 This changelog tracks qail-zig releases separately from qail.rs.
 
+## v0.6.2 — 2026-03-28
+
+### Fixed
+
+- AST protocol encoder WHERE generation now matches transpiler cage semantics: `AND` filters are emitted directly and `orFilter(...)` chains are grouped as `AND ( ... OR ... )`.
+- Parser WHERE-chain semantics are aligned with qail.rs: pure `and` chains and pure `or` chains are accepted; mixed infix `and/or` chains are rejected.
+- Added regression coverage for select/update/delete OR-cage SQL rendering in `src/protocol/ast_encoder.zig` and parser logical-op normalization in `src/parser/grammar/clauses.zig`.
+
 ## v0.6.1 — 2026-03-28
 
 ### Fixed
