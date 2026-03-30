@@ -350,3 +350,68 @@ fn postgresEpochMicrosNow() i64 {
     const pg_unix_epoch_diff_secs: i64 = 946_684_800;
     return std.time.microTimestamp() - (pg_unix_epoch_diff_secs * 1_000_000);
 }
+
+test "parse lsn text" {
+    const lsn = try parseLsnText("16/B6C50");
+    try std.testing.expectEqual(@as(u64, 0x00000016000B6C50), lsn);
+}
+
+test "build start logical replication sql" {
+    const sql = try buildStartLogicalReplicationSql(
+        std.testing.allocator,
+        "slot_main",
+        "0/16B6C50",
+        &.{
+            .{ .key = "proto_version", .value = "1" },
+            .{ .key = "publication_names", .value = "pub1,pub2" },
+        },
+    );
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "START_REPLICATION SLOT slot_main LOGICAL 0/16B6C50 (proto_version '1', publication_names 'pub1,pub2')",
+        sql,
+    );
+}
+
+test "parse replication copy data" {
+    var payload: [25 + 3]u8 = undefined;
+    payload[0] = 'w';
+    std.mem.writeInt(u64, payload[1..9], 0x10, .big);
+    std.mem.writeInt(u64, payload[9..17], 0x20, .big);
+    std.mem.writeInt(i64, payload[17..25], 1234, .big);
+    payload[25] = 'a';
+    payload[26] = 'b';
+    payload[27] = 'c';
+
+    var msg = try parseReplicationCopyData(std.testing.allocator, &payload);
+    defer msg.deinit();
+
+    switch (msg) {
+        .xlog_data => |x| {
+            try std.testing.expectEqual(@as(u64, 0x10), x.wal_start);
+            try std.testing.expectEqual(@as(u64, 0x20), x.wal_end);
+            try std.testing.expectEqual(@as(i64, 1234), x.server_time_micros);
+            try std.testing.expectEqualStrings("abc", x.data);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "sendCopyData rejects oversized payload" {
+    const MockConn = struct {
+        send_count: usize = 0,
+
+        pub fn send(self: *@This(), bytes: []const u8) !void {
+            _ = bytes;
+            self.send_count += 1;
+        }
+    };
+
+    var conn = MockConn{};
+    const too_large_len = @as(usize, std.math.maxInt(u32)) - 3;
+    const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.CopyDataTooLarge, sendCopyData(&conn, payload));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_count);
+}

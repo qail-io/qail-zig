@@ -164,111 +164,140 @@ fn applyUrlQueryOptions(
             continue;
         }
 
-        if (std.ascii.eqlIgnoreCase(key, "sslmode")) {
-            parsed.options.tls_mode = TlsMode.parseSslMode(value) orelse return error.InvalidTlsMode;
-            continue;
+        if (try applyTlsQueryOption(allocator, parsed, key, value)) |handled| {
+            if (handled) continue;
         }
 
-        if (std.ascii.eqlIgnoreCase(key, "sslrootcert")) {
-            var tls_config = ensureTlsConfig(parsed);
-            tls_config.verify = .{
-                .bundle = try loadCaBundleFromPath(allocator, value),
-            };
-            if (parsed.options.tls_mode == .disable) parsed.options.tls_mode = .require;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "gssencmode")) {
-            parsed.options.gss_enc_mode = GssEncMode.parse(value) orelse return error.InvalidGssEncMode;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "tls_server_end_point_cert_der")) {
-            var tls_config = ensureTlsConfig(parsed);
-            tls_config.tls_server_end_point_cert_der = try readFileAllocAnyPath(
-                allocator,
-                value,
-                8 * 1024 * 1024,
-            );
-            if (parsed.options.tls_mode == .disable) parsed.options.tls_mode = .require;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "channel_binding")) {
-            parsed.options.auth_options.scram_channel_binding = auth_options_mod.ScramChannelBindingMode.parse(value) orelse return error.InvalidChannelBindingMode;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_scram")) {
-            parsed.options.auth_options.allow_scram_sha_256 = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_md5")) {
-            parsed.options.auth_options.allow_md5_password = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_cleartext")) {
-            parsed.options.auth_options.allow_cleartext_password = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_kerberos")) {
-            parsed.options.auth_options.allow_kerberos_v5 = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_gssapi")) {
-            parsed.options.auth_options.allow_gssapi = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_sspi")) {
-            parsed.options.auth_options.allow_sspi = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
+        if (try applyAuthBoolQueryOption(parsed, key, value)) |handled| {
+            if (handled) continue;
         }
 
         if (std.ascii.eqlIgnoreCase(key, "auth_mode")) {
-            if (std.ascii.eqlIgnoreCase(value, "scram_only")) {
-                parsed.options.auth_options = .{
-                    .allow_cleartext_password = false,
-                    .allow_md5_password = false,
-                    .allow_scram_sha_256 = true,
-                    .allow_kerberos_v5 = false,
-                    .allow_gssapi = false,
-                    .allow_sspi = false,
-                    .scram_channel_binding = .prefer,
-                };
-            } else if (std.ascii.eqlIgnoreCase(value, "gssapi_only")) {
-                parsed.options.auth_options = .{
-                    .allow_cleartext_password = false,
-                    .allow_md5_password = false,
-                    .allow_scram_sha_256 = false,
-                    .allow_kerberos_v5 = true,
-                    .allow_gssapi = true,
-                    .allow_sspi = true,
-                    .scram_channel_binding = .prefer,
-                };
-            } else if (std.ascii.eqlIgnoreCase(value, "compat") or std.ascii.eqlIgnoreCase(value, "default")) {
-                parsed.options.auth_options = .{};
-            } else {
-                return error.InvalidAuthMode;
-            }
+            parsed.options.auth_options = try parseAuthMode(value);
             continue;
         }
 
         if (std.ascii.eqlIgnoreCase(key, "connect_timeout")) {
-            const seconds = std.fmt.parseInt(i32, value, 10) catch return error.InvalidConnectTimeout;
-            if (seconds < 0) return error.InvalidConnectTimeout;
-            if (seconds == 0) {
-                parsed.options.timeout_ms = null;
-            } else {
-                parsed.options.timeout_ms = std.math.mul(i32, seconds, 1000) catch return error.InvalidConnectTimeout;
-            }
+            parsed.options.timeout_ms = try parseConnectTimeoutMs(value);
             continue;
         }
     }
+}
+
+fn applyTlsQueryOption(
+    allocator: std.mem.Allocator,
+    parsed: *ParsedConnectionUrl,
+    key: []const u8,
+    value: []const u8,
+) !?bool {
+    if (std.ascii.eqlIgnoreCase(key, "sslmode")) {
+        parsed.options.tls_mode = TlsMode.parseSslMode(value) orelse return error.InvalidTlsMode;
+        return true;
+    }
+
+    if (std.ascii.eqlIgnoreCase(key, "sslrootcert")) {
+        var tls_config = ensureTlsConfig(parsed);
+        tls_config.verify = .{
+            .bundle = try loadCaBundleFromPath(allocator, value),
+        };
+        if (parsed.options.tls_mode == .disable) parsed.options.tls_mode = .require;
+        return true;
+    }
+
+    if (std.ascii.eqlIgnoreCase(key, "gssencmode")) {
+        parsed.options.gss_enc_mode = GssEncMode.parse(value) orelse return error.InvalidGssEncMode;
+        return true;
+    }
+
+    if (std.ascii.eqlIgnoreCase(key, "tls_server_end_point_cert_der")) {
+        var tls_config = ensureTlsConfig(parsed);
+        tls_config.tls_server_end_point_cert_der = try readFileAllocAnyPath(
+            allocator,
+            value,
+            8 * 1024 * 1024,
+        );
+        if (parsed.options.tls_mode == .disable) parsed.options.tls_mode = .require;
+        return true;
+    }
+
+    return null;
+}
+
+fn applyAuthBoolQueryOption(
+    parsed: *ParsedConnectionUrl,
+    key: []const u8,
+    value: []const u8,
+) !?bool {
+    if (std.ascii.eqlIgnoreCase(key, "channel_binding")) {
+        parsed.options.auth_options.scram_channel_binding = auth_options_mod.ScramChannelBindingMode.parse(value) orelse return error.InvalidChannelBindingMode;
+        return true;
+    }
+
+    if (std.ascii.eqlIgnoreCase(key, "auth_scram")) {
+        parsed.options.auth_options.allow_scram_sha_256 = parseBoolParam(value) orelse return error.InvalidAuthOption;
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(key, "auth_md5")) {
+        parsed.options.auth_options.allow_md5_password = parseBoolParam(value) orelse return error.InvalidAuthOption;
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(key, "auth_cleartext")) {
+        parsed.options.auth_options.allow_cleartext_password = parseBoolParam(value) orelse return error.InvalidAuthOption;
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(key, "auth_kerberos")) {
+        parsed.options.auth_options.allow_kerberos_v5 = parseBoolParam(value) orelse return error.InvalidAuthOption;
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(key, "auth_gssapi")) {
+        parsed.options.auth_options.allow_gssapi = parseBoolParam(value) orelse return error.InvalidAuthOption;
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(key, "auth_sspi")) {
+        parsed.options.auth_options.allow_sspi = parseBoolParam(value) orelse return error.InvalidAuthOption;
+        return true;
+    }
+
+    return null;
+}
+
+fn parseAuthMode(value: []const u8) !AuthOptions {
+    if (std.ascii.eqlIgnoreCase(value, "scram_only")) {
+        return .{
+            .allow_cleartext_password = false,
+            .allow_md5_password = false,
+            .allow_scram_sha_256 = true,
+            .allow_kerberos_v5 = false,
+            .allow_gssapi = false,
+            .allow_sspi = false,
+            .scram_channel_binding = .prefer,
+        };
+    }
+
+    if (std.ascii.eqlIgnoreCase(value, "gssapi_only")) {
+        return .{
+            .allow_cleartext_password = false,
+            .allow_md5_password = false,
+            .allow_scram_sha_256 = false,
+            .allow_kerberos_v5 = true,
+            .allow_gssapi = true,
+            .allow_sspi = true,
+            .scram_channel_binding = .prefer,
+        };
+    }
+
+    if (std.ascii.eqlIgnoreCase(value, "compat") or std.ascii.eqlIgnoreCase(value, "default")) {
+        return .{};
+    }
+
+    return error.InvalidAuthMode;
+}
+
+fn parseConnectTimeoutMs(value: []const u8) !?i32 {
+    const seconds = std.fmt.parseInt(i32, value, 10) catch return error.InvalidConnectTimeout;
+    if (seconds < 0) return error.InvalidConnectTimeout;
+    if (seconds == 0) return null;
+    return std.math.mul(i32, seconds, 1000) catch return error.InvalidConnectTimeout;
 }
 
 fn ensureTlsConfig(parsed: *ParsedConnectionUrl) *TlsConfig {
@@ -345,4 +374,36 @@ fn percentDecodeAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     }
 
     return try out.toOwnedSlice(allocator);
+}
+
+test "parse sslmode aliases" {
+    try std.testing.expectEqual(TlsMode.disable, TlsMode.parseSslMode(" disable "));
+    try std.testing.expectEqual(TlsMode.prefer, TlsMode.parseSslMode("allow"));
+    try std.testing.expectEqual(TlsMode.require, TlsMode.parseSslMode("require"));
+    try std.testing.expectEqual(TlsMode.verify_ca, TlsMode.parseSslMode("verify-ca"));
+    try std.testing.expectEqual(TlsMode.verify_full, TlsMode.parseSslMode("verify-full"));
+    try std.testing.expect(TlsMode.parseSslMode("bogus") == null);
+}
+
+test "parse gssencmode values" {
+    try std.testing.expectEqual(GssEncMode.disable, GssEncMode.parse("disable"));
+    try std.testing.expectEqual(GssEncMode.prefer, GssEncMode.parse("prefer"));
+    try std.testing.expectEqual(GssEncMode.require, GssEncMode.parse("require"));
+    try std.testing.expect(GssEncMode.parse("bogus") == null);
+}
+
+test "parse logical replication startup mode" {
+    const startup_params = [_]StartupParam{
+        .{ .name = "application_name", .value = "qail" },
+        .{ .name = "replication", .value = "database" },
+    };
+
+    try std.testing.expect(hasLogicalReplicationStartupMode(&startup_params));
+    try std.testing.expect(!hasLogicalReplicationStartupMode(&[_]StartupParam{.{ .name = "replication", .value = "false" }}));
+}
+
+test "parse connect timeout milliseconds" {
+    try std.testing.expectEqual(@as(?i32, null), try parseConnectTimeoutMs("0"));
+    try std.testing.expectEqual(@as(?i32, 5000), try parseConnectTimeoutMs("5"));
+    try std.testing.expectError(error.InvalidConnectTimeout, parseConnectTimeoutMs("-1"));
 }

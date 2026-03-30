@@ -3,6 +3,8 @@ const protocol = @import("../protocol/mod.zig");
 
 const Decoder = protocol.Decoder;
 
+// LISTEN / NOTIFY helpers live here so the driver owns only state-machine logic.
+
 /// LISTEN/NOTIFY message from PostgreSQL.
 pub const Notification = struct {
     /// PID of the backend that sent NOTIFY.
@@ -26,12 +28,12 @@ pub fn decodeNotification(allocator: std.mem.Allocator, payload: []const u8) !No
     const channel = try allocator.dupe(u8, parsed.channel);
     errdefer allocator.free(channel);
 
-    const notification_payload = try allocator.dupe(u8, parsed.payload);
+    const payload_copy = try allocator.dupe(u8, parsed.payload);
 
     return .{
         .process_id = parsed.process_id,
         .channel = channel,
-        .payload = notification_payload,
+        .payload = payload_copy,
         .allocator = allocator,
     };
 }
@@ -61,4 +63,72 @@ pub fn popBufferedNotification(
 ) ?Notification {
     if (notifications.items.len == 0) return null;
     return notifications.orderedRemove(0);
+}
+
+test "decode notification response" {
+    const data = [_]u8{
+        0, 0, 0, 123, // process id
+        'm', 'y', '_', 'c', 'h', 'a', 'n', 0, // channel
+        'h', 'e', 'l', 'l', 'o', 0, // payload
+    };
+
+    var notification = try decodeNotification(std.testing.allocator, &data);
+    defer notification.deinit();
+
+    try std.testing.expectEqual(@as(i32, 123), notification.process_id);
+    try std.testing.expectEqualStrings("my_chan", notification.channel);
+    try std.testing.expectEqualStrings("hello", notification.payload);
+}
+
+test "buffered notifications can be appended and popped" {
+    var notifications: std.ArrayListUnmanaged(Notification) = .{};
+    defer {
+        for (notifications.items) |*notification| notification.deinit();
+        notifications.deinit(std.testing.allocator);
+    }
+
+    const data = [_]u8{
+        0,   0,   0,   9,
+        'c', 'h', 'a', 'n',
+        0,   'p', 'a', 'y',
+        'l', 'o', 'a', 'd',
+        0,
+    };
+
+    try appendDecodedNotification(std.testing.allocator, &notifications, &data);
+    try std.testing.expectEqual(@as(usize, 1), notifications.items.len);
+
+    var notification = popBufferedNotification(&notifications).?;
+    defer notification.deinit();
+
+    try std.testing.expectEqual(@as(i32, 9), notification.process_id);
+    try std.testing.expectEqualStrings("chan", notification.channel);
+    try std.testing.expectEqualStrings("payload", notification.payload);
+    try std.testing.expectEqual(@as(usize, 0), notifications.items.len);
+}
+
+test "drain buffered notifications preserves order" {
+    var notifications: std.ArrayListUnmanaged(Notification) = .{};
+    defer {
+        for (notifications.items) |*notification| notification.deinit();
+        notifications.deinit(std.testing.allocator);
+    }
+
+    const first = [_]u8{ 0, 0, 0, 1, 'a', 0, 'x', 0 };
+    const second = [_]u8{ 0, 0, 0, 2, 'b', 0, 'y', 0 };
+    try appendDecodedNotification(std.testing.allocator, &notifications, &first);
+    try appendDecodedNotification(std.testing.allocator, &notifications, &second);
+
+    const drained = try drainBufferedNotifications(std.testing.allocator, &notifications);
+    defer {
+        for (drained) |*notification| notification.deinit();
+        std.testing.allocator.free(drained);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), drained.len);
+    try std.testing.expectEqualStrings("a", drained[0].channel);
+    try std.testing.expectEqualStrings("x", drained[0].payload);
+    try std.testing.expectEqualStrings("b", drained[1].channel);
+    try std.testing.expectEqualStrings("y", drained[1].payload);
+    try std.testing.expectEqual(@as(usize, 0), notifications.items.len);
 }
