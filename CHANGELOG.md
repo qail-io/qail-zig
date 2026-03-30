@@ -4,11 +4,15 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+## v0.7.0 — 2026-03-31
+
 ### Changed
 
 - Benchmark docs/readme/changelog copy now consistently frames the current public result as the `qail-zig` versus `pg.zig` shared-surface matrix, with more neutral peer-to-peer wording.
 - Benchmark docs now point to the dedicated `qail_pgzig_bench.zig` harness and the five published workloads: `point`, `wide_rows`, `large_rows`, `many_params`, and `aggregate`.
+- README benchmark matrix now reflects the March 31, 2026 5-round shared-surface medians.
 - Added `scripts/zigw`, a checked-in macOS fallback wrapper that keeps `test` and `pgzig-bench` usable on the known Zig 0.15.x build-runner failure path.
+- Bumped qail-zig package version references to `v0.7.0`.
 
 ### Removed
 

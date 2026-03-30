@@ -12,6 +12,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ./scripts/zigw doctor
+  ./scripts/zigw check-raw
   ./scripts/zigw test
   ./scripts/zigw pgzig-bench <qail|pgzig> <single|pool10> [--workload ...] [--plain]
 
@@ -115,6 +116,12 @@ run_direct_test() {
     -fno-emit-bin
 }
 
+run_check_raw() {
+  "$repo_root/scripts/check_no_direct_raw.sh"
+  "$repo_root/scripts/check_execute_raw_allowlist.sh"
+  "$repo_root/scripts/check_raw_cmd_allowlist.sh"
+}
+
 build_pgzig_bench_direct() {
   local output="${QAIL_ZIG_PGZIG_BENCH_BIN:-$repo_root/.zig-cache/bin/qail-pgzig-bench-direct}"
   mkdir -p "$(dirname "$output")"
@@ -190,7 +197,11 @@ main() {
     doctor)
       print_doctor
       ;;
+    check-raw)
+      run_check_raw
+      ;;
     test)
+      run_check_raw
       if use_direct_workaround; then
         run_direct_test
       else

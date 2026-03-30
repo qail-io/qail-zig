@@ -13,8 +13,10 @@ const qail = @import("qail");
 
 const QailCmd = qail.QailCmd;
 const Expr = qail.Expr;
+const Value = qail.Value;
 const PgDriver = qail.PgDriver;
 const WhereClause = qail.cmd.WhereClause;
+const Assignment = qail.cmd.Assignment;
 const transpiler = qail.transpiler;
 const b = qail.builders;
 
@@ -34,6 +36,44 @@ fn testSql(name: []const u8, cmd: *const QailCmd, expected: []const u8) !void {
     }
 }
 
+fn seedRow(driver: *PgDriver, name: []const u8, score: i64, tags: []const Value, data_json: []const u8) !void {
+    const assigns = [_]Assignment{
+        .{ .column = "name", .value = .{ .string = name } },
+        .{ .column = "score", .value = .{ .int = score } },
+        .{ .column = "tags", .value = .{ .array = tags } },
+        .{ .column = "data", .value = .{ .json = data_json } },
+    };
+    const cmd = QailCmd.add("qail_test").values(&assigns);
+    _ = try driver.execute(&cmd);
+}
+
+fn setupFixture(driver: *PgDriver) !void {
+    const drop_cmd = QailCmd.drop("qail_test");
+    _ = driver.execute(&drop_cmd) catch {};
+
+    const ddl_cols = [_]Expr{
+        Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
+        Expr.defWithConstraints("name", "TEXT", &.{.not_null}),
+        Expr.defWithConstraints("score", "INTEGER", &.{.{ .default = "0" }}),
+        Expr.defWithConstraints("tags", "INTEGER[]", &.{ .not_null, .{ .default = "'{}'" } }),
+        Expr.defWithConstraints("data", "JSONB", &.{ .not_null, .{ .default = "'{}'" } }),
+    };
+    const create_cmd = QailCmd.make("qail_test").select(&ddl_cols);
+    _ = try driver.execute(&create_cmd);
+
+    const tags1 = [_]Value{ .{ .int = 1 }, .{ .int = 2 }, .{ .int = 3 } };
+    const tags2 = [_]Value{ .{ .int = 2 }, .{ .int = 3 }, .{ .int = 4 } };
+    const tags3 = [_]Value{ .{ .int = 3 }, .{ .int = 4 }, .{ .int = 5 } };
+    const tags4 = [_]Value{ .{ .int = 10 }, .{ .int = 20 } };
+    const tags5 = [_]Value{ .{ .int = 20 }, .{ .int = 30 } };
+
+    try seedRow(driver, "Harbor 1", 10, &tags1, "{\"key\": \"value1\"}");
+    try seedRow(driver, "Harbor 2", 20, &tags2, "{\"key\": \"value2\"}");
+    try seedRow(driver, "Harbor 3", 30, &tags3, "{\"key\": \"value3\"}");
+    try seedRow(driver, "Port Alpha", 100, &tags4, "{\"type\": \"port\"}");
+    try seedRow(driver, "Port Beta", 200, &tags5, "{\"type\": \"port\"}");
+}
+
 pub fn main() !void {
     allocator = std.heap.page_allocator;
 
@@ -49,24 +89,7 @@ pub fn main() !void {
     std.debug.print("✅ Connected!\n\n", .{});
 
     // Seed test data
-    _ = driver.executeRaw("DROP TABLE IF EXISTS qail_test CASCADE") catch {};
-    _ = driver.executeRaw(
-        \\CREATE TABLE qail_test (
-        \\    id SERIAL PRIMARY KEY,
-        \\    name TEXT NOT NULL,
-        \\    score INTEGER DEFAULT 0,
-        \\    tags INTEGER[] NOT NULL DEFAULT '{}',
-        \\    data JSONB NOT NULL DEFAULT '{}'
-        \\)
-    ) catch return;
-    _ = driver.executeRaw(
-        \\INSERT INTO qail_test (name, score, tags, data) VALUES
-        \\('Harbor 1', 10, ARRAY[1, 2, 3], '{"key": "value1"}'),
-        \\('Harbor 2', 20, ARRAY[2, 3, 4], '{"key": "value2"}'),
-        \\('Harbor 3', 30, ARRAY[3, 4, 5], '{"key": "value3"}'),
-        \\('Port Alpha', 100, ARRAY[10, 20], '{"type": "port"}'),
-        \\('Port Beta', 200, ARRAY[20, 30], '{"type": "port"}')
-    ) catch return;
+    setupFixture(&driver) catch return;
     std.debug.print("✅ Test data seeded\n\n", .{});
 
     // ========================================================================

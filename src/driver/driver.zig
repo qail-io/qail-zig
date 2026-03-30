@@ -19,6 +19,8 @@ const connect_url_mod = @import("connect_url.zig");
 const explain_estimate_mod = @import("explain_estimate.zig");
 const notification_mod = @import("notification.zig");
 const replication_mod = @import("replication.zig");
+const raw_cmd_mod = @import("raw_cmd.zig");
+const raw_sql_mod = @import("raw_sql.zig");
 const transpiler = @import("../transpiler/postgres.zig");
 
 const QailCmd = ast.QailCmd;
@@ -821,26 +823,28 @@ pub const PgDriver = struct {
 
     /// Begin a transaction
     pub fn begin(self: *PgDriver) !void {
-        const cmd = QailCmd.raw("BEGIN");
-        _ = try self.execute(&cmd);
+        _ = try self.executeRaw(raw_sql_mod.begin());
     }
 
     /// Commit the transaction
     pub fn commit(self: *PgDriver) !void {
-        const cmd = QailCmd.raw("COMMIT");
-        _ = try self.execute(&cmd);
+        _ = try self.executeRaw(raw_sql_mod.commit());
     }
 
     /// Rollback the transaction
     pub fn rollback(self: *PgDriver) !void {
-        const cmd = QailCmd.raw("ROLLBACK");
-        _ = try self.execute(&cmd);
+        _ = try self.executeRaw(raw_sql_mod.rollback());
     }
 
     /// Execute raw SQL string (for migrations, DDL, etc.)
     pub fn executeRaw(self: *PgDriver, sql: []const u8) !u64 {
-        const cmd = QailCmd.raw(sql);
+        const cmd = raw_cmd_mod.command(sql);
         return try self.execute(&cmd);
+    }
+
+    fn fetchAllRaw(self: *PgDriver, sql: []const u8) ![]PgRow {
+        const cmd = raw_cmd_mod.command(sql);
+        return try self.fetchAll(&cmd);
     }
 
     // ==================== COPY Helpers ====================
@@ -966,28 +970,28 @@ pub const PgDriver = struct {
 
     /// ALTER TABLE ... ENABLE ROW LEVEL SECURITY.
     pub fn enableRls(self: *PgDriver, table: []const u8) !void {
-        const sql = try buildAlterTableRlsSql(self.allocator, table, "ENABLE ROW LEVEL SECURITY");
+        const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .enable);
         defer self.allocator.free(sql);
         _ = try self.executeRaw(sql);
     }
 
     /// ALTER TABLE ... DISABLE ROW LEVEL SECURITY.
     pub fn disableRls(self: *PgDriver, table: []const u8) !void {
-        const sql = try buildAlterTableRlsSql(self.allocator, table, "DISABLE ROW LEVEL SECURITY");
+        const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .disable);
         defer self.allocator.free(sql);
         _ = try self.executeRaw(sql);
     }
 
     /// ALTER TABLE ... FORCE ROW LEVEL SECURITY.
     pub fn forceRls(self: *PgDriver, table: []const u8) !void {
-        const sql = try buildAlterTableRlsSql(self.allocator, table, "FORCE ROW LEVEL SECURITY");
+        const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .force);
         defer self.allocator.free(sql);
         _ = try self.executeRaw(sql);
     }
 
     /// ALTER TABLE ... NO FORCE ROW LEVEL SECURITY.
     pub fn noForceRls(self: *PgDriver, table: []const u8) !void {
-        const sql = try buildAlterTableRlsSql(self.allocator, table, "NO FORCE ROW LEVEL SECURITY");
+        const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .no_force);
         defer self.allocator.free(sql);
         _ = try self.executeRaw(sql);
     }
@@ -1003,11 +1007,10 @@ pub const PgDriver = struct {
 
     /// Run EXPLAIN (FORMAT JSON) for raw SQL and parse estimate.
     pub fn explainEstimateSql(self: *PgDriver, sql: []const u8) !?ExplainEstimate {
-        const explain_sql = try std.fmt.allocPrint(self.allocator, "EXPLAIN (FORMAT JSON) {s}", .{sql});
+        const explain_sql = try raw_sql_mod.buildExplainFormatJson(self.allocator, sql);
         defer self.allocator.free(explain_sql);
 
-        const explain_cmd = QailCmd.raw(explain_sql);
-        const rows = try self.fetchAll(&explain_cmd);
+        const rows = try self.fetchAllRaw(explain_sql);
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return null;
@@ -1019,10 +1022,7 @@ pub const PgDriver = struct {
 
     /// Subscribe to a notification channel.
     pub fn listen(self: *PgDriver, channel: []const u8) !void {
-        const quoted = try quoteIdentifierAlloc(self.allocator, channel);
-        defer self.allocator.free(quoted);
-
-        const sql = try std.fmt.allocPrint(self.allocator, "LISTEN {s}", .{quoted});
+        const sql = try raw_sql_mod.buildListen(self.allocator, channel);
         defer self.allocator.free(sql);
 
         _ = try self.executeRaw(sql);
@@ -1030,10 +1030,7 @@ pub const PgDriver = struct {
 
     /// Unsubscribe from a notification channel.
     pub fn unlisten(self: *PgDriver, channel: []const u8) !void {
-        const quoted = try quoteIdentifierAlloc(self.allocator, channel);
-        defer self.allocator.free(quoted);
-
-        const sql = try std.fmt.allocPrint(self.allocator, "UNLISTEN {s}", .{quoted});
+        const sql = try raw_sql_mod.buildUnlisten(self.allocator, channel);
         defer self.allocator.free(sql);
 
         _ = try self.executeRaw(sql);
@@ -1041,7 +1038,7 @@ pub const PgDriver = struct {
 
     /// Unsubscribe from all notification channels.
     pub fn unlistenAll(self: *PgDriver) !void {
-        _ = try self.executeRaw("UNLISTEN *");
+        _ = try self.executeRaw(raw_sql_mod.unlistenAll());
     }
 
     /// Drain buffered notifications without blocking.
@@ -1089,8 +1086,7 @@ pub const PgDriver = struct {
         try self.ensureReplicationMode("IDENTIFY_SYSTEM");
         try self.ensureReplicationControlIdle("IDENTIFY_SYSTEM");
 
-        const cmd = QailCmd.raw("IDENTIFY_SYSTEM");
-        const rows = try self.fetchAll(&cmd);
+        const rows = try self.fetchAllRaw(raw_sql_mod.identifySystem());
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return error.InvalidReplicationResponse;
@@ -1111,8 +1107,7 @@ pub const PgDriver = struct {
         const sql = try replication_mod.buildCreateLogicalReplicationSlotSql(self.allocator, slot_name, output_plugin, temporary, two_phase);
         defer self.allocator.free(sql);
 
-        const cmd = QailCmd.raw(sql);
-        const rows = try self.fetchAll(&cmd);
+        const rows = try self.fetchAllRaw(sql);
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return error.InvalidReplicationResponse;
@@ -1518,23 +1513,6 @@ fn makeCancelKey(process_id: u32, secret_key: u32) CancelKey {
     };
 }
 
-fn quoteIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .{};
-    errdefer out.deinit(allocator);
-
-    try out.append(allocator, '"');
-    for (ident) |ch| {
-        if (ch == '"') {
-            try out.appendSlice(allocator, "\"\"");
-        } else {
-            try out.append(allocator, ch);
-        }
-    }
-    try out.append(allocator, '"');
-
-    return try out.toOwnedSlice(allocator);
-}
-
 const CopyByteSink = struct {
     out: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
@@ -1566,17 +1544,6 @@ fn extractCopyColumns(allocator: std.mem.Allocator, cmd: *const QailCmd) ![][]co
 
     if (columns.items.len == 0) return error.CopyColumnsRequired;
     return try columns.toOwnedSlice(allocator);
-}
-
-fn buildAlterTableRlsSql(
-    allocator: std.mem.Allocator,
-    table: []const u8,
-    clause: []const u8,
-) ![]u8 {
-    const quoted_table = try quoteIdentifierAlloc(allocator, table);
-    defer allocator.free(quoted_table);
-
-    return std.fmt.allocPrint(allocator, "ALTER TABLE {s} {s}", .{ quoted_table, clause });
 }
 
 fn freeRows(allocator: std.mem.Allocator, rows: []PgRow) void {
@@ -1756,13 +1723,6 @@ test "connect with verify-full requires verification config" {
     );
 }
 
-test "quote identifier alloc" {
-    const quoted = try quoteIdentifierAlloc(std.testing.allocator, "a\"b");
-    defer std.testing.allocator.free(quoted);
-
-    try std.testing.expectEqualStrings("\"a\"\"b\"", quoted);
-}
-
 test "parse lsn text" {
     const lsn = try replication_mod.parseLsnText("16/B6C50");
     try std.testing.expectEqual(@as(u64, 0x00000016000B6C50), lsn);
@@ -1891,13 +1851,6 @@ test "build drop replication slot sql rejects invalid slot identifier" {
             false,
         ),
     );
-}
-
-test "build alter table rls sql quotes identifier" {
-    const sql = try buildAlterTableRlsSql(std.testing.allocator, "tenant\"orders", "ENABLE ROW LEVEL SECURITY");
-    defer std.testing.allocator.free(sql);
-
-    try std.testing.expectEqualStrings("ALTER TABLE \"tenant\"\"orders\" ENABLE ROW LEVEL SECURITY", sql);
 }
 
 test "extract copy columns from add command columns" {

@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const raw_cmd = @import("raw_cmd.zig");
+const cursor_sql = @import("cursor/sql.zig");
 const QailCmd = ast.QailCmd;
 
 /// Server-side cursor for streaming query results.
@@ -36,23 +38,23 @@ pub const Cursor = struct {
 
     /// Build DECLARE CURSOR SQL.
     pub fn declareSql(self: *const Cursor, allocator: std.mem.Allocator, query_sql: []const u8) ![]u8 {
-        return std.fmt.allocPrint(allocator, "DECLARE {s} CURSOR FOR {s}", .{ self.name, query_sql });
+        return cursor_sql.buildDeclare(allocator, self.name, query_sql);
     }
 
     /// Build FETCH SQL.
     pub fn fetchSql(self: *const Cursor, allocator: std.mem.Allocator, batch_size: usize) ![]u8 {
-        return std.fmt.allocPrint(allocator, "FETCH {d} FROM {s}", .{ batch_size, self.name });
+        return cursor_sql.buildFetch(allocator, self.name, batch_size);
     }
 
     /// Build CLOSE CURSOR SQL.
     pub fn closeSql(self: *const Cursor, allocator: std.mem.Allocator) ![]u8 {
-        return std.fmt.allocPrint(allocator, "CLOSE {s}", .{self.name});
+        return cursor_sql.buildClose(allocator, self.name);
     }
 
     /// Create QailCmd for declaring cursor (AST-native).
     pub fn declareCmd(self: *const Cursor, query: *const QailCmd) QailCmd {
         _ = query; // Future: embed query in cursor command
-        return QailCmd.raw(self.name); // Placeholder - actual impl uses SQL
+        return raw_cmd.command(self.name); // Placeholder - actual impl uses SQL
     }
 };
 

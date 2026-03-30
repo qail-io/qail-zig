@@ -21,6 +21,8 @@ const QailCmd = ast.QailCmd;
 const Expr = ast.Expr;
 const Value = ast.Value;
 const Operator = ast.Operator;
+const ColumnDef = @TypeOf(@as(Expr, undefined).column_def);
+const WindowExpr = @TypeOf(@as(Expr, undefined).window);
 const FrontendMessage = wire.FrontendMessage;
 const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 
@@ -1167,77 +1169,8 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             }
         },
         .literal => |val| try writeValue(writer, &val),
-        .column_def => |def| {
-            const Constraint = @import("../ast/expr.zig").Constraint;
-            // Column definition for DDL: name TYPE [constraints]
-            try writer.writeAll(def.name);
-            try writer.writeAll(" ");
-            try writer.writeAll(def.data_type);
-
-            // Check constraints - prefer individual fields, fall back to array
-            const has_pk = def.is_primary_key or Constraint.hasPrimaryKey(def.constraints);
-            const has_unique = def.is_unique or Constraint.hasUnique(def.constraints);
-            const is_not_null = def.is_not_null or !Constraint.hasNullable(def.constraints);
-
-            if (has_pk) {
-                try writer.writeAll(" PRIMARY KEY");
-            } else {
-                if (is_not_null) {
-                    try writer.writeAll(" NOT NULL");
-                }
-                if (has_unique) {
-                    try writer.writeAll(" UNIQUE");
-                }
-            }
-
-            // Handle DEFAULT value - prefer individual field
-            if (def.default_value) |dv| {
-                try writer.writeAll(" DEFAULT ");
-                try writer.writeAll(dv);
-            } else if (Constraint.getDefault(def.constraints)) |dv| {
-                try writer.writeAll(" DEFAULT ");
-                try writer.writeAll(dv);
-            }
-
-            // Handle REFERENCES - prefer individual field
-            if (def.references) |ref| {
-                try writer.writeAll(" REFERENCES ");
-                try writer.writeAll(ref);
-            } else {
-                for (def.constraints) |c| {
-                    if (c == .references) {
-                        try writer.writeAll(" REFERENCES ");
-                        try writer.writeAll(c.references);
-                    }
-                }
-            }
-        },
-        .window => |w| {
-            // name(args) OVER (PARTITION BY ... ORDER BY ...)
-            try writer.writeAll(w.func);
-            try writer.writeAll("() OVER (");
-            if (w.partition.len > 0) {
-                try writer.writeAll("PARTITION BY ");
-                for (w.partition, 0..) |col, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(col);
-                }
-            }
-            if (w.order.len > 0) {
-                if (w.partition.len > 0) try writer.writeAll(" ");
-                try writer.writeAll("ORDER BY ");
-                for (w.order, 0..) |o, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(o.column);
-                    try writer.writeAll(if (o.direction == .asc) " ASC" else " DESC");
-                }
-            }
-            try writer.writeByte(')');
-            if (w.alias) |a| {
-                try writer.writeAll(" AS ");
-                try writer.writeAll(a);
-            }
-        },
+        .column_def => |def| try writeColumnDefExpr(writer, def),
+        .window => |w| try writeWindowExpr(writer, w),
         .col_mod => |m| {
             // +col or -col for ALTER TABLE
             if (m.kind == .add) {
@@ -1266,6 +1199,75 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             }
         },
         else => {},
+    }
+}
+
+fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
+    const Constraint = @import("../ast/expr.zig").Constraint;
+
+    try writer.writeAll(def.name);
+    try writer.writeAll(" ");
+    try writer.writeAll(def.data_type);
+
+    const has_pk = def.is_primary_key or Constraint.hasPrimaryKey(def.constraints);
+    const has_unique = def.is_unique or Constraint.hasUnique(def.constraints);
+    const is_not_null = def.is_not_null or !Constraint.hasNullable(def.constraints);
+
+    if (has_pk) {
+        try writer.writeAll(" PRIMARY KEY");
+    } else {
+        if (is_not_null) {
+            try writer.writeAll(" NOT NULL");
+        }
+        if (has_unique) {
+            try writer.writeAll(" UNIQUE");
+        }
+    }
+
+    if (def.default_value) |dv| {
+        try writer.writeAll(" DEFAULT ");
+        try writer.writeAll(dv);
+    } else if (Constraint.getDefault(def.constraints)) |dv| {
+        try writer.writeAll(" DEFAULT ");
+        try writer.writeAll(dv);
+    }
+
+    if (def.references) |ref| {
+        try writer.writeAll(" REFERENCES ");
+        try writer.writeAll(ref);
+    } else {
+        for (def.constraints) |c| {
+            if (c == .references) {
+                try writer.writeAll(" REFERENCES ");
+                try writer.writeAll(c.references);
+            }
+        }
+    }
+}
+
+fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
+    try writer.writeAll(w.func);
+    try writer.writeAll("() OVER (");
+    if (w.partition.len > 0) {
+        try writer.writeAll("PARTITION BY ");
+        for (w.partition, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(col);
+        }
+    }
+    if (w.order.len > 0) {
+        if (w.partition.len > 0) try writer.writeAll(" ");
+        try writer.writeAll("ORDER BY ");
+        for (w.order, 0..) |o, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(o.column);
+            try writer.writeAll(if (o.direction == .asc) " ASC" else " DESC");
+        }
+    }
+    try writer.writeByte(')');
+    if (w.alias) |a| {
+        try writer.writeAll(" AS ");
+        try writer.writeAll(a);
     }
 }
 

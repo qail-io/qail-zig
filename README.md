@@ -5,7 +5,7 @@
 [![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.3-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.6.3)
+[![Version](https://img.shields.io/badge/version-0.7.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.7.0)
 
 > **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
@@ -33,15 +33,15 @@
 
 ### I/O: PostgreSQL Driver Matrix
 
-The current public benchmark is the shared-surface `qail-zig` versus `pg.zig` matrix, measured on March 30, 2026 from the dedicated `qail_pgzig_bench` harness. It publishes 3-round medians across five workloads and two execution modes.
+The current public benchmark is the shared-surface `qail-zig` versus `pg.zig` matrix, measured on March 31, 2026 from the dedicated `qail_pgzig_bench` harness. It publishes 5-round medians across five workloads and two execution modes.
 
 | Workload | `single` (`pg.zig` / `qail-zig`) | `pool10` (`pg.zig` / `qail-zig`) |
 |----------|----------------------------------|----------------------------------|
-| **point** | 19,535 / **44,862** q/s | 72,251 / **158,675** q/s |
-| **wide_rows** | 4,544 / **5,474** q/s | 16,246 / **19,062** q/s |
-| **large_rows** | 88.306 / **90.000** q/s | 279.950 / **306.865** q/s |
-| **many_params** | 19,118 / **41,570** q/s | 71,257 / **153,386** q/s |
-| **aggregate** | 228.241 / **236.793** q/s | 1,438.975 / **1,474.389** q/s |
+| **point** | 21,551 / **47,010** q/s | 79,728 / **169,726** q/s |
+| **wide_rows** | 4,615 / **5,477** q/s | 19,300 / **22,400** q/s |
+| **large_rows** | 91.058 / **95.391** q/s | 352.523 / **368.215** q/s |
+| **many_params** | 20,690 / **42,579** q/s | 79,165 / **166,296** q/s |
+| **aggregate** | 279.372 / **282.205** q/s | 1,976.256 / **2,036.974** q/s |
 
 > Current public read: qail-zig leads the published shared throughput slices against `pg.zig` on the matched prepared-statement surface.
 

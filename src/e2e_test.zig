@@ -44,16 +44,18 @@ pub fn main() !void {
 
     // ── Test 2: DDL — Create Table ───────────────────────────
     std.debug.print("  [2] CREATE TABLE qail_test...", .{});
-    _ = driver.executeRaw("DROP TABLE IF EXISTS qail_test") catch {};
-    _ = driver.executeRaw(
-        \\CREATE TABLE qail_test (
-        \\  id SERIAL PRIMARY KEY,
-        \\  name TEXT NOT NULL,
-        \\  price NUMERIC(10,2) DEFAULT 0,
-        \\  active BOOLEAN DEFAULT true,
-        \\  created_at TIMESTAMPTZ DEFAULT NOW()
-        \\)
-    ) catch |err| {
+    const drop_cmd = QailCmd.drop("qail_test");
+    _ = driver.execute(&drop_cmd) catch {};
+
+    const ddl_cols = [_]Expr{
+        Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
+        Expr.defWithConstraints("name", "TEXT", &.{.not_null}),
+        Expr.defWithConstraints("price", "NUMERIC(10,2)", &.{.{ .default = "0" }}),
+        Expr.defWithConstraints("active", "BOOLEAN", &.{.{ .default = "true" }}),
+        Expr.defWithConstraints("created_at", "TIMESTAMPTZ", &.{.{ .default = "NOW()" }}),
+    };
+    const create_cmd = QailCmd.make("qail_test").select(&ddl_cols);
+    _ = driver.execute(&create_cmd) catch |err| {
         std.debug.print(" ✗ FAILED: {}\n", .{err});
         failed += 1;
         return;
@@ -335,7 +337,8 @@ pub fn main() !void {
 
     // ── Test 12: Cleanup ─────────────────────────────────────
     std.debug.print(" [12] DROP TABLE qail_test...", .{});
-    _ = driver.executeRaw("DROP TABLE qail_test") catch |err| {
+    const cleanup_cmd = QailCmd.drop("qail_test");
+    _ = driver.execute(&cleanup_cmd) catch |err| {
         std.debug.print(" ✗ FAILED: {}\n", .{err});
         failed += 1;
         return;

@@ -26,6 +26,8 @@ pub const rls = @import("rls.zig");
 pub const connect_url = @import("connect_url.zig");
 pub const notification = @import("notification.zig");
 pub const replication = @import("replication.zig");
+pub const raw_sql = @import("raw_sql.zig");
+pub const raw_cmd = @import("raw_cmd.zig");
 
 // Re-export main types
 pub const Connection = connection.Connection;

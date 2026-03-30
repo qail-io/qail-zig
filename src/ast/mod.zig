@@ -9,6 +9,7 @@ pub const values = @import("values.zig");
 pub const operators = @import("operators.zig");
 pub const cages = @import("cages.zig");
 pub const builders = @import("builders/mod.zig");
+pub const raw_cmd = @import("raw_cmd.zig");
 
 // Re-export main types
 pub const QailCmd = cmd.QailCmd;

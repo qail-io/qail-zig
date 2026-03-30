@@ -10,6 +10,8 @@ const Allocator = std.mem.Allocator;
 const print = std.debug.print;
 const io = @import("compat/io.zig");
 const PgDriver = @import("driver/driver.zig").PgDriver;
+const data_safety_mod = @import("data_safety/mod.zig");
+const snapshot_ops = data_safety_mod.snapshot;
 const differ = @import("parser/differ.zig");
 const MigrationCmd = differ.MigrationCmd;
 
@@ -286,28 +288,15 @@ pub fn promptBackupOptions() BackupChoice {
 // ============================================================================
 
 /// DDL for _qail_data_snapshots table
-pub const SNAPSHOT_TABLE_DDL =
-    \\CREATE TABLE IF NOT EXISTS _qail_data_snapshots (
-    \\    id SERIAL PRIMARY KEY,
-    \\    migration_version VARCHAR(255) NOT NULL,
-    \\    table_name VARCHAR(255) NOT NULL,
-    \\    column_name VARCHAR(255),
-    \\    row_id TEXT NOT NULL,
-    \\    value_json JSONB NOT NULL,
-    \\    snapshot_type VARCHAR(50) NOT NULL,
-    \\    created_at TIMESTAMPTZ DEFAULT NOW()
-    \\)
-;
+pub const SNAPSHOT_TABLE_DDL = snapshot_ops.SNAPSHOT_TABLE_DDL;
 
-/// Ensure snapshot table exists (uses AST-tracked raw for DDL)
+/// Ensure snapshot table exists (uses AST-tracked raw helper for DDL)
 pub fn ensureSnapshotTable(conn: *PgDriver) !void {
-    const QailCmd = @import("ast/cmd.zig").QailCmd;
-    const create_cmd = QailCmd.raw(SNAPSHOT_TABLE_DDL);
-    _ = try conn.execute(&create_cmd);
+    return snapshot_ops.ensureSnapshotTable(conn);
 }
 
 /// Backup a column before dropping (Phase 2)
-/// Note: Uses raw SQL via AST-tracked QailCmd.raw for complex INSERT...SELECT
+/// Note: Uses raw SQL via AST-tracked raw command helper for complex INSERT...SELECT
 pub fn snapshotColumnToDb(
     allocator: Allocator,
     conn: *PgDriver,
@@ -315,50 +304,18 @@ pub fn snapshotColumnToDb(
     table: []const u8,
     column: []const u8,
 ) !u64 {
-    const QailCmd = @import("ast/cmd.zig").QailCmd;
-
-    var sql_writer = io.AllocatingWriter.init(allocator);
-    defer sql_writer.deinit();
-    try sql_writer.writer().print(
-        \\INSERT INTO _qail_data_snapshots 
-        \\(migration_version, table_name, column_name, row_id, value_json, snapshot_type)
-        \\SELECT '{s}', '{s}', '{s}', id::text, to_jsonb({s}), 'DROP_COLUMN'
-        \\FROM {s} WHERE {s} IS NOT NULL
-    , .{ version, table, column, column, table, column });
-    const sql = try sql_writer.toOwnedSlice();
-    defer allocator.free(sql);
-
-    // AST-tracked raw SQL (not truly AST-native, but tracked)
-    const insert_cmd = QailCmd.raw(sql);
-    _ = try conn.execute(&insert_cmd);
-    return 0; // TODO: Get affected row count
+    return snapshot_ops.snapshotColumnToDb(allocator, conn, version, table, column);
 }
 
 /// Backup a table before dropping (Phase 2)
-/// Note: Uses raw SQL via AST-tracked QailCmd.raw for complex INSERT...SELECT
+/// Note: Uses raw SQL via AST-tracked raw command helper for complex INSERT...SELECT
 pub fn snapshotTableToDb(
     allocator: Allocator,
     conn: *PgDriver,
     version: []const u8,
     table: []const u8,
 ) !u64 {
-    const QailCmd = @import("ast/cmd.zig").QailCmd;
-
-    var sql_writer = io.AllocatingWriter.init(allocator);
-    defer sql_writer.deinit();
-    try sql_writer.writer().print(
-        \\INSERT INTO _qail_data_snapshots 
-        \\(migration_version, table_name, column_name, row_id, value_json, snapshot_type)
-        \\SELECT '{s}', '{s}', NULL, id::text, to_jsonb(t.*), 'DROP_TABLE'
-        \\FROM {s} t
-    , .{ version, table, table });
-    const sql = try sql_writer.toOwnedSlice();
-    defer allocator.free(sql);
-
-    // AST-tracked raw SQL
-    const insert_cmd = QailCmd.raw(sql);
-    _ = try conn.execute(&insert_cmd);
-    return 0; // TODO: Get affected row count
+    return snapshot_ops.snapshotTableToDb(allocator, conn, version, table);
 }
 
 /// Create database snapshots for all destructive operations

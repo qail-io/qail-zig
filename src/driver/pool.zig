@@ -6,81 +6,15 @@
 
 const std = @import("std");
 const Connection = @import("connection.zig").Connection;
+const config_mod = @import("pool/config.zig");
 const protocol = @import("../protocol/mod.zig");
 const rls_mod = @import("rls.zig");
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
-
+pub const PoolConfig = config_mod.PoolConfig;
+pub const parseUri = config_mod.parseUri;
 /// Callback type for scoped pool helpers (`withRls`, `withTenant`, etc.).
 pub const ScopedPoolOp = *const fn (*PooledConnection) anyerror!void;
-
-/// Connection pool configuration
-pub const PoolConfig = struct {
-    host: []const u8,
-    port: u16,
-    user: []const u8,
-    database: []const u8,
-    password: ?[]const u8 = null,
-    max_connections: usize = 10,
-    min_connections: usize = 1,
-    idle_timeout_ms: i64 = 600_000, // 10 minutes
-    acquire_timeout_ms: i32 = 30_000, // 30 seconds
-    reconnect_interval_ms: u64 = 5_000, // 5 seconds
-};
-
-/// Parse PostgreSQL connection URI
-/// Format: postgresql://user:password@host:port/database
-pub fn parseUri(uri: []const u8) !PoolConfig {
-    // Simple parser for postgresql:// URIs
-    const prefix = "postgresql://";
-    if (!std.mem.startsWith(u8, uri, prefix)) {
-        return error.InvalidUri;
-    }
-
-    const body = uri[prefix.len..];
-
-    // Extract user:password@host:port/database
-    var user: []const u8 = "postgres";
-    var password: ?[]const u8 = null;
-    var host: []const u8 = "127.0.0.1";
-    var port: u16 = 5432;
-    var database: []const u8 = "postgres";
-
-    // Find @ separator (user:pass before, host:port/db after)
-    if (std.mem.indexOf(u8, body, "@")) |at_pos| {
-        const auth = body[0..at_pos];
-        const rest = body[at_pos + 1 ..];
-
-        // Parse user:password
-        if (std.mem.indexOf(u8, auth, ":")) |colon_pos| {
-            user = auth[0..colon_pos];
-            password = auth[colon_pos + 1 ..];
-        } else {
-            user = auth;
-        }
-
-        // Parse host:port/database
-        if (std.mem.indexOf(u8, rest, "/")) |slash_pos| {
-            const host_port = rest[0..slash_pos];
-            database = rest[slash_pos + 1 ..];
-
-            if (std.mem.indexOf(u8, host_port, ":")) |hp_colon| {
-                host = host_port[0..hp_colon];
-                port = std.fmt.parseInt(u16, host_port[hp_colon + 1 ..], 10) catch 5432;
-            } else {
-                host = host_port;
-            }
-        }
-    }
-
-    return PoolConfig{
-        .host = host,
-        .port = port,
-        .user = user,
-        .password = password,
-        .database = database,
-    };
-}
 
 /// Internal pooled connection with timestamp
 const PooledConn = struct {
