@@ -22,7 +22,7 @@ Example:
 
 ```bash
 zig test src/lib.zig -target aarch64-macos.15.0 -fno-emit-bin
-zig build-exe src/qail_pgx_modes_once.zig -target aarch64-macos.15.0 -O ReleaseFast
+zig build-exe src/qail_pgzig_bench.zig -target aarch64-macos.15.0 -O ReleaseFast
 ```
 
 This is an environment/toolchain issue, not a qail-zig protocol issue.

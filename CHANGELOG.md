@@ -2,6 +2,17 @@
 
 This changelog tracks qail-zig releases separately from qail.rs.
 
+## Unreleased
+
+### Changed
+
+- Benchmark docs/readme/changelog copy now consistently frames the current public result as the `qail-zig` versus `pg.zig` shared-surface matrix, with more neutral peer-to-peer wording.
+- Benchmark docs now point to the dedicated `qail_pgzig_bench.zig` harness and the five published workloads: `point`, `wide_rows`, `large_rows`, `many_params`, and `aggregate`.
+
+### Removed
+
+- Deleted obsolete benchmark sources that still described an older FFI-era comparison and a non-equivalent 10M pipeline projection.
+
 ## v0.6.3 — 2026-03-30
 
 ### Changed

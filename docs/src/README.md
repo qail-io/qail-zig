@@ -8,7 +8,7 @@ QAIL Zig is the active pure-Zig implementation of the QAIL PostgreSQL stack. It 
 
 - qail-zig is active again and no longer documented as deferred.
 - PG driver hardening now includes AST sanitization, stricter startup/auth sequencing, COPY fail-closed checks, and replication hardening suites.
-- Three-way benchmark harnesses now compare `pgx`, qail.rs, and qail-zig directly.
+- The current public benchmark story is now the dedicated qail-zig versus `pg.zig` shared-surface matrix.
 - qail-zig now has its own versioned changelog and docs track.
 
 ## What QAIL Zig Covers

@@ -13,7 +13,7 @@
 >
 > **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated pure-Zig driver implementation.
 
-> Pure Zig, zero FFI, zero GC. Latest isolated prepared-point 12-sample medians against `pgx` and qail.rs: **48.3K** single, **561K** pipeline, **163K** pool10.
+> Pure Zig, zero FFI, zero GC. Current published driver matrix against `pg.zig`: qail-zig leads the `single` and `pool10` slices across `point`, `wide_rows`, `large_rows`, `many_params`, and `aggregate`.
 
 - Docs: `dev.qail.io/zig/docs`
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
@@ -31,26 +31,26 @@
 
 ## Benchmarks
 
-### I/O: PostgreSQL Query Throughput
+### I/O: PostgreSQL Driver Matrix
 
-Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_staging`, measured on March 30, 2026. The published table below is the narrow `point` workload (`SELECT id, name FROM harbors WHERE id = $1`), not a blanket claim about every query shape.
+The current public benchmark is the shared-surface `qail-zig` versus `pg.zig` matrix, measured on March 30, 2026 from the dedicated `qail_pgzig_bench` harness. It publishes 3-round medians across five workloads and two execution modes.
 
-| Benchmark | pgx (Go) | qail.rs (Rust) | qail-zig |
-|-----------|----------|----------------|----------|
-| **Single (prepared, 1 conn)** | 38,148 q/s | 40,725 q/s | **48,337 q/s** |
-| **Pipeline (prepared batch, 1 conn)** | 473,362 q/s | **571,663 q/s** | 561,055 q/s |
-| **Pool10 (prepared singles, 10 conns)** | 130,042 q/s | **167,746 q/s** | 163,038 q/s |
-| **Build time** | n/a | ~30s | <2s |
-| **Binary size** | n/a | ~2MB | ~200KB |
+| Workload | `single` (`pg.zig` / `qail-zig`) | `pool10` (`pg.zig` / `qail-zig`) |
+|----------|----------------------------------|----------------------------------|
+| **point** | 19,535 / **44,862** q/s | 72,251 / **158,675** q/s |
+| **wide_rows** | 4,544 / **5,474** q/s | 16,246 / **19,062** q/s |
+| **large_rows** | 88.306 / **90.000** q/s | 279.950 / **306.865** q/s |
+| **many_params** | 19,118 / **41,570** q/s | 71,257 / **153,386** q/s |
+| **aggregate** | 228.241 / **236.793** q/s | 1,438.975 / **1,474.389** q/s |
 
-> Performance topology: Zig currently owns the narrow prepared single-query slice, while Rust leads the same published prepared-point harness on pipeline and pool10. Both stay well ahead of `pgx` on the current public surface.
+> Current public read: qail-zig leads the published shared throughput slices against `pg.zig` on the matched prepared-statement surface.
 
-The harness now also supports two broader stress workloads:
+That is the current published Zig driver comparison. It is stricter than the older narrow prepared-point page because:
 
-- `wide_rows` — large result sets with wide rows and mixed nullable/text/numeric columns, to test receive/decode cost
-- `many_params` — parameter-heavy prepared query, to test bind/encode overhead directly
-
-Those scenarios exist specifically to check whether the current edge survives outside tiny prepared lookups.
+- qail-zig workloads are authored as native `QailCmd` ASTs
+- qail-zig compiles them once to prepared SQL templates and runs them through its prepared protocol path
+- `pg.zig` executes the same prepared SQL templates through its cached prepared-query path
+- only `single` and `pool10` are compared so the published page stays on the clearest shared modes between the two drivers
 
 ### CPU: AST Build + Transpile (1M iterations)
 
@@ -68,7 +68,8 @@ Those scenarios exist specifically to check whether the current edge survives ou
 ```bash
 # Run benchmarks
 zig build ast-bench          # AST benchmark
-zig build bench              # I/O benchmark (requires PostgreSQL)
+zig build pgzig-bench -- qail single --workload point
+zig build pgzig-bench -- pgzig pool10 --workload many_params
 ```
 
 ## Installation
@@ -359,7 +360,7 @@ src/
 ## Related Projects
 
 - [qail.rs](https://github.com/qail-io/qail) — Rust implementation with language bindings
-- [pg.zig](https://github.com/karlseguin/pg.zig) — Alternative Zig PG driver
+- [pg.zig](https://github.com/karlseguin/pg.zig) — Established Zig PostgreSQL driver
 
 ## License
 

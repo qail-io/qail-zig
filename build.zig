@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const pg_mod = b.dependency("pg", .{}).module("pg");
 
     // ==================== Library Module ====================
     // The main QAIL Zig library (pure Zig, no FFI)
@@ -182,6 +183,29 @@ pub fn build(b: *std.Build) void {
     run_fair.step.dependOn(b.getInstallStep());
     const fair_step = b.step("fair", "Run fair Rust-matching benchmark");
     fair_step.dependOn(&run_fair.step);
+
+    // ==================== pg.zig Comparison Benchmark ====================
+    const pgzig_compare = b.addExecutable(.{
+        .name = "qail-pgzig-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/qail_pgzig_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+                .{ .name = "pg", .module = pg_mod },
+            },
+        }),
+    });
+    b.installArtifact(pgzig_compare);
+
+    const run_pgzig_compare = b.addRunArtifact(pgzig_compare);
+    run_pgzig_compare.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_pgzig_compare.addArgs(args);
+    }
+    const pgzig_compare_step = b.step("pgzig-bench", "Run qail-zig vs pg.zig benchmark");
+    pgzig_compare_step.dependOn(&run_pgzig_compare.step);
 
     // ==================== AST Bench Executable ====================
     const ast_bench = b.addExecutable(.{
