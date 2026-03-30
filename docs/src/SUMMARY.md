@@ -18,7 +18,7 @@
 
 # Benchmarks
 
-- [Throughput Benchmarks](./benchmarks.md)
+- [Benchmarks](./benchmarks.md)
 
 # Parity
 

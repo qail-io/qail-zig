@@ -2,6 +2,14 @@
 
 This changelog tracks qail-zig releases separately from qail.rs.
 
+## v0.6.3 — 2026-03-30
+
+### Changed
+
+- The canonical public benchmark page now lives at `/zig/benchmarks`, and the published three-way prepared-point medians were refreshed to the March 30, 2026 12-round snapshot.
+- Public benchmark interpretation was updated to the current shape: qail-zig leads prepared single-query throughput, while qail.rs currently leads the same prepared-point harness on pipeline and pool10.
+- README/docs/changelog references were bumped to `v0.6.3`.
+
 ## v0.6.2 — 2026-03-28
 
 ### Fixed

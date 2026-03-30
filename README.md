@@ -5,7 +5,7 @@
 [![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.6.2-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.6.2)
+[![Version](https://img.shields.io/badge/version-0.6.3-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.6.3)
 
 > **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
@@ -13,7 +13,7 @@
 >
 > **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated pure-Zig driver implementation.
 
-> Pure Zig, zero FFI, zero GC. Latest isolated medians against `pgx` and qail.rs: **48.6K** single, **542K** pipeline, **147K** pool10.
+> Pure Zig, zero FFI, zero GC. Latest isolated prepared-point 12-sample medians against `pgx` and qail.rs: **48.3K** single, **561K** pipeline, **163K** pool10.
 
 - Docs: `dev.qail.io/zig/docs`
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
@@ -33,17 +33,17 @@
 
 ### I/O: PostgreSQL Query Throughput
 
-Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_staging`, measured on March 27, 2026. The published table below is the narrow `point` workload (`SELECT id, name FROM harbors WHERE id = $1`), not a blanket claim about every query shape.
+Isolated 12-sample medians from the `qail_pgx_modes_once` harness on `example_staging`, measured on March 30, 2026. The published table below is the narrow `point` workload (`SELECT id, name FROM harbors WHERE id = $1`), not a blanket claim about every query shape.
 
 | Benchmark | pgx (Go) | qail.rs (Rust) | qail-zig |
 |-----------|----------|----------------|----------|
-| **Single (prepared, 1 conn)** | 35,530 q/s | 39,303 q/s | **48,561 q/s** |
-| **Pipeline (prepared batch, 1 conn)** | 456,955 q/s | **572,791 q/s** | 542,388 q/s |
-| **Pool10 (prepared singles, 10 conns)** | 96,741 q/s | 135,182 q/s | **147,078 q/s** |
+| **Single (prepared, 1 conn)** | 38,148 q/s | 40,725 q/s | **48,337 q/s** |
+| **Pipeline (prepared batch, 1 conn)** | 473,362 q/s | **571,663 q/s** | 561,055 q/s |
+| **Pool10 (prepared singles, 10 conns)** | 130,042 q/s | **167,746 q/s** | 163,038 q/s |
 | **Build time** | n/a | ~30s | <2s |
 | **Binary size** | n/a | ~2MB | ~200KB |
 
-> Performance topology: Zig maximizes single-query latencies and pool concurrency; Rust optimizes for throughput via intermediate pipeline caching.
+> Performance topology: Zig currently owns the narrow prepared single-query slice, while Rust leads the same published prepared-point harness on pipeline and pool10. Both stay well ahead of `pgx` on the current public surface.
 
 The harness now also supports two broader stress workloads:
 

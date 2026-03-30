@@ -1,4 +1,6 @@
-# Throughput Benchmarks
+# QAIL Zig Benchmarks
+
+The current public benchmark page is published at `/zig/benchmarks` on `dev.qail.io`.
 
 The current benchmark story for qail-zig is based on direct three-way comparisons between:
 
@@ -46,14 +48,14 @@ zig build-exe src/qail_pgx_modes_once.zig -target aarch64-macos.15.0 -O ReleaseF
 
 | Benchmark | pgx (Go) | qail.rs (Rust) | qail-zig |
 |-----------|----------|----------------|----------|
-| Single | 35,530 q/s | 39,303 q/s | **48,561 q/s** |
-| Pipeline | 456,955 q/s | **572,791 q/s** | 542,388 q/s |
-| Pool10 | 96,741 q/s | 135,182 q/s | **147,078 q/s** |
+| Single | 38,148 q/s | 40,725 q/s | **48,337 q/s** |
+| Pipeline | 473,362 q/s | **571,663 q/s** | 561,055 q/s |
+| Pool10 | 130,042 q/s | **167,746 q/s** | 163,038 q/s |
 
 ## Reading the Results
 
-- Zig currently leads on `single` and `pool10` in this harness.
-- Rust still leads on `pipeline`.
+- Zig currently leads on `single` in this harness.
+- Rust currently leads on `pipeline` and `pool10`.
 - `pool10` is the noisiest mode and should always be read with variance, not just peak numbers.
 - The published table is intentionally narrow. It does not by itself prove superiority on wide result sets, decode/materialization, or parameter-heavy queries.
 - `wide_rows` is the best next receive-path benchmark.
