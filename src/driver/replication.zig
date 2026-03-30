@@ -1,0 +1,352 @@
+const std = @import("std");
+const row_mod = @import("row.zig");
+
+const PgRow = row_mod.PgRow;
+
+pub const MAX_REPLICATION_OPTIONS: usize = 64;
+pub const MAX_REPLICATION_OPTION_VALUE_BYTES: usize = 16 * 1024;
+pub const MAX_REPLICATION_XLOGDATA_BYTES: usize = 16 * 1024 * 1024;
+
+/// Startup metadata from `IDENTIFY_SYSTEM`.
+pub const IdentifySystem = struct {
+    system_id: []u8,
+    timeline: u32,
+    xlog_pos: []u8,
+    dbname: ?[]u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *IdentifySystem) void {
+        self.allocator.free(self.system_id);
+        self.allocator.free(self.xlog_pos);
+        if (self.dbname) |dbname| self.allocator.free(dbname);
+    }
+};
+
+/// Output from `CREATE_REPLICATION_SLOT ... LOGICAL ...`.
+pub const ReplicationSlotInfo = struct {
+    slot_name: []u8,
+    consistent_point: []u8,
+    snapshot_name: ?[]u8,
+    output_plugin: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *ReplicationSlotInfo) void {
+        self.allocator.free(self.slot_name);
+        self.allocator.free(self.consistent_point);
+        if (self.snapshot_name) |snapshot_name| self.allocator.free(snapshot_name);
+        self.allocator.free(self.output_plugin);
+    }
+};
+
+/// Logical replication option (`k 'v'`) used by START_REPLICATION.
+pub const ReplicationOption = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+/// Metadata returned by START_REPLICATION CopyBoth response.
+pub const ReplicationStreamStart = struct {
+    format: u8,
+    column_formats: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *ReplicationStreamStart) void {
+        self.allocator.free(self.column_formats);
+    }
+};
+
+/// Replication XLogData message (`CopyData('w'...)`).
+pub const ReplicationXLogData = struct {
+    wal_start: u64,
+    wal_end: u64,
+    server_time_micros: i64,
+    data: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *ReplicationXLogData) void {
+        self.allocator.free(self.data);
+    }
+};
+
+/// Primary keepalive message (`CopyData('k'...)`).
+pub const ReplicationKeepalive = struct {
+    wal_end: u64,
+    server_time_micros: i64,
+    reply_requested: bool,
+};
+
+/// Replication stream message parsed from CopyData payload.
+pub const ReplicationStreamMessage = union(enum) {
+    xlog_data: ReplicationXLogData,
+    keepalive: ReplicationKeepalive,
+    raw: struct {
+        tag: u8,
+        payload: []u8,
+        allocator: std.mem.Allocator,
+    },
+
+    pub fn deinit(self: *ReplicationStreamMessage) void {
+        switch (self.*) {
+            .xlog_data => |*x| x.deinit(),
+            .keepalive => {},
+            .raw => |r| r.allocator.free(r.payload),
+        }
+    }
+};
+
+pub fn parseLsnText(lsn: []const u8) !u64 {
+    const slash = std.mem.indexOfScalar(u8, lsn, '/') orelse return error.InvalidLsn;
+    if (slash == 0 or slash == lsn.len - 1) return error.InvalidLsn;
+    if (std.mem.indexOfScalarPos(u8, lsn, slash + 1, '/') != null) return error.InvalidLsn;
+
+    const high = std.fmt.parseInt(u32, lsn[0..slash], 16) catch return error.InvalidLsn;
+    const low = std.fmt.parseInt(u32, lsn[slash + 1 ..], 16) catch return error.InvalidLsn;
+    return (@as(u64, high) << 32) | low;
+}
+
+pub fn buildCreateLogicalReplicationSlotSql(
+    allocator: std.mem.Allocator,
+    slot_name: []const u8,
+    output_plugin: []const u8,
+    temporary: bool,
+    two_phase: bool,
+) ![]u8 {
+    try validateIdent("slot_name", slot_name);
+    try validateIdent("output_plugin", output_plugin);
+
+    var sql: std.ArrayListUnmanaged(u8) = .{};
+    errdefer sql.deinit(allocator);
+
+    try sql.appendSlice(allocator, "CREATE_REPLICATION_SLOT ");
+    try sql.appendSlice(allocator, slot_name);
+    if (temporary) try sql.appendSlice(allocator, " TEMPORARY");
+    try sql.appendSlice(allocator, " LOGICAL ");
+    try sql.appendSlice(allocator, output_plugin);
+    if (two_phase) try sql.appendSlice(allocator, " TWO_PHASE");
+
+    return try sql.toOwnedSlice(allocator);
+}
+
+pub fn buildDropReplicationSlotSql(
+    allocator: std.mem.Allocator,
+    slot_name: []const u8,
+    wait: bool,
+) ![]u8 {
+    try validateIdent("slot_name", slot_name);
+
+    var sql: std.ArrayListUnmanaged(u8) = .{};
+    errdefer sql.deinit(allocator);
+
+    try sql.appendSlice(allocator, "DROP_REPLICATION_SLOT ");
+    try sql.appendSlice(allocator, slot_name);
+    if (wait) try sql.appendSlice(allocator, " WAIT");
+    return try sql.toOwnedSlice(allocator);
+}
+
+pub fn buildStartLogicalReplicationSql(
+    allocator: std.mem.Allocator,
+    slot_name: []const u8,
+    start_lsn: []const u8,
+    options: []const ReplicationOption,
+) ![]u8 {
+    try validateIdent("slot_name", slot_name);
+    _ = try parseLsnText(start_lsn);
+
+    if (options.len > MAX_REPLICATION_OPTIONS) return error.InvalidReplicationOption;
+
+    var sql: std.ArrayListUnmanaged(u8) = .{};
+    errdefer sql.deinit(allocator);
+
+    try sql.appendSlice(allocator, "START_REPLICATION SLOT ");
+    try sql.appendSlice(allocator, slot_name);
+    try sql.appendSlice(allocator, " LOGICAL ");
+    try sql.appendSlice(allocator, start_lsn);
+
+    if (options.len != 0) {
+        try sql.appendSlice(allocator, " (");
+        for (options, 0..) |opt, i| {
+            try validateIdent("replication option key", opt.key);
+            if (opt.value.len > MAX_REPLICATION_OPTION_VALUE_BYTES) return error.InvalidReplicationOption;
+
+            if (i > 0) try sql.appendSlice(allocator, ", ");
+            try sql.appendSlice(allocator, opt.key);
+            try sql.appendSlice(allocator, " '");
+
+            const escaped = try quoteSingleLiteralAlloc(allocator, opt.value);
+            defer allocator.free(escaped);
+            try sql.appendSlice(allocator, escaped);
+            try sql.append(allocator, '\'');
+        }
+        try sql.append(allocator, ')');
+    }
+
+    return try sql.toOwnedSlice(allocator);
+}
+
+pub fn parseIdentifySystemRow(allocator: std.mem.Allocator, row: *const PgRow) !IdentifySystem {
+    const system_id_raw = row.getString(0) orelse return error.InvalidReplicationResponse;
+    const timeline_raw = row.getString(1) orelse return error.InvalidReplicationResponse;
+    const xlog_pos_raw = row.getString(2) orelse return error.InvalidReplicationResponse;
+
+    const timeline = std.fmt.parseInt(u32, timeline_raw, 10) catch return error.InvalidReplicationResponse;
+    const system_id = try allocator.dupe(u8, system_id_raw);
+    errdefer allocator.free(system_id);
+    const xlog_pos = try allocator.dupe(u8, xlog_pos_raw);
+    errdefer allocator.free(xlog_pos);
+
+    var dbname: ?[]u8 = null;
+    if (row.getString(3)) |dbname_raw| {
+        if (dbname_raw.len != 0) {
+            dbname = try allocator.dupe(u8, dbname_raw);
+        }
+    }
+
+    return .{
+        .system_id = system_id,
+        .timeline = timeline,
+        .xlog_pos = xlog_pos,
+        .dbname = dbname,
+        .allocator = allocator,
+    };
+}
+
+pub fn parseCreateSlotRow(allocator: std.mem.Allocator, row: *const PgRow) !ReplicationSlotInfo {
+    const slot_name_raw = row.getString(0) orelse return error.InvalidReplicationResponse;
+    const consistent_point_raw = row.getString(1) orelse return error.InvalidReplicationResponse;
+    const output_plugin_raw = row.getString(3) orelse return error.InvalidReplicationResponse;
+
+    const slot_name = try allocator.dupe(u8, slot_name_raw);
+    errdefer allocator.free(slot_name);
+    const consistent_point = try allocator.dupe(u8, consistent_point_raw);
+    errdefer allocator.free(consistent_point);
+    const output_plugin = try allocator.dupe(u8, output_plugin_raw);
+    errdefer allocator.free(output_plugin);
+
+    var snapshot_name: ?[]u8 = null;
+    if (row.getString(2)) |snapshot_name_raw| {
+        if (snapshot_name_raw.len != 0) {
+            snapshot_name = try allocator.dupe(u8, snapshot_name_raw);
+        }
+    }
+
+    return .{
+        .slot_name = slot_name,
+        .consistent_point = consistent_point,
+        .snapshot_name = snapshot_name,
+        .output_plugin = output_plugin,
+        .allocator = allocator,
+    };
+}
+
+pub fn parseReplicationCopyData(allocator: std.mem.Allocator, payload: []const u8) !ReplicationStreamMessage {
+    if (payload.len == 0) return error.InvalidReplicationCopyData;
+
+    switch (payload[0]) {
+        'w' => {
+            if (payload.len < 25) return error.InvalidReplicationCopyData;
+
+            const wal_start = std.mem.readInt(u64, payload[1..9], .big);
+            const wal_end = std.mem.readInt(u64, payload[9..17], .big);
+            const server_time_micros = std.mem.readInt(i64, payload[17..25], .big);
+
+            if (wal_end < wal_start) return error.InvalidReplicationCopyData;
+
+            const data_len = payload.len - 25;
+            if (data_len > MAX_REPLICATION_XLOGDATA_BYTES) return error.InvalidReplicationCopyData;
+
+            return .{ .xlog_data = .{
+                .wal_start = wal_start,
+                .wal_end = wal_end,
+                .server_time_micros = server_time_micros,
+                .data = try allocator.dupe(u8, payload[25..]),
+                .allocator = allocator,
+            } };
+        },
+        'k' => {
+            if (payload.len != 18) return error.InvalidReplicationCopyData;
+
+            const wal_end = std.mem.readInt(u64, payload[1..9], .big);
+            const server_time_micros = std.mem.readInt(i64, payload[9..17], .big);
+            const reply_requested = switch (payload[17]) {
+                0 => false,
+                1 => true,
+                else => return error.InvalidReplicationCopyData,
+            };
+
+            return .{ .keepalive = .{
+                .wal_end = wal_end,
+                .server_time_micros = server_time_micros,
+                .reply_requested = reply_requested,
+            } };
+        },
+        else => {
+            return .{ .raw = .{
+                .tag = payload[0],
+                .payload = try allocator.dupe(u8, payload[1..]),
+                .allocator = allocator,
+            } };
+        },
+    }
+}
+
+pub fn buildStandbyStatusUpdatePayload(
+    write_lsn: u64,
+    flush_lsn: u64,
+    apply_lsn: u64,
+    reply_requested: bool,
+) [34]u8 {
+    var payload: [34]u8 = undefined;
+    payload[0] = 'r';
+    std.mem.writeInt(u64, payload[1..9], write_lsn, .big);
+    std.mem.writeInt(u64, payload[9..17], flush_lsn, .big);
+    std.mem.writeInt(u64, payload[17..25], apply_lsn, .big);
+    std.mem.writeInt(i64, payload[25..33], postgresEpochMicrosNow(), .big);
+    payload[33] = if (reply_requested) 1 else 0;
+    return payload;
+}
+
+pub fn sendCopyData(conn: anytype, data: []const u8) !void {
+    if (data.len > std.math.maxInt(u32) - 4) return error.CopyDataTooLarge;
+    const len: u32 = @intCast(data.len + 4);
+    var header: [5]u8 = undefined;
+    header[0] = 'd';
+    std.mem.writeInt(u32, header[1..5], len, .big);
+    try conn.send(&header);
+    try conn.send(data);
+}
+
+fn validateIdent(kind: []const u8, ident: []const u8) !void {
+    if (ident.len == 0) return error.InvalidIdentifier;
+    if (ident.len > 63) return error.InvalidIdentifier;
+
+    const first = ident[0];
+    if (!(first == '_' or std.ascii.isAlphabetic(first))) return error.InvalidIdentifier;
+
+    for (ident[1..]) |ch| {
+        if (!(ch == '_' or std.ascii.isAlphanumeric(ch))) return error.InvalidIdentifier;
+    }
+
+    _ = kind;
+}
+
+fn quoteSingleLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidReplicationOption;
+
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    errdefer out.deinit(allocator);
+
+    for (value) |ch| {
+        if (ch == '\'') {
+            try out.appendSlice(allocator, "''");
+        } else {
+            try out.append(allocator, ch);
+        }
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn postgresEpochMicrosNow() i64 {
+    const pg_unix_epoch_diff_secs: i64 = 946_684_800;
+    return std.time.microTimestamp() - (pg_unix_epoch_diff_secs * 1_000_000);
+}

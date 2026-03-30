@@ -15,6 +15,9 @@ const query_mod = @import("query.zig");
 const copy_mod = @import("copy.zig");
 const io_backend_mod = @import("io_backend.zig");
 const rls_mod = @import("rls.zig");
+const connect_url_mod = @import("connect_url.zig");
+const notification_mod = @import("notification.zig");
+const replication_mod = @import("replication.zig");
 const transpiler = @import("../transpiler/postgres.zig");
 
 const QailCmd = ast.QailCmd;
@@ -38,107 +41,28 @@ const MessageResult = struct {
 };
 
 /// LISTEN/NOTIFY message from PostgreSQL.
-pub const Notification = struct {
-    /// PID of the backend that sent NOTIFY.
-    process_id: i32,
-    /// Notification channel.
-    channel: []u8,
-    /// Notification payload (may be empty).
-    payload: []u8,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *Notification) void {
-        self.allocator.free(self.channel);
-        self.allocator.free(self.payload);
-    }
-};
+pub const Notification = notification_mod.Notification;
 
 /// Startup metadata from `IDENTIFY_SYSTEM`.
-pub const IdentifySystem = struct {
-    system_id: []u8,
-    timeline: u32,
-    xlog_pos: []u8,
-    dbname: ?[]u8,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *IdentifySystem) void {
-        self.allocator.free(self.system_id);
-        self.allocator.free(self.xlog_pos);
-        if (self.dbname) |dbname| self.allocator.free(dbname);
-    }
-};
+pub const IdentifySystem = replication_mod.IdentifySystem;
 
 /// Output from `CREATE_REPLICATION_SLOT ... LOGICAL ...`.
-pub const ReplicationSlotInfo = struct {
-    slot_name: []u8,
-    consistent_point: []u8,
-    snapshot_name: ?[]u8,
-    output_plugin: []u8,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *ReplicationSlotInfo) void {
-        self.allocator.free(self.slot_name);
-        self.allocator.free(self.consistent_point);
-        if (self.snapshot_name) |snapshot_name| self.allocator.free(snapshot_name);
-        self.allocator.free(self.output_plugin);
-    }
-};
+pub const ReplicationSlotInfo = replication_mod.ReplicationSlotInfo;
 
 /// Logical replication option (`k 'v'`) used by START_REPLICATION.
-pub const ReplicationOption = struct {
-    key: []const u8,
-    value: []const u8,
-};
+pub const ReplicationOption = replication_mod.ReplicationOption;
 
 /// Metadata returned by START_REPLICATION CopyBoth response.
-pub const ReplicationStreamStart = struct {
-    format: u8,
-    column_formats: []u8,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *ReplicationStreamStart) void {
-        self.allocator.free(self.column_formats);
-    }
-};
+pub const ReplicationStreamStart = replication_mod.ReplicationStreamStart;
 
 /// Replication XLogData message (`CopyData('w'...)`).
-pub const ReplicationXLogData = struct {
-    wal_start: u64,
-    wal_end: u64,
-    server_time_micros: i64,
-    data: []u8,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *ReplicationXLogData) void {
-        self.allocator.free(self.data);
-    }
-};
+pub const ReplicationXLogData = replication_mod.ReplicationXLogData;
 
 /// Primary keepalive message (`CopyData('k'...)`).
-pub const ReplicationKeepalive = struct {
-    wal_end: u64,
-    server_time_micros: i64,
-    reply_requested: bool,
-};
+pub const ReplicationKeepalive = replication_mod.ReplicationKeepalive;
 
 /// Replication stream message parsed from CopyData payload.
-pub const ReplicationStreamMessage = union(enum) {
-    xlog_data: ReplicationXLogData,
-    keepalive: ReplicationKeepalive,
-    raw: struct {
-        tag: u8,
-        payload: []u8,
-        allocator: std.mem.Allocator,
-    },
-
-    pub fn deinit(self: *ReplicationStreamMessage) void {
-        switch (self.*) {
-            .xlog_data => |*x| x.deinit(),
-            .keepalive => {},
-            .raw => |r| r.allocator.free(r.payload),
-        }
-    }
-};
+pub const ReplicationStreamMessage = replication_mod.ReplicationStreamMessage;
 
 /// Query options for per-query configuration
 pub const QueryOpts = struct {
@@ -163,45 +87,8 @@ pub const CopyChunkHandler = *const fn (
     chunk: []const u8,
 ) anyerror!void;
 
-/// TLS policy parsed from libpq-style URL options.
-///
-/// `verify_ca`/`verify_full` require explicit certificate verification config
-/// (for example via `sslrootcert`) and fail closed otherwise.
-pub const TlsMode = enum {
-    disable,
-    prefer,
-    require,
-    verify_ca,
-    verify_full,
-
-    pub fn parseSslMode(value: []const u8) ?TlsMode {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(trimmed, "disable")) return .disable;
-        if (std.ascii.eqlIgnoreCase(trimmed, "allow") or std.ascii.eqlIgnoreCase(trimmed, "prefer")) return .prefer;
-        if (std.ascii.eqlIgnoreCase(trimmed, "require")) return .require;
-        if (std.ascii.eqlIgnoreCase(trimmed, "verify-ca")) return .verify_ca;
-        if (std.ascii.eqlIgnoreCase(trimmed, "verify-full")) return .verify_full;
-        return null;
-    }
-};
-
-/// GSS session-encryption policy parsed from URL options.
-///
-/// `PgDriver` currently supports plain TCP only; `.prefer`/`.require` are
-/// accepted by URL/builder parsing but rejected at connect time.
-pub const GssEncMode = enum {
-    disable,
-    prefer,
-    require,
-
-    pub fn parse(value: []const u8) ?GssEncMode {
-        const trimmed = std.mem.trim(u8, value, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(trimmed, "disable")) return .disable;
-        if (std.ascii.eqlIgnoreCase(trimmed, "prefer")) return .prefer;
-        if (std.ascii.eqlIgnoreCase(trimmed, "require")) return .require;
-        return null;
-    }
-};
+pub const TlsMode = connect_url_mod.TlsMode;
+pub const GssEncMode = connect_url_mod.GssEncMode;
 
 /// Cancellation token for issuing PostgreSQL CancelRequest.
 pub const CancelToken = struct {
@@ -221,32 +108,7 @@ pub const CancelToken = struct {
     }
 };
 
-/// Advanced connection options used by `connectWithOptions` and builder API.
-pub const ConnectOptions = struct {
-    /// Optional TCP connect timeout in milliseconds.
-    timeout_ms: ?i32 = null,
-    /// Password/SCRAM/GSS auth policy.
-    auth_options: AuthOptions = .{},
-    /// Additional startup parameters sent in StartupMessage.
-    startup_params: []const StartupParam = &.{},
-    /// Parsed libpq-style TLS mode.
-    tls_mode: TlsMode = .disable,
-    /// Optional TLS configuration used when `tls_mode` is not `.disable`.
-    tls_config: ?TlsConfig = null,
-    /// Parsed libpq-style GSS encryption mode; only `.disable` is currently supported by `PgDriver`.
-    gss_enc_mode: GssEncMode = .disable,
-};
-
-/// Parsed PostgreSQL URL pieces used by `connectUrl`.
-const ParsedConnectionUrl = struct {
-    host: []const u8,
-    port: u16,
-    user: []const u8,
-    database: []const u8,
-    password: ?[]const u8,
-    options: ConnectOptions,
-    logical_replication: bool = false,
-};
+pub const ConnectOptions = connect_url_mod.ConnectOptions;
 
 /// Builder for ergonomic `PgDriver` connection setup.
 pub const PgDriverBuilder = struct {
@@ -350,7 +212,7 @@ pub const PgDriverBuilder = struct {
 
         var options = self.options;
         const logical_replication_param = [_]StartupParam{.{ .name = "replication", .value = "database" }};
-        if (self.force_logical_replication and !hasLogicalReplicationStartupMode(options.startup_params) and options.startup_params.len == 0) {
+        if (self.force_logical_replication and !connect_url_mod.hasLogicalReplicationStartupMode(options.startup_params) and options.startup_params.len == 0) {
             options.startup_params = &logical_replication_param;
         }
 
@@ -456,10 +318,6 @@ pub const PgDriver = struct {
 
     /// Default max cached statements (matches Rust's default)
     const DEFAULT_CACHE_SIZE: usize = 256;
-    const MAX_REPLICATION_OPTIONS: usize = 64;
-    const MAX_REPLICATION_OPTION_VALUE_BYTES: usize = 16 * 1024;
-    const MAX_REPLICATION_XLOGDATA_BYTES: usize = 16 * 1024 * 1024;
-
     pub fn init(conn: Connection, allocator: std.mem.Allocator) PgDriver {
         return initTransport(.{ .plain = conn }, allocator);
     }
@@ -596,7 +454,7 @@ pub const PgDriver = struct {
         defer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        const parsed = try parseConnectionUrl(arena, url);
+        const parsed = try connect_url_mod.parseConnectionUrl(arena, url);
         const startup_params: []const StartupParam = if (parsed.logical_replication)
             &.{.{ .name = "replication", .value = "database" }}
         else
@@ -825,7 +683,7 @@ pub const PgDriver = struct {
         var driver = PgDriver.initTransport(transport, allocator);
         driver.connect_host = try allocator.dupe(u8, host);
         driver.connect_port = port;
-        driver.replication_mode_enabled = hasLogicalReplicationStartupMode(startup_params);
+        driver.replication_mode_enabled = connect_url_mod.hasLogicalReplicationStartupMode(startup_params);
         return driver;
     }
 
@@ -900,7 +758,7 @@ pub const PgDriver = struct {
                     _ = self.drainUntilReadyForQuery() catch {};
                     return error.QueryError;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 .no_data => {},
                 else => {},
             }
@@ -953,7 +811,7 @@ pub const PgDriver = struct {
                     _ = self.drainUntilReadyForQuery() catch {};
                     return error.ExecuteError;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 else => {},
             }
         }
@@ -1068,7 +926,7 @@ pub const PgDriver = struct {
                     std.debug.print("COPY OUT error: {s}\n", .{err.message orelse "unknown"});
                     return error.CopyFailed;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 .notice, .parameter_status => {},
                 else => return error.InvalidCopyState,
             }
@@ -1192,17 +1050,14 @@ pub const PgDriver = struct {
     ///
     /// Caller owns returned slice and each notification payload.
     pub fn pollNotifications(self: *PgDriver) ![]Notification {
-        const out = try self.allocator.alloc(Notification, self.notifications.items.len);
-        std.mem.copyForwards(Notification, out, self.notifications.items);
-        self.notifications.clearRetainingCapacity();
-        return out;
+        return notification_mod.drainBufferedNotifications(self.allocator, &self.notifications);
     }
 
     /// Wait for the next notification (blocking).
     ///
     /// Caller owns the returned notification and must call `deinit()`.
     pub fn recvNotification(self: *PgDriver) !Notification {
-        if (self.popBufferedNotification()) |notification| return notification;
+        if (notification_mod.popBufferedNotification(&self.notifications)) |notification| return notification;
 
         // Flush pending async messages first.
         var encoder = PgEncoder.init(self.allocator);
@@ -1213,10 +1068,10 @@ pub const PgDriver = struct {
         while (true) {
             const msg = try self.conn.readMessage();
             switch (msg.msg_type) {
-                .notification => return try self.decodeNotification(msg.payload),
+                .notification => return try notification_mod.decodeNotification(self.allocator, msg.payload),
                 .empty_query, .command_complete, .notice, .parameter_status => {},
                 .ready_for_query => {
-                    if (self.popBufferedNotification()) |notification| return notification;
+                    if (notification_mod.popBufferedNotification(&self.notifications)) |notification| return notification;
                 },
                 .error_response => {
                     var decoder = Decoder.init(msg.payload);
@@ -1241,7 +1096,7 @@ pub const PgDriver = struct {
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return error.InvalidReplicationResponse;
-        return try parseIdentifySystemRow(self.allocator, &rows[0]);
+        return try replication_mod.parseIdentifySystemRow(self.allocator, &rows[0]);
     }
 
     /// Create a logical replication slot.
@@ -1255,7 +1110,7 @@ pub const PgDriver = struct {
         try self.ensureReplicationMode("CREATE_REPLICATION_SLOT");
         try self.ensureReplicationControlIdle("CREATE_REPLICATION_SLOT");
 
-        const sql = try buildCreateLogicalReplicationSlotSql(self.allocator, slot_name, output_plugin, temporary, two_phase);
+        const sql = try replication_mod.buildCreateLogicalReplicationSlotSql(self.allocator, slot_name, output_plugin, temporary, two_phase);
         defer self.allocator.free(sql);
 
         const cmd = QailCmd.raw(sql);
@@ -1263,7 +1118,7 @@ pub const PgDriver = struct {
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return error.InvalidReplicationResponse;
-        return try parseCreateSlotRow(self.allocator, &rows[0]);
+        return try replication_mod.parseCreateSlotRow(self.allocator, &rows[0]);
     }
 
     /// Drop a replication slot.
@@ -1271,7 +1126,7 @@ pub const PgDriver = struct {
         try self.ensureReplicationMode("DROP_REPLICATION_SLOT");
         try self.ensureReplicationControlIdle("DROP_REPLICATION_SLOT");
 
-        const sql = try buildDropReplicationSlotSql(self.allocator, slot_name, wait);
+        const sql = try replication_mod.buildDropReplicationSlotSql(self.allocator, slot_name, wait);
         defer self.allocator.free(sql);
 
         _ = try self.executeRaw(sql);
@@ -1287,7 +1142,7 @@ pub const PgDriver = struct {
         try self.ensureReplicationMode("START_REPLICATION");
         if (self.replication_stream_active) return error.ReplicationStreamAlreadyActive;
 
-        const sql = try buildStartLogicalReplicationSql(self.allocator, slot_name, start_lsn, options);
+        const sql = try replication_mod.buildStartLogicalReplicationSql(self.allocator, slot_name, start_lsn, options);
         defer self.allocator.free(sql);
 
         var pg_encoder = PgEncoder.init(self.allocator);
@@ -1322,7 +1177,7 @@ pub const PgDriver = struct {
                     return error.QueryError;
                 },
                 .ready_for_query => return error.InvalidReplicationResponse,
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 .notice, .parameter_status => {},
                 else => return error.UnexpectedReplicationMessage,
             }
@@ -1338,7 +1193,7 @@ pub const PgDriver = struct {
             const msg = try self.conn.readMessage();
             switch (msg.msg_type) {
                 .copy_data => {
-                    var parsed = parseReplicationCopyData(self.allocator, msg.payload) catch |err| {
+                    var parsed = replication_mod.parseReplicationCopyData(self.allocator, msg.payload) catch |err| {
                         self.replication_stream_active = false;
                         self.last_replication_wal_end = null;
                         return err;
@@ -1368,7 +1223,7 @@ pub const PgDriver = struct {
                     self.last_replication_wal_end = null;
                     return error.ReplicationStreamEnded;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 .notice, .parameter_status => {},
                 else => {
                     self.replication_stream_active = false;
@@ -1395,8 +1250,8 @@ pub const PgDriver = struct {
             if (write_lsn > last_wal_end) return error.InvalidStandbyStatusUpdate;
         }
 
-        const payload = buildStandbyStatusUpdatePayload(write_lsn, flush_lsn, apply_lsn, reply_requested);
-        try sendCopyData(&self.conn, &payload);
+        const payload = replication_mod.buildStandbyStatusUpdatePayload(write_lsn, flush_lsn, apply_lsn, reply_requested);
+        try replication_mod.sendCopyData(&self.conn, &payload);
     }
 
     // ==================== Cached (Prepared Statement) Execution ====================
@@ -1468,7 +1323,7 @@ pub const PgDriver = struct {
                     _ = self.drainUntilReadyForQuery() catch {};
                     return error.PrepareError;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 else => {},
             }
         }
@@ -1506,7 +1361,7 @@ pub const PgDriver = struct {
                     _ = self.drainUntilReadyForQuery() catch {};
                     return error.PrepareError;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 else => {},
             }
         }
@@ -1540,7 +1395,7 @@ pub const PgDriver = struct {
                     _ = self.drainUntilReadyForQuery() catch {};
                     return error.ExecuteError;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 else => {},
             }
         }
@@ -1611,7 +1466,7 @@ pub const PgDriver = struct {
                     _ = self.drainUntilReadyForQuery() catch {};
                     return error.QueryError;
                 },
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 else => {},
             }
         }
@@ -1619,43 +1474,15 @@ pub const PgDriver = struct {
         return try rows.toOwnedSlice(self.allocator);
     }
 
-    fn decodeNotification(self: *PgDriver, payload: []const u8) !Notification {
-        var decoder = Decoder.init(payload);
-        const parsed = try decoder.parseNotificationResponse();
-
-        const channel = try self.allocator.dupe(u8, parsed.channel);
-        errdefer self.allocator.free(channel);
-
-        const notification_payload = try self.allocator.dupe(u8, parsed.payload);
-
-        return .{
-            .process_id = parsed.process_id,
-            .channel = channel,
-            .payload = notification_payload,
-            .allocator = self.allocator,
-        };
-    }
-
-    fn bufferNotification(self: *PgDriver, payload: []const u8) !void {
-        var notification = try self.decodeNotification(payload);
-        errdefer notification.deinit();
-        try self.notifications.append(self.allocator, notification);
-    }
-
     fn drainUntilReadyForQuery(self: *PgDriver) !void {
         while (true) {
             const msg = try self.conn.readMessage();
             switch (msg.msg_type) {
                 .ready_for_query => return,
-                .notification => try self.bufferNotification(msg.payload),
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 else => {},
             }
         }
-    }
-
-    fn popBufferedNotification(self: *PgDriver) ?Notification {
-        if (self.notifications.items.len == 0) return null;
-        return self.notifications.orderedRemove(0);
     }
 
     fn ensureReplicationMode(self: *const PgDriver, operation: []const u8) !void {
@@ -1686,283 +1513,11 @@ pub const PgDriver = struct {
     }
 };
 
-fn parseConnectionUrl(allocator: std.mem.Allocator, url: []const u8) !ParsedConnectionUrl {
-    const trimmed = std.mem.trim(u8, url, " \t\r\n");
-    var rest = trimmed;
-    if (std.mem.startsWith(u8, rest, "postgres://")) {
-        rest = rest["postgres://".len..];
-    } else if (std.mem.startsWith(u8, rest, "postgresql://")) {
-        rest = rest["postgresql://".len..];
-    } else {
-        return error.InvalidDatabaseUrlScheme;
-    }
-
-    const query_index = std.mem.indexOfScalar(u8, rest, '?');
-    const authority_and_path = if (query_index) |idx| rest[0..idx] else rest;
-    const query = if (query_index) |idx| rest[idx + 1 ..] else "";
-
-    const at_index = std.mem.lastIndexOfScalar(u8, authority_and_path, '@') orelse return error.InvalidDatabaseUrlMissingUser;
-    const auth_part = authority_and_path[0..at_index];
-    const host_db_part = authority_and_path[at_index + 1 ..];
-    if (auth_part.len == 0) return error.InvalidDatabaseUrlMissingUser;
-
-    const slash_index = std.mem.indexOfScalar(u8, host_db_part, '/') orelse return error.InvalidDatabaseUrlMissingDatabase;
-    const host_port_part = host_db_part[0..slash_index];
-    const database_enc = host_db_part[slash_index + 1 ..];
-    if (database_enc.len == 0) return error.InvalidDatabaseUrlMissingDatabase;
-
-    var user_enc = auth_part;
-    var password_enc: ?[]const u8 = null;
-    if (std.mem.indexOfScalar(u8, auth_part, ':')) |colon_index| {
-        user_enc = auth_part[0..colon_index];
-        password_enc = auth_part[colon_index + 1 ..];
-    }
-    if (user_enc.len == 0) return error.InvalidDatabaseUrlMissingUser;
-
-    var host_part = host_port_part;
-    var port: u16 = 5432;
-    if (std.mem.lastIndexOfScalar(u8, host_port_part, ':')) |colon_index| {
-        host_part = host_port_part[0..colon_index];
-        const port_text = host_port_part[colon_index + 1 ..];
-        if (port_text.len == 0) return error.InvalidDatabaseUrlPort;
-        port = std.fmt.parseInt(u16, port_text, 10) catch return error.InvalidDatabaseUrlPort;
-    }
-    if (host_part.len == 0) return error.InvalidDatabaseUrlHost;
-
-    var parsed = ParsedConnectionUrl{
-        .host = try allocator.dupe(u8, host_part),
-        .port = port,
-        .user = try percentDecodeAlloc(allocator, user_enc),
-        .database = try percentDecodeAlloc(allocator, database_enc),
-        .password = if (password_enc) |pw| try percentDecodeAlloc(allocator, pw) else null,
-        .options = .{},
-        .logical_replication = false,
-    };
-
-    if (query.len != 0) {
-        try applyUrlQueryOptions(allocator, &parsed, query);
-    }
-
-    return parsed;
-}
-
-fn applyUrlQueryOptions(
-    allocator: std.mem.Allocator,
-    parsed: *ParsedConnectionUrl,
-    query: []const u8,
-) !void {
-    var query_iter = std.mem.splitScalar(u8, query, '&');
-    while (query_iter.next()) |pair| {
-        if (pair.len == 0) continue;
-
-        var key_value = std.mem.splitScalar(u8, pair, '=');
-        const key = std.mem.trim(u8, key_value.next() orelse "", " \t\r\n");
-        const value = std.mem.trim(u8, key_value.next() orelse "", " \t\r\n");
-        if (key.len == 0) continue;
-
-        if (std.ascii.eqlIgnoreCase(key, "replication")) {
-            if (!isReplicationDatabaseValue(value)) return error.InvalidReplicationStartupMode;
-            parsed.logical_replication = true;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "sslmode")) {
-            parsed.options.tls_mode = TlsMode.parseSslMode(value) orelse return error.InvalidTlsMode;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "sslrootcert")) {
-            var tls_config = ensureTlsConfig(parsed);
-            tls_config.verify = .{
-                .bundle = try loadCaBundleFromPath(allocator, value),
-            };
-            if (parsed.options.tls_mode == .disable) parsed.options.tls_mode = .require;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "gssencmode")) {
-            parsed.options.gss_enc_mode = GssEncMode.parse(value) orelse return error.InvalidGssEncMode;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "tls_server_end_point_cert_der")) {
-            var tls_config = ensureTlsConfig(parsed);
-            tls_config.tls_server_end_point_cert_der = try readFileAllocAnyPath(
-                allocator,
-                value,
-                8 * 1024 * 1024,
-            );
-            if (parsed.options.tls_mode == .disable) parsed.options.tls_mode = .require;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "channel_binding")) {
-            parsed.options.auth_options.scram_channel_binding = auth_options_mod.ScramChannelBindingMode.parse(value) orelse return error.InvalidChannelBindingMode;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_scram")) {
-            parsed.options.auth_options.allow_scram_sha_256 = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_md5")) {
-            parsed.options.auth_options.allow_md5_password = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_cleartext")) {
-            parsed.options.auth_options.allow_cleartext_password = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_kerberos")) {
-            parsed.options.auth_options.allow_kerberos_v5 = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_gssapi")) {
-            parsed.options.auth_options.allow_gssapi = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_sspi")) {
-            parsed.options.auth_options.allow_sspi = parseBoolParam(value) orelse return error.InvalidAuthOption;
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "auth_mode")) {
-            if (std.ascii.eqlIgnoreCase(value, "scram_only")) {
-                parsed.options.auth_options = .{
-                    .allow_cleartext_password = false,
-                    .allow_md5_password = false,
-                    .allow_scram_sha_256 = true,
-                    .allow_kerberos_v5 = false,
-                    .allow_gssapi = false,
-                    .allow_sspi = false,
-                    .scram_channel_binding = .prefer,
-                };
-            } else if (std.ascii.eqlIgnoreCase(value, "gssapi_only")) {
-                parsed.options.auth_options = .{
-                    .allow_cleartext_password = false,
-                    .allow_md5_password = false,
-                    .allow_scram_sha_256 = false,
-                    .allow_kerberos_v5 = true,
-                    .allow_gssapi = true,
-                    .allow_sspi = true,
-                    .scram_channel_binding = .prefer,
-                };
-            } else if (std.ascii.eqlIgnoreCase(value, "compat") or std.ascii.eqlIgnoreCase(value, "default")) {
-                parsed.options.auth_options = .{};
-            } else {
-                return error.InvalidAuthMode;
-            }
-            continue;
-        }
-
-        if (std.ascii.eqlIgnoreCase(key, "connect_timeout")) {
-            const seconds = std.fmt.parseInt(i32, value, 10) catch return error.InvalidConnectTimeout;
-            if (seconds < 0) return error.InvalidConnectTimeout;
-            if (seconds == 0) {
-                parsed.options.timeout_ms = null;
-            } else {
-                parsed.options.timeout_ms = std.math.mul(i32, seconds, 1000) catch return error.InvalidConnectTimeout;
-            }
-            continue;
-        }
-    }
-}
-
-fn ensureTlsConfig(parsed: *ParsedConnectionUrl) *TlsConfig {
-    if (parsed.options.tls_config == null) {
-        parsed.options.tls_config = TlsConfig{};
-    }
-    return &parsed.options.tls_config.?;
-}
-
-fn loadCaBundleFromPath(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-) !std.crypto.Certificate.Bundle {
-    var bundle: std.crypto.Certificate.Bundle = .{};
-    if (std.fs.path.isAbsolute(path)) {
-        try bundle.addCertsFromFilePathAbsolute(allocator, path);
-    } else {
-        try bundle.addCertsFromFilePath(allocator, std.fs.cwd(), path);
-    }
-    return bundle;
-}
-
-fn readFileAllocAnyPath(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    max_bytes: usize,
-) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) {
-        var file = try std.fs.openFileAbsolute(path, .{});
-        defer file.close();
-        return try file.readToEndAlloc(allocator, max_bytes);
-    }
-    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
-}
-
 fn makeCancelKey(process_id: u32, secret_key: u32) CancelKey {
     return .{
         .process_id = @bitCast(process_id),
         .secret_key = @bitCast(secret_key),
     };
-}
-
-fn parseBoolParam(value: []const u8) ?bool {
-    const trimmed = std.mem.trim(u8, value, " \t\r\n");
-    if (trimmed.len == 0) return null;
-
-    if (std.ascii.eqlIgnoreCase(trimmed, "1") or std.ascii.eqlIgnoreCase(trimmed, "true") or std.ascii.eqlIgnoreCase(trimmed, "on") or std.ascii.eqlIgnoreCase(trimmed, "yes")) return true;
-    if (std.ascii.eqlIgnoreCase(trimmed, "0") or std.ascii.eqlIgnoreCase(trimmed, "false") or std.ascii.eqlIgnoreCase(trimmed, "off") or std.ascii.eqlIgnoreCase(trimmed, "no")) return false;
-    return null;
-}
-
-fn isReplicationDatabaseValue(value: []const u8) bool {
-    const trimmed = std.mem.trim(u8, value, " \t\r\n");
-    return std.ascii.eqlIgnoreCase(trimmed, "database") or
-        std.ascii.eqlIgnoreCase(trimmed, "true") or
-        std.ascii.eqlIgnoreCase(trimmed, "on") or
-        std.mem.eql(u8, trimmed, "1");
-}
-
-fn hasLogicalReplicationStartupMode(startup_params: []const StartupParam) bool {
-    for (startup_params) |param| {
-        if (std.ascii.eqlIgnoreCase(param.name, "replication")) {
-            return isReplicationDatabaseValue(param.value);
-        }
-    }
-    return false;
-}
-
-fn percentDecodeAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    if (std.mem.indexOfScalar(u8, text, '%') == null) {
-        return allocator.dupe(u8, text);
-    }
-
-    var out: std.ArrayListUnmanaged(u8) = .{};
-    errdefer out.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '%' and i + 2 < text.len) {
-            const hex = text[i + 1 .. i + 3];
-            const decoded = std.fmt.parseInt(u8, hex, 16) catch {
-                try out.append(allocator, text[i]);
-                continue;
-            };
-            try out.append(allocator, decoded);
-            i += 2;
-            continue;
-        }
-        try out.append(allocator, text[i]);
-    }
-
-    return try out.toOwnedSlice(allocator);
 }
 
 fn quoteIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
@@ -2026,46 +1581,6 @@ fn buildAlterTableRlsSql(
     return std.fmt.allocPrint(allocator, "ALTER TABLE {s} {s}", .{ quoted_table, clause });
 }
 
-fn quoteSingleLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
-    if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidReplicationOption;
-
-    var out: std.ArrayListUnmanaged(u8) = .{};
-    errdefer out.deinit(allocator);
-
-    for (value) |ch| {
-        if (ch == '\'') {
-            try out.appendSlice(allocator, "''");
-        } else {
-            try out.append(allocator, ch);
-        }
-    }
-    return try out.toOwnedSlice(allocator);
-}
-
-fn validateIdent(kind: []const u8, ident: []const u8) !void {
-    if (ident.len == 0) return error.InvalidIdentifier;
-    if (ident.len > 63) return error.InvalidIdentifier;
-
-    const first = ident[0];
-    if (!(first == '_' or std.ascii.isAlphabetic(first))) return error.InvalidIdentifier;
-
-    for (ident[1..]) |ch| {
-        if (!(ch == '_' or std.ascii.isAlphanumeric(ch))) return error.InvalidIdentifier;
-    }
-
-    _ = kind;
-}
-
-fn parseLsnText(lsn: []const u8) !u64 {
-    const slash = std.mem.indexOfScalar(u8, lsn, '/') orelse return error.InvalidLsn;
-    if (slash == 0 or slash == lsn.len - 1) return error.InvalidLsn;
-    if (std.mem.indexOfScalarPos(u8, lsn, slash + 1, '/') != null) return error.InvalidLsn;
-
-    const high = std.fmt.parseInt(u32, lsn[0..slash], 16) catch return error.InvalidLsn;
-    const low = std.fmt.parseInt(u32, lsn[slash + 1 ..], 16) catch return error.InvalidLsn;
-    return (@as(u64, high) << 32) | low;
-}
-
 fn parseExplainJson(json: []const u8) ?ExplainEstimate {
     const total_cost = extractJsonNumber(json, "Total Cost") orelse return null;
     const plan_rows_f = extractJsonNumber(json, "Plan Rows") orelse return null;
@@ -2101,222 +1616,6 @@ fn isJsonNumberByte(ch: u8) bool {
     return std.ascii.isDigit(ch) or ch == '.' or ch == '-' or ch == '+' or ch == 'e' or ch == 'E';
 }
 
-fn buildCreateLogicalReplicationSlotSql(
-    allocator: std.mem.Allocator,
-    slot_name: []const u8,
-    output_plugin: []const u8,
-    temporary: bool,
-    two_phase: bool,
-) ![]u8 {
-    try validateIdent("slot_name", slot_name);
-    try validateIdent("output_plugin", output_plugin);
-
-    var sql: std.ArrayListUnmanaged(u8) = .{};
-    errdefer sql.deinit(allocator);
-
-    try sql.appendSlice(allocator, "CREATE_REPLICATION_SLOT ");
-    try sql.appendSlice(allocator, slot_name);
-    if (temporary) try sql.appendSlice(allocator, " TEMPORARY");
-    try sql.appendSlice(allocator, " LOGICAL ");
-    try sql.appendSlice(allocator, output_plugin);
-    if (two_phase) try sql.appendSlice(allocator, " TWO_PHASE");
-
-    return try sql.toOwnedSlice(allocator);
-}
-
-fn buildDropReplicationSlotSql(
-    allocator: std.mem.Allocator,
-    slot_name: []const u8,
-    wait: bool,
-) ![]u8 {
-    try validateIdent("slot_name", slot_name);
-
-    var sql: std.ArrayListUnmanaged(u8) = .{};
-    errdefer sql.deinit(allocator);
-
-    try sql.appendSlice(allocator, "DROP_REPLICATION_SLOT ");
-    try sql.appendSlice(allocator, slot_name);
-    if (wait) try sql.appendSlice(allocator, " WAIT");
-    return try sql.toOwnedSlice(allocator);
-}
-
-fn buildStartLogicalReplicationSql(
-    allocator: std.mem.Allocator,
-    slot_name: []const u8,
-    start_lsn: []const u8,
-    options: []const ReplicationOption,
-) ![]u8 {
-    try validateIdent("slot_name", slot_name);
-    _ = try parseLsnText(start_lsn);
-
-    if (options.len > PgDriver.MAX_REPLICATION_OPTIONS) return error.InvalidReplicationOption;
-
-    var sql: std.ArrayListUnmanaged(u8) = .{};
-    errdefer sql.deinit(allocator);
-
-    try sql.appendSlice(allocator, "START_REPLICATION SLOT ");
-    try sql.appendSlice(allocator, slot_name);
-    try sql.appendSlice(allocator, " LOGICAL ");
-    try sql.appendSlice(allocator, start_lsn);
-
-    if (options.len != 0) {
-        try sql.appendSlice(allocator, " (");
-        for (options, 0..) |opt, i| {
-            try validateIdent("replication option key", opt.key);
-            if (opt.value.len > PgDriver.MAX_REPLICATION_OPTION_VALUE_BYTES) return error.InvalidReplicationOption;
-
-            if (i > 0) try sql.appendSlice(allocator, ", ");
-            try sql.appendSlice(allocator, opt.key);
-            try sql.appendSlice(allocator, " '");
-
-            const escaped = try quoteSingleLiteralAlloc(allocator, opt.value);
-            defer allocator.free(escaped);
-            try sql.appendSlice(allocator, escaped);
-            try sql.append(allocator, '\'');
-        }
-        try sql.append(allocator, ')');
-    }
-
-    return try sql.toOwnedSlice(allocator);
-}
-
-fn parseIdentifySystemRow(allocator: std.mem.Allocator, row: *const PgRow) !IdentifySystem {
-    const system_id_raw = row.getString(0) orelse return error.InvalidReplicationResponse;
-    const timeline_raw = row.getString(1) orelse return error.InvalidReplicationResponse;
-    const xlog_pos_raw = row.getString(2) orelse return error.InvalidReplicationResponse;
-
-    const timeline = std.fmt.parseInt(u32, timeline_raw, 10) catch return error.InvalidReplicationResponse;
-    const system_id = try allocator.dupe(u8, system_id_raw);
-    errdefer allocator.free(system_id);
-    const xlog_pos = try allocator.dupe(u8, xlog_pos_raw);
-    errdefer allocator.free(xlog_pos);
-
-    var dbname: ?[]u8 = null;
-    if (row.getString(3)) |dbname_raw| {
-        if (dbname_raw.len != 0) {
-            dbname = try allocator.dupe(u8, dbname_raw);
-        }
-    }
-
-    return .{
-        .system_id = system_id,
-        .timeline = timeline,
-        .xlog_pos = xlog_pos,
-        .dbname = dbname,
-        .allocator = allocator,
-    };
-}
-
-fn parseCreateSlotRow(allocator: std.mem.Allocator, row: *const PgRow) !ReplicationSlotInfo {
-    const slot_name_raw = row.getString(0) orelse return error.InvalidReplicationResponse;
-    const consistent_point_raw = row.getString(1) orelse return error.InvalidReplicationResponse;
-    const output_plugin_raw = row.getString(3) orelse return error.InvalidReplicationResponse;
-
-    const slot_name = try allocator.dupe(u8, slot_name_raw);
-    errdefer allocator.free(slot_name);
-    const consistent_point = try allocator.dupe(u8, consistent_point_raw);
-    errdefer allocator.free(consistent_point);
-    const output_plugin = try allocator.dupe(u8, output_plugin_raw);
-    errdefer allocator.free(output_plugin);
-
-    var snapshot_name: ?[]u8 = null;
-    if (row.getString(2)) |snapshot_name_raw| {
-        if (snapshot_name_raw.len != 0) {
-            snapshot_name = try allocator.dupe(u8, snapshot_name_raw);
-        }
-    }
-
-    return .{
-        .slot_name = slot_name,
-        .consistent_point = consistent_point,
-        .snapshot_name = snapshot_name,
-        .output_plugin = output_plugin,
-        .allocator = allocator,
-    };
-}
-
-fn parseReplicationCopyData(allocator: std.mem.Allocator, payload: []const u8) !ReplicationStreamMessage {
-    if (payload.len == 0) return error.InvalidReplicationCopyData;
-
-    switch (payload[0]) {
-        'w' => {
-            if (payload.len < 25) return error.InvalidReplicationCopyData;
-
-            const wal_start = std.mem.readInt(u64, payload[1..9], .big);
-            const wal_end = std.mem.readInt(u64, payload[9..17], .big);
-            const server_time_micros = std.mem.readInt(i64, payload[17..25], .big);
-
-            if (wal_end < wal_start) return error.InvalidReplicationCopyData;
-
-            const data_len = payload.len - 25;
-            if (data_len > PgDriver.MAX_REPLICATION_XLOGDATA_BYTES) return error.InvalidReplicationCopyData;
-
-            return .{ .xlog_data = .{
-                .wal_start = wal_start,
-                .wal_end = wal_end,
-                .server_time_micros = server_time_micros,
-                .data = try allocator.dupe(u8, payload[25..]),
-                .allocator = allocator,
-            } };
-        },
-        'k' => {
-            if (payload.len != 18) return error.InvalidReplicationCopyData;
-
-            const wal_end = std.mem.readInt(u64, payload[1..9], .big);
-            const server_time_micros = std.mem.readInt(i64, payload[9..17], .big);
-            const reply_requested = switch (payload[17]) {
-                0 => false,
-                1 => true,
-                else => return error.InvalidReplicationCopyData,
-            };
-
-            return .{ .keepalive = .{
-                .wal_end = wal_end,
-                .server_time_micros = server_time_micros,
-                .reply_requested = reply_requested,
-            } };
-        },
-        else => {
-            return .{ .raw = .{
-                .tag = payload[0],
-                .payload = try allocator.dupe(u8, payload[1..]),
-                .allocator = allocator,
-            } };
-        },
-    }
-}
-
-fn postgresEpochMicrosNow() i64 {
-    const pg_unix_epoch_diff_secs: i64 = 946_684_800;
-    return std.time.microTimestamp() - (pg_unix_epoch_diff_secs * 1_000_000);
-}
-
-fn buildStandbyStatusUpdatePayload(
-    write_lsn: u64,
-    flush_lsn: u64,
-    apply_lsn: u64,
-    reply_requested: bool,
-) [34]u8 {
-    var payload: [34]u8 = undefined;
-    payload[0] = 'r';
-    std.mem.writeInt(u64, payload[1..9], write_lsn, .big);
-    std.mem.writeInt(u64, payload[9..17], flush_lsn, .big);
-    std.mem.writeInt(u64, payload[17..25], apply_lsn, .big);
-    std.mem.writeInt(i64, payload[25..33], postgresEpochMicrosNow(), .big);
-    payload[33] = if (reply_requested) 1 else 0;
-    return payload;
-}
-
-fn sendCopyData(conn: anytype, data: []const u8) !void {
-    if (data.len > std.math.maxInt(u32) - 4) return error.CopyDataTooLarge;
-    const len: u32 = @intCast(data.len + 4);
-    var header: [5]u8 = undefined;
-    header[0] = 'd';
-    std.mem.writeInt(u32, header[1..5], len, .big);
-    try conn.send(&header);
-    try conn.send(data);
-}
-
 fn freeRows(allocator: std.mem.Allocator, rows: []PgRow) void {
     for (rows) |*row| row.deinit();
     allocator.free(rows);
@@ -2333,7 +1632,7 @@ test "parse connection url with query options" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const parsed = try parseConnectionUrl(
+    const parsed = try connect_url_mod.parseConnectionUrl(
         arena,
         "postgres://alice:secret@db.internal:5433/app?replication=database&channel_binding=require&auth_md5=false&connect_timeout=5",
     );
@@ -2355,7 +1654,7 @@ test "parse connection url decodes percent encoding" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const parsed = try parseConnectionUrl(arena, "postgresql://user%40name:p%2Bss@127.0.0.1/my%2Ddb");
+    const parsed = try connect_url_mod.parseConnectionUrl(arena, "postgresql://user%40name:p%2Bss@127.0.0.1/my%2Ddb");
     try std.testing.expectEqualStrings("user@name", parsed.user);
     try std.testing.expect(parsed.password != null);
     try std.testing.expectEqualStrings("p+ss", parsed.password.?);
@@ -2369,7 +1668,7 @@ test "parse connection url rejects invalid sslmode" {
 
     try std.testing.expectError(
         error.InvalidTlsMode,
-        parseConnectionUrl(arena, "postgres://alice@localhost/db?sslmode=bogus"),
+        connect_url_mod.parseConnectionUrl(arena, "postgres://alice@localhost/db?sslmode=bogus"),
     );
 }
 
@@ -2378,13 +1677,13 @@ test "parse connection url preserves strict sslmode variants" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const parsed_verify_ca = try parseConnectionUrl(
+    const parsed_verify_ca = try connect_url_mod.parseConnectionUrl(
         arena,
         "postgres://alice@localhost/db?sslmode=verify-ca",
     );
     try std.testing.expectEqual(TlsMode.verify_ca, parsed_verify_ca.options.tls_mode);
 
-    const parsed_verify_full = try parseConnectionUrl(
+    const parsed_verify_full = try connect_url_mod.parseConnectionUrl(
         arena,
         "postgres://alice@localhost/db?sslmode=verify-full",
     );
@@ -2418,7 +1717,7 @@ test "parse connection url loads tls server end point cert der path" {
         .{cert_path},
     );
 
-    const parsed = try parseConnectionUrl(
+    const parsed = try connect_url_mod.parseConnectionUrl(
         arena,
         url,
     );
@@ -2435,7 +1734,7 @@ test "parse connection url rejects missing sslrootcert path" {
 
     try std.testing.expectError(
         error.FileNotFound,
-        parseConnectionUrl(
+        connect_url_mod.parseConnectionUrl(
             arena,
             "postgres://alice@localhost/db?sslrootcert=/definitely-not-found-ca-bundle.pem",
         ),
@@ -2502,12 +1801,12 @@ test "quote identifier alloc" {
 }
 
 test "parse lsn text" {
-    const lsn = try parseLsnText("16/B6C50");
+    const lsn = try replication_mod.parseLsnText("16/B6C50");
     try std.testing.expectEqual(@as(u64, 0x00000016000B6C50), lsn);
 }
 
 test "build start logical replication sql with options" {
-    const sql = try buildStartLogicalReplicationSql(
+    const sql = try replication_mod.buildStartLogicalReplicationSql(
         std.testing.allocator,
         "slot_main",
         "0/16B6C50",
@@ -2525,7 +1824,7 @@ test "build start logical replication sql with options" {
 }
 
 test "build start logical replication sql escapes quoted option values" {
-    const sql = try buildStartLogicalReplicationSql(
+    const sql = try replication_mod.buildStartLogicalReplicationSql(
         std.testing.allocator,
         "slot_main",
         "0/16B6C50",
@@ -2544,7 +1843,7 @@ test "build start logical replication sql escapes quoted option values" {
 test "build start logical replication sql rejects invalid slot identifier" {
     try std.testing.expectError(
         error.InvalidIdentifier,
-        buildStartLogicalReplicationSql(
+        replication_mod.buildStartLogicalReplicationSql(
             std.testing.allocator,
             "slot-main",
             "0/16B6C50",
@@ -2556,7 +1855,7 @@ test "build start logical replication sql rejects invalid slot identifier" {
 test "build start logical replication sql rejects invalid lsn" {
     try std.testing.expectError(
         error.InvalidLsn,
-        buildStartLogicalReplicationSql(
+        replication_mod.buildStartLogicalReplicationSql(
             std.testing.allocator,
             "slot_main",
             "invalid",
@@ -2569,7 +1868,7 @@ test "build start logical replication sql rejects option value with embedded nul
     const invalid_value = [_]u8{ 'b', 'a', 'd', 0, 'x' };
     try std.testing.expectError(
         error.InvalidReplicationOption,
-        buildStartLogicalReplicationSql(
+        replication_mod.buildStartLogicalReplicationSql(
             std.testing.allocator,
             "slot_main",
             "0/16B6C50",
@@ -2581,7 +1880,7 @@ test "build start logical replication sql rejects option value with embedded nul
 }
 
 test "build create logical replication slot sql with flags" {
-    const sql = try buildCreateLogicalReplicationSlotSql(
+    const sql = try replication_mod.buildCreateLogicalReplicationSlotSql(
         std.testing.allocator,
         "slot_main",
         "pgoutput",
@@ -2599,7 +1898,7 @@ test "build create logical replication slot sql with flags" {
 test "build create logical replication slot sql rejects invalid plugin identifier" {
     try std.testing.expectError(
         error.InvalidIdentifier,
-        buildCreateLogicalReplicationSlotSql(
+        replication_mod.buildCreateLogicalReplicationSlotSql(
             std.testing.allocator,
             "slot_main",
             "pg-output",
@@ -2610,7 +1909,7 @@ test "build create logical replication slot sql rejects invalid plugin identifie
 }
 
 test "build drop replication slot sql with wait" {
-    const sql = try buildDropReplicationSlotSql(
+    const sql = try replication_mod.buildDropReplicationSlotSql(
         std.testing.allocator,
         "slot_main",
         true,
@@ -2623,7 +1922,7 @@ test "build drop replication slot sql with wait" {
 test "build drop replication slot sql rejects invalid slot identifier" {
     try std.testing.expectError(
         error.InvalidIdentifier,
-        buildDropReplicationSlotSql(
+        replication_mod.buildDropReplicationSlotSql(
             std.testing.allocator,
             "slot-main",
             false,
@@ -2710,7 +2009,7 @@ test "parse identify system row" {
     );
     defer row.deinit();
 
-    var info = try parseIdentifySystemRow(std.testing.allocator, &row);
+    var info = try replication_mod.parseIdentifySystemRow(std.testing.allocator, &row);
     defer info.deinit();
 
     try std.testing.expectEqualStrings("sysid", info.system_id);
@@ -2727,7 +2026,7 @@ test "parse identify system row allows empty dbname" {
     );
     defer row.deinit();
 
-    var info = try parseIdentifySystemRow(std.testing.allocator, &row);
+    var info = try replication_mod.parseIdentifySystemRow(std.testing.allocator, &row);
     defer info.deinit();
 
     try std.testing.expect(info.dbname == null);
@@ -2740,7 +2039,7 @@ test "parse identify system row rejects invalid timeline" {
     );
     defer row.deinit();
 
-    try std.testing.expectError(error.InvalidReplicationResponse, parseIdentifySystemRow(std.testing.allocator, &row));
+    try std.testing.expectError(error.InvalidReplicationResponse, replication_mod.parseIdentifySystemRow(std.testing.allocator, &row));
 }
 
 test "parse create slot row" {
@@ -2750,7 +2049,7 @@ test "parse create slot row" {
     );
     defer row.deinit();
 
-    var info = try parseCreateSlotRow(std.testing.allocator, &row);
+    var info = try replication_mod.parseCreateSlotRow(std.testing.allocator, &row);
     defer info.deinit();
 
     try std.testing.expectEqualStrings("slot_main", info.slot_name);
@@ -2767,7 +2066,7 @@ test "parse create slot row allows empty snapshot" {
     );
     defer row.deinit();
 
-    var info = try parseCreateSlotRow(std.testing.allocator, &row);
+    var info = try replication_mod.parseCreateSlotRow(std.testing.allocator, &row);
     defer info.deinit();
 
     try std.testing.expect(info.snapshot_name == null);
@@ -2780,7 +2079,7 @@ test "parse create slot row rejects missing output plugin" {
     );
     defer row.deinit();
 
-    try std.testing.expectError(error.InvalidReplicationResponse, parseCreateSlotRow(std.testing.allocator, &row));
+    try std.testing.expectError(error.InvalidReplicationResponse, replication_mod.parseCreateSlotRow(std.testing.allocator, &row));
 }
 
 fn makeHardeningTestDriver() PgDriver {
@@ -2836,7 +2135,7 @@ test "replication hardening: standby update validates lsn ordering" {
 const CopyDataMockConn = struct {
     send_count: usize = 0,
 
-    fn send(self: *CopyDataMockConn, bytes: []const u8) !void {
+    pub fn send(self: *CopyDataMockConn, bytes: []const u8) !void {
         _ = bytes;
         self.send_count += 1;
     }
@@ -2847,7 +2146,7 @@ test "replication hardening: sendCopyData rejects oversized payload" {
     const too_large_len = @as(usize, std.math.maxInt(u32)) - 3;
     const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
 
-    try std.testing.expectError(error.CopyDataTooLarge, sendCopyData(&conn, payload));
+    try std.testing.expectError(error.CopyDataTooLarge, replication_mod.sendCopyData(&conn, payload));
     try std.testing.expectEqual(@as(usize, 0), conn.send_count);
 }
 
@@ -2861,7 +2160,7 @@ test "parse replication copy data xlog data" {
     payload[26] = 'b';
     payload[27] = 'c';
 
-    var msg = try parseReplicationCopyData(std.testing.allocator, &payload);
+    var msg = try replication_mod.parseReplicationCopyData(std.testing.allocator, &payload);
     defer msg.deinit();
 
     switch (msg) {
@@ -2882,7 +2181,7 @@ test "parse replication copy data keepalive" {
     std.mem.writeInt(i64, payload[9..17], 5678, .big);
     payload[17] = 1;
 
-    var msg = try parseReplicationCopyData(std.testing.allocator, &payload);
+    var msg = try replication_mod.parseReplicationCopyData(std.testing.allocator, &payload);
     defer msg.deinit();
 
     switch (msg) {
@@ -2902,7 +2201,7 @@ test "parse replication copy data rejects wal end regression" {
     std.mem.writeInt(u64, payload[9..17], 0x10, .big);
     std.mem.writeInt(i64, payload[17..25], 0, .big);
 
-    try std.testing.expectError(error.InvalidReplicationCopyData, parseReplicationCopyData(std.testing.allocator, &payload));
+    try std.testing.expectError(error.InvalidReplicationCopyData, replication_mod.parseReplicationCopyData(std.testing.allocator, &payload));
 }
 
 test "parse replication copy data rejects invalid keepalive reply flag" {
@@ -2912,12 +2211,12 @@ test "parse replication copy data rejects invalid keepalive reply flag" {
     std.mem.writeInt(i64, payload[9..17], 0, .big);
     payload[17] = 2;
 
-    try std.testing.expectError(error.InvalidReplicationCopyData, parseReplicationCopyData(std.testing.allocator, &payload));
+    try std.testing.expectError(error.InvalidReplicationCopyData, replication_mod.parseReplicationCopyData(std.testing.allocator, &payload));
 }
 
 test "parse replication copy data preserves unknown tags" {
     const payload = [_]u8{ 'z', 'a', 'b', 'c' };
-    var msg = try parseReplicationCopyData(std.testing.allocator, &payload);
+    var msg = try replication_mod.parseReplicationCopyData(std.testing.allocator, &payload);
     defer msg.deinit();
 
     switch (msg) {
