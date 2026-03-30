@@ -4,10 +4,10 @@ qail-zig tracks qail.rs as the reference implementation for PostgreSQL driver be
 
 ## Current Snapshot
 
-As of `2026-03-28`, the narrow AST/codegen parity checks against `/Users/orion/qail.rs` are green:
+As of `2026-03-28`, the narrow AST/codegen parity checks against a local `qail.rs` checkout are green:
 
-- `./scripts/check_codegen_sync.sh /Users/orion/qail.rs` -> `codegen sync check passed`
-- `./scripts/check_parity.sh /Users/orion/qail.rs` -> `AST actions: rust=75 zig=76`, `Encoder actions: rust=57 zig=76`, `parity check passed`
+- `./scripts/check_codegen_sync.sh ../qail.rs` -> `codegen sync check passed`
+- `./scripts/check_parity.sh ../qail.rs` -> `AST actions: rust=75 zig=76`, `Encoder actions: rust=57 zig=76`, `parity check passed`
 
 That means the Rust-driven AST porting/codegen path is working for its current scope, and the PostgreSQL AST encoder still covers the Rust action surface completely.
 
