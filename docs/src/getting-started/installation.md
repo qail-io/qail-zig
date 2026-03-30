@@ -21,11 +21,12 @@ On the current macOS 26 host used during parity work, `zig build` can fail while
 Example:
 
 ```bash
-zig test src/lib.zig -target aarch64-macos.15.0 -fno-emit-bin
-zig build-exe src/qail_pgzig_bench.zig -target aarch64-macos.15.0 -O ReleaseFast
+./scripts/zigw doctor
+./scripts/zigw test
+./scripts/zigw pgzig-bench qail single --workload point
 ```
 
-This is an environment/toolchain issue, not a qail-zig protocol issue.
+`./scripts/zigw` delegates to normal `zig build` on healthy toolchains and only falls back to the direct target-clamped path on the known broken host/toolchain combination.
 
 ## Docs Build
 

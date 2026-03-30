@@ -67,9 +67,13 @@ That is the current published Zig driver comparison. It is stricter than the old
 
 ```bash
 # Run benchmarks
-zig build ast-bench          # AST benchmark
+zig build ast-bench          # AST benchmark on healthy Zig toolchains
 zig build pgzig-bench -- qail single --workload point
 zig build pgzig-bench -- pgzig pool10 --workload many_params
+
+# macOS 26 + Zig 0.15.x workaround wrapper
+./scripts/zigw pgzig-bench qail single --workload point
+./scripts/zigw pgzig-bench pgzig pool10 --workload many_params
 ```
 
 ## Installation
@@ -79,6 +83,10 @@ zig build pgzig-bench -- pgzig pool10 --workload many_params
 git clone https://github.com/qail-io/qail-zig.git
 cd qail-zig
 zig build -Doptimize=ReleaseFast
+
+# On the known macOS 26 build-runner issue path:
+./scripts/zigw doctor
+./scripts/zigw test
 ```
 
 ## Quick Start

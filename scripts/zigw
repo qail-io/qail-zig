@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(
+  cd "$(dirname "${BASH_SOURCE[0]}")/.." >/dev/null 2>&1
+  pwd
+)"
+
+zig_pkg_dir="${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/p"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/zigw doctor
+  ./scripts/zigw test
+  ./scripts/zigw pgzig-bench <qail|pgzig> <single|pool10> [--workload ...] [--plain]
+
+Behavior:
+  - On normal toolchains, delegates to `zig build`.
+  - On the known macOS 26 + Zig 0.15.x build-runner failure path, falls back to
+    direct Zig commands with a target clamp and explicit module wiring.
+EOF
+}
+
+host_os() {
+  uname -s
+}
+
+host_arch() {
+  uname -m
+}
+
+host_macos_major() {
+  if ! command -v sw_vers >/dev/null 2>&1; then
+    return 1
+  fi
+  sw_vers -productVersion | cut -d. -f1
+}
+
+zig_version() {
+  zig version
+}
+
+default_fallback_target() {
+  case "$(host_arch)" in
+    arm64) echo "aarch64-macos.15.0" ;;
+    x86_64) echo "x86_64-macos.15.0" ;;
+    *) echo "aarch64-macos.15.0" ;;
+  esac
+}
+
+fallback_target() {
+  echo "${QAIL_ZIG_FALLBACK_TARGET:-$(default_fallback_target)}"
+}
+
+is_known_broken_build_runner_host() {
+  [[ "$(host_os)" == "Darwin" ]] || return 1
+  [[ "$(host_macos_major 2>/dev/null || true)" == "26" ]] || return 1
+  case "$(zig_version)" in
+    0.15.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+use_direct_workaround() {
+  [[ "${QAIL_ZIG_FORCE_DIRECT:-0}" == "1" ]] && return 0
+  is_known_broken_build_runner_host
+}
+
+extract_dep_hash() {
+  local zon_file="$1"
+  local dep_name="$2"
+
+  awk -v dep="$dep_name" '
+    $0 ~ "\\." dep "[[:space:]]*=[[:space:]]*\\.\\{" {
+      in_block = 1
+      next
+    }
+    in_block && /[.]hash[[:space:]]*=[[:space:]]*"/ {
+      split($0, parts, "\"")
+      if (length(parts) >= 2) {
+        print parts[2]
+        exit
+      }
+    }
+    in_block && /^[[:space:]]*},?[[:space:]]*$/ {
+      in_block = 0
+    }
+  ' "$zon_file"
+}
+
+resolve_dep_dir() {
+  local zon_file="$1"
+  local dep_name="$2"
+  local dep_hash
+
+  dep_hash="$(extract_dep_hash "$zon_file" "$dep_name")"
+  if [[ -z "$dep_hash" ]]; then
+    echo "failed to resolve dependency hash for '$dep_name' from $zon_file" >&2
+    exit 1
+  fi
+
+  local dep_dir="$zig_pkg_dir/$dep_hash"
+  if [[ ! -d "$dep_dir" ]]; then
+    echo "dependency directory not found: $dep_dir" >&2
+    exit 1
+  fi
+
+  echo "$dep_dir"
+}
+
+run_direct_test() {
+  zig test "$repo_root/src/lib.zig" \
+    -target "$(fallback_target)" \
+    -fno-emit-bin
+}
+
+build_pgzig_bench_direct() {
+  local output="${QAIL_ZIG_PGZIG_BENCH_BIN:-$repo_root/.zig-cache/bin/qail-pgzig-bench-direct}"
+  mkdir -p "$(dirname "$output")"
+
+  local pg_dir
+  local buffer_dir
+  local metrics_dir
+
+  pg_dir="$(resolve_dep_dir "$repo_root/build.zig.zon" "pg")"
+  buffer_dir="$(resolve_dep_dir "$pg_dir/build.zig.zon" "buffer")"
+  metrics_dir="$(resolve_dep_dir "$pg_dir/build.zig.zon" "metrics")"
+
+  zig build-exe \
+    -target "$(fallback_target)" \
+    -O ReleaseFast \
+    --dep qail --dep pg \
+    -Mroot="$repo_root/src/qail_pgzig_bench.zig" \
+    -Mqail="$repo_root/src/lib.zig" \
+    --dep config --dep buffer --dep metrics \
+    -Mpg="$pg_dir/src/pg.zig" \
+    -Mconfig="$repo_root/src/pg_zig_config.zig" \
+    -Mbuffer="$buffer_dir/src/buffer.zig" \
+    -Mmetrics="$metrics_dir/src/metrics.zig" \
+    -femit-bin="$output"
+
+  echo "$output"
+}
+
+run_pgzig_bench() {
+  if use_direct_workaround; then
+    local bin
+    bin="$(build_pgzig_bench_direct)"
+    "$bin" "$@"
+  else
+    zig build pgzig-bench -- "$@"
+  fi
+}
+
+print_doctor() {
+  cat <<EOF
+repo_root=$repo_root
+zig_version=$(zig_version)
+host_os=$(host_os)
+host_arch=$(host_arch)
+fallback_target=$(fallback_target)
+known_broken_build_runner_host=$(
+  if is_known_broken_build_runner_host; then
+    echo yes
+  else
+    echo no
+  fi
+)
+direct_workaround_active=$(
+  if use_direct_workaround; then
+    echo yes
+  else
+    echo no
+  fi
+)
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "$cmd" in
+    help|-h|--help)
+      usage
+      ;;
+    doctor)
+      print_doctor
+      ;;
+    test)
+      if use_direct_workaround; then
+        run_direct_test
+      else
+        zig build test
+      fi
+      ;;
+    pgzig-bench)
+      run_pgzig_bench "$@"
+      ;;
+    *)
+      echo "unknown command: $cmd" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

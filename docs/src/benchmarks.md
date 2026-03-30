@@ -37,6 +37,10 @@ The methodology is intentionally strict:
 zig build pgzig-bench -- qail single --workload point
 zig build pgzig-bench -- pgzig single --workload point
 
+# macOS 26 + Zig 0.15.x workaround wrapper
+./scripts/zigw pgzig-bench qail single --workload point
+./scripts/zigw pgzig-bench pgzig single --workload point
+
 # Full published matrix surface
 zig build pgzig-bench -- qail pool10 --workload wide_rows
 zig build pgzig-bench -- pgzig pool10 --workload wide_rows
