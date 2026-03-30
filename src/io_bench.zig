@@ -16,6 +16,7 @@ const time = qail.compat.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
+const Assignment = qail.ast.Assignment;
 const PgDriver = qail.driver.PgDriver;
 
 const READ_ITERS: u64 = 1_000_000;
@@ -52,35 +53,48 @@ pub fn main() !void {
     // ── Setup: seed tables ───────────────────────────────────
     std.debug.print("  Setting up benchmark tables...\n", .{});
 
-    _ = driver.executeRaw("DROP TABLE IF EXISTS bench_orders") catch {};
-    _ = driver.executeRaw("DROP TABLE IF EXISTS bench_users") catch {};
-    _ = try driver.executeRaw(
-        \\CREATE TABLE bench_users (
-        \\  id SERIAL PRIMARY KEY,
-        \\  name TEXT NOT NULL,
-        \\  email TEXT NOT NULL,
-        \\  active BOOLEAN DEFAULT true
-        \\)
-    );
-    _ = try driver.executeRaw(
-        \\CREATE TABLE bench_orders (
-        \\  id SERIAL PRIMARY KEY,
-        \\  user_id INTEGER REFERENCES bench_users(id),
-        \\  product TEXT NOT NULL,
-        \\  amount NUMERIC(10,2) NOT NULL,
-        \\  status TEXT DEFAULT 'pending'
-        \\)
-    );
+    {
+        const drop_orders = QailCmd.drop("bench_orders");
+        const drop_users = QailCmd.drop("bench_users");
+        _ = driver.execute(&drop_orders) catch {};
+        _ = driver.execute(&drop_users) catch {};
+    }
+    {
+        const user_cols = [_]Expr{
+            Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
+            Expr.defWithConstraints("name", "TEXT", &.{.not_null}),
+            Expr.defWithConstraints("email", "TEXT", &.{.not_null}),
+            Expr.defWithConstraints("active", "BOOLEAN", &.{.{ .default = "true" }}),
+        };
+        const create_users = QailCmd.make("bench_users").select(&user_cols);
+        _ = try driver.execute(&create_users);
+    }
+    {
+        const order_cols = [_]Expr{
+            Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
+            Expr.defWithConstraints("user_id", "INTEGER", &.{.{ .references = "bench_users(id)" }}),
+            Expr.defWithConstraints("product", "TEXT", &.{.not_null}),
+            Expr.defWithConstraints("amount", "NUMERIC(10,2)", &.{.not_null}),
+            Expr.defWithConstraints("status", "TEXT", &.{.{ .default = "'pending'" }}),
+        };
+        const create_orders = QailCmd.make("bench_orders").select(&order_cols);
+        _ = try driver.execute(&create_orders);
+    }
 
     // Seed 100 users
     for (1..101) |i| {
         var buf: [128]u8 = undefined;
-        const sql = std.fmt.bufPrint(&buf, "INSERT INTO bench_users (name, email, active) VALUES ('User {d}', 'user{d}@test.com', {s})", .{
-            i,
-            i,
-            if (i % 3 != 0) "true" else "false",
-        }) catch continue;
-        _ = driver.executeRaw(sql) catch {};
+        const name = std.fmt.bufPrint(&buf, "User {d}", .{i}) catch continue;
+
+        var email_buf: [64]u8 = undefined;
+        const email = std.fmt.bufPrint(&email_buf, "user{d}@test.com", .{i}) catch continue;
+        const assigns = [_]Assignment{
+            .{ .column = "name", .value = .{ .string = name } },
+            .{ .column = "email", .value = .{ .string = email } },
+            .{ .column = "active", .value = .{ .bool = i % 3 != 0 } },
+        };
+        const cmd = QailCmd.add("bench_users").values(&assigns);
+        _ = driver.execute(&cmd) catch {};
     }
 
     // Seed 500 orders
@@ -88,21 +102,43 @@ pub fn main() !void {
         for (0..5) |j| {
             const statuses = [_][]const u8{ "pending", "completed", "shipped", "cancelled", "refunded" };
             var buf: [256]u8 = undefined;
-            const sql = std.fmt.bufPrint(&buf, "INSERT INTO bench_orders (user_id, product, amount, status) VALUES ({d}, 'Product {d}-{d}', {d}.99, '{s}')", .{
-                uid,
-                uid,
-                j,
-                (j + 1) * 10,
-                statuses[j % 5],
-            }) catch continue;
-            _ = driver.executeRaw(sql) catch {};
+            const product = std.fmt.bufPrint(&buf, "Product {d}-{d}", .{ uid, j }) catch continue;
+            const amount = @as(f64, @floatFromInt((j + 1) * 10)) + 0.99;
+            const assigns = [_]Assignment{
+                .{ .column = "user_id", .value = .{ .int = @as(i64, @intCast(uid)) } },
+                .{ .column = "product", .value = .{ .string = product } },
+                .{ .column = "amount", .value = .{ .float = amount } },
+                .{ .column = "status", .value = .{ .string = statuses[j % 5] } },
+            };
+            const cmd = QailCmd.add("bench_orders").values(&assigns);
+            _ = driver.execute(&cmd) catch {};
         }
     }
 
     // Add indexes for realistic performance
-    _ = driver.executeRaw("CREATE INDEX IF NOT EXISTS idx_users_active ON bench_users (active)") catch {};
-    _ = driver.executeRaw("CREATE INDEX IF NOT EXISTS idx_orders_status ON bench_orders (status)") catch {};
-    _ = driver.executeRaw("CREATE INDEX IF NOT EXISTS idx_orders_user ON bench_orders (user_id)") catch {};
+    {
+        const idx_users_active = QailCmd.createIndex("bench_users").withIndex(.{
+            .name = "idx_users_active",
+            .table = "bench_users",
+            .columns = &.{"active"},
+            .unique = false,
+        });
+        const idx_orders_status = QailCmd.createIndex("bench_orders").withIndex(.{
+            .name = "idx_orders_status",
+            .table = "bench_orders",
+            .columns = &.{"status"},
+            .unique = false,
+        });
+        const idx_orders_user = QailCmd.createIndex("bench_orders").withIndex(.{
+            .name = "idx_orders_user",
+            .table = "bench_orders",
+            .columns = &.{"user_id"},
+            .unique = false,
+        });
+        _ = driver.execute(&idx_users_active) catch {};
+        _ = driver.execute(&idx_orders_status) catch {};
+        _ = driver.execute(&idx_orders_user) catch {};
+    }
 
     std.debug.print("  Seeded: 100 users, 500 orders (indexed)\n\n", .{});
 
@@ -171,8 +207,12 @@ pub fn main() !void {
 
     // ── Cleanup ──────────────────────────────────────────────
     std.debug.print("\n  Cleaning up...", .{});
-    _ = driver.executeRaw("DROP TABLE bench_orders") catch {};
-    _ = driver.executeRaw("DROP TABLE bench_users") catch {};
+    {
+        const drop_orders = QailCmd.drop("bench_orders");
+        const drop_users = QailCmd.drop("bench_users");
+        _ = driver.execute(&drop_orders) catch {};
+        _ = driver.execute(&drop_users) catch {};
+    }
     std.debug.print(" done\n", .{});
 
     std.debug.print("\n────────────────────────────────────────────────────────\n", .{});
@@ -217,17 +257,26 @@ fn benchFetchOne(driver: *PgDriver, label: []const u8, cmd: *const QailCmd) u64 
 
 /// Benchmark INSERT + DELETE cycle (write throughput)
 fn benchWriteCycle(driver: *PgDriver, label: []const u8) u64 {
+    const insert_assigns = [_]Assignment{
+        .{ .column = "name", .value = .{ .string = "_tmp" } },
+        .{ .column = "email", .value = .{ .string = "_tmp@t.com" } },
+    };
+    const insert_cmd = QailCmd.add("bench_users").values(&insert_assigns);
+    const delete_cmd = QailCmd.del("bench_users").where(&.{
+        .{ .condition = .{ .column = "name", .op = .eq, .value = .{ .string = "_tmp" } } },
+    });
+
     // Warmup
     for (0..100) |_| {
-        _ = driver.executeRaw("INSERT INTO bench_users (name, email) VALUES ('_tmp', '_tmp@t.com')") catch {};
-        _ = driver.executeRaw("DELETE FROM bench_users WHERE name = '_tmp'") catch {};
+        _ = driver.execute(&insert_cmd) catch {};
+        _ = driver.execute(&delete_cmd) catch {};
     }
 
     const start = time.now() catch unreachable;
 
     for (0..WRITE_ITERS) |_| {
-        _ = driver.executeRaw("INSERT INTO bench_users (name, email) VALUES ('_tmp', '_tmp@t.com')") catch {};
-        _ = driver.executeRaw("DELETE FROM bench_users WHERE name = '_tmp'") catch {};
+        _ = driver.execute(&insert_cmd) catch {};
+        _ = driver.execute(&delete_cmd) catch {};
     }
 
     const end = time.now() catch unreachable;
@@ -240,11 +289,23 @@ fn benchWriteCycle(driver: *PgDriver, label: []const u8) u64 {
     return total_ops;
 }
 
-/// Benchmark UPDATE throughput (uses raw SQL to avoid alloc overhead)
+/// Benchmark UPDATE throughput
 fn benchUpdate(driver: *PgDriver, label: []const u8) u64 {
+    const set_true = [_]Assignment{
+        .{ .column = "active", .value = .{ .bool = true } },
+    };
+    const set_false = [_]Assignment{
+        .{ .column = "active", .value = .{ .bool = false } },
+    };
+    const where_id = [_]qail.ast.WhereClause{
+        .{ .condition = .{ .column = "id", .op = .eq, .value = .{ .int = 1 } } },
+    };
+    const update_true = QailCmd.set("bench_users").values(&set_true).where(&where_id);
+    const update_false = QailCmd.set("bench_users").values(&set_false).where(&where_id);
+
     // Warmup
     for (0..100) |_| {
-        _ = driver.executeRaw("UPDATE bench_users SET active = true WHERE id = 1") catch {};
+        _ = driver.execute(&update_true) catch {};
     }
 
     const start = time.now() catch unreachable;
@@ -252,9 +313,9 @@ fn benchUpdate(driver: *PgDriver, label: []const u8) u64 {
     // Alternate between two static SQL strings to avoid branch prediction bias
     for (0..WRITE_ITERS) |i| {
         if (i % 2 == 0) {
-            _ = driver.executeRaw("UPDATE bench_users SET active = true WHERE id = 1") catch {};
+            _ = driver.execute(&update_true) catch {};
         } else {
-            _ = driver.executeRaw("UPDATE bench_users SET active = false WHERE id = 1") catch {};
+            _ = driver.execute(&update_false) catch {};
         }
     }
 

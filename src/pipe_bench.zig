@@ -16,6 +16,7 @@ const time = qail.compat.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
+const Assignment = qail.ast.Assignment;
 const Connection = qail.driver.Connection;
 const Pipeline = qail.driver.Pipeline;
 const PgPool = qail.driver.PgPool;
@@ -48,29 +49,47 @@ pub fn main() !void {
     var setup_drv = try PgDriver.connect(allocator, "127.0.0.1", 5432, "postgres", "qail_e2e_test");
     defer setup_drv.deinit();
 
-    _ = setup_drv.executeRaw("DROP TABLE IF EXISTS pipe_orders") catch {};
-    _ = setup_drv.executeRaw("DROP TABLE IF EXISTS pipe_users") catch {};
-    _ = try setup_drv.executeRaw(
-        "CREATE TABLE pipe_users (" ++
-            "id SERIAL PRIMARY KEY, " ++
-            "name TEXT NOT NULL, " ++
-            "email TEXT NOT NULL, " ++
-            "active BOOLEAN DEFAULT true)",
-    );
-    _ = try setup_drv.executeRaw(
-        "CREATE TABLE pipe_orders (" ++
-            "id SERIAL PRIMARY KEY, " ++
-            "user_id INTEGER REFERENCES pipe_users(id), " ++
-            "product TEXT NOT NULL, " ++
-            "amount NUMERIC(10,2) NOT NULL, " ++
-            "status TEXT DEFAULT 'pending')",
-    );
+    {
+        const drop_orders = QailCmd.drop("pipe_orders");
+        const drop_users = QailCmd.drop("pipe_users");
+        _ = setup_drv.execute(&drop_orders) catch {};
+        _ = setup_drv.execute(&drop_users) catch {};
+    }
+    {
+        const user_cols = [_]Expr{
+            Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
+            Expr.defWithConstraints("name", "TEXT", &.{.not_null}),
+            Expr.defWithConstraints("email", "TEXT", &.{.not_null}),
+            Expr.defWithConstraints("active", "BOOLEAN", &.{.{ .default = "true" }}),
+        };
+        const create_users = QailCmd.make("pipe_users").select(&user_cols);
+        _ = try setup_drv.execute(&create_users);
+    }
+    {
+        const order_cols = [_]Expr{
+            Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
+            Expr.defWithConstraints("user_id", "INTEGER", &.{.{ .references = "pipe_users(id)" }}),
+            Expr.defWithConstraints("product", "TEXT", &.{.not_null}),
+            Expr.defWithConstraints("amount", "NUMERIC(10,2)", &.{.not_null}),
+            Expr.defWithConstraints("status", "TEXT", &.{.{ .default = "'pending'" }}),
+        };
+        const create_orders = QailCmd.make("pipe_orders").select(&order_cols);
+        _ = try setup_drv.execute(&create_orders);
+    }
 
     // Seed 100 users
     for (1..101) |i| {
         var buf: [256]u8 = undefined;
-        const sql = try std.fmt.bufPrint(&buf, "INSERT INTO pipe_users (name, email, active) VALUES ('User {d}', 'u{d}@t.com', {s})", .{ i, i, if (i % 3 != 0) "true" else "false" });
-        _ = setup_drv.executeRaw(sql) catch {};
+        const name = try std.fmt.bufPrint(&buf, "User {d}", .{i});
+        var email_buf: [64]u8 = undefined;
+        const email = try std.fmt.bufPrint(&email_buf, "u{d}@t.com", .{i});
+        const assigns = [_]Assignment{
+            .{ .column = "name", .value = .{ .string = name } },
+            .{ .column = "email", .value = .{ .string = email } },
+            .{ .column = "active", .value = .{ .bool = i % 3 != 0 } },
+        };
+        const cmd = QailCmd.add("pipe_users").values(&assigns);
+        _ = setup_drv.execute(&cmd) catch {};
     }
 
     // Seed 500 orders
@@ -78,14 +97,42 @@ pub fn main() !void {
     for (1..101) |uid| {
         for (0..5) |j| {
             var buf: [256]u8 = undefined;
-            const sql = try std.fmt.bufPrint(&buf, "INSERT INTO pipe_orders (user_id, product, amount, status) VALUES ({d}, 'P{d}-{d}', {d}.99, '{s}')", .{ uid, uid, j, (j + 1) * 10, statuses[j % 5] });
-            _ = setup_drv.executeRaw(sql) catch {};
+            const product = try std.fmt.bufPrint(&buf, "P{d}-{d}", .{ uid, j });
+            const amount = @as(f64, @floatFromInt((j + 1) * 10)) + 0.99;
+            const assigns = [_]Assignment{
+                .{ .column = "user_id", .value = .{ .int = @as(i64, @intCast(uid)) } },
+                .{ .column = "product", .value = .{ .string = product } },
+                .{ .column = "amount", .value = .{ .float = amount } },
+                .{ .column = "status", .value = .{ .string = statuses[j % 5] } },
+            };
+            const cmd = QailCmd.add("pipe_orders").values(&assigns);
+            _ = setup_drv.execute(&cmd) catch {};
         }
     }
 
-    _ = setup_drv.executeRaw("CREATE INDEX IF NOT EXISTS idx_pu_active ON pipe_users (active)") catch {};
-    _ = setup_drv.executeRaw("CREATE INDEX IF NOT EXISTS idx_po_status ON pipe_orders (status)") catch {};
-    _ = setup_drv.executeRaw("CREATE INDEX IF NOT EXISTS idx_po_user ON pipe_orders (user_id)") catch {};
+    {
+        const idx_users_active = QailCmd.createIndex("pipe_users").withIndex(.{
+            .name = "idx_pu_active",
+            .table = "pipe_users",
+            .columns = &.{"active"},
+            .unique = false,
+        });
+        const idx_orders_status = QailCmd.createIndex("pipe_orders").withIndex(.{
+            .name = "idx_po_status",
+            .table = "pipe_orders",
+            .columns = &.{"status"},
+            .unique = false,
+        });
+        const idx_orders_user = QailCmd.createIndex("pipe_orders").withIndex(.{
+            .name = "idx_po_user",
+            .table = "pipe_orders",
+            .columns = &.{"user_id"},
+            .unique = false,
+        });
+        _ = setup_drv.execute(&idx_users_active) catch {};
+        _ = setup_drv.execute(&idx_orders_status) catch {};
+        _ = setup_drv.execute(&idx_orders_user) catch {};
+    }
 
     std.debug.print("  Seeded: 100 users, 500 orders (indexed)\n\n", .{});
     std.debug.print("  ── Mode Comparison ──\n\n", .{});
@@ -234,8 +281,12 @@ pub fn main() !void {
 
     // ── Cleanup ──────────────────────────────────────────────
     std.debug.print("\n  Cleaning up...", .{});
-    _ = setup_drv.executeRaw("DROP TABLE IF EXISTS pipe_orders") catch {};
-    _ = setup_drv.executeRaw("DROP TABLE IF EXISTS pipe_users") catch {};
+    {
+        const drop_orders = QailCmd.drop("pipe_orders");
+        const drop_users = QailCmd.drop("pipe_users");
+        _ = setup_drv.execute(&drop_orders) catch {};
+        _ = setup_drv.execute(&drop_users) catch {};
+    }
     std.debug.print(" done\n\n", .{});
 }
 
