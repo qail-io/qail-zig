@@ -79,7 +79,7 @@ pub const QailCmd = struct {
     // INSERT values (for add command)
     insert_values: []const Value = &.{},
 
-    // Raw SQL (for migrations, DDL)
+    // Raw SQL escape hatch (trusted/internal use only)
     raw_sql: ?[]const u8 = null,
 
     // ==================== New DML Features ====================
@@ -104,7 +104,7 @@ pub const QailCmd = struct {
 
     // ==================== DML Extensions ====================
 
-    // INSERT ... SELECT source query
+    // INSERT/VIEW/EXPLAIN raw source-query escape hatch (trusted/internal only)
     source_query_sql: ?[]const u8 = null,
 
     // UPDATE ... FROM additional tables
@@ -162,7 +162,8 @@ pub const QailCmd = struct {
         return .{ .kind = .truncate, .table = table };
     }
 
-    /// Create a raw SQL command
+    /// Create a raw SQL command.
+    /// Trusted/internal use only; public execution paths reject it.
     pub fn raw(sql: []const u8) QailCmd {
         return .{ .kind = .raw, .raw_sql = sql };
     }

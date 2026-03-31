@@ -64,7 +64,8 @@ pub const Expr = union(enum) {
         alias: ?[]const u8 = null,
     },
 
-    /// Subquery
+    /// Raw scalar subquery escape hatch.
+    /// Trusted/internal use only; public execution paths reject it.
     subquery: struct {
         sql: []const u8,
         alias: ?[]const u8 = null,
@@ -156,7 +157,8 @@ pub const Expr = union(enum) {
         alias: ?[]const u8 = null,
     },
 
-    /// EXISTS subquery: EXISTS(SELECT ...)
+    /// EXISTS subquery escape hatch.
+    /// Trusted/internal use only; public execution paths reject it.
     exists_subquery: struct {
         sql: []const u8,
         negated: bool = false,
@@ -169,8 +171,9 @@ pub const Expr = union(enum) {
         operand: *const Expr,
     },
 
-    /// Raw SQL expression — escape hatch for expressions that cannot be
-    /// typed as AST nodes (e.g. pg_policies introspection).
+    /// Raw SQL expression escape hatch for expressions that cannot yet be
+    /// modeled as AST nodes. Trusted/internal use only; public execution paths
+    /// reject it.
     raw: []const u8,
 
     // ==================== Builder Methods ====================

@@ -184,7 +184,7 @@ pub const CTEDef = struct {
     name: []const u8,
     recursive: bool = false,
     columns: []const []const u8 = &.{},
-    // Note: For Zig, we use sql string instead of nested QailCmd pointer
+    // Trusted/internal raw SQL escape hatch until nested AST CTEs exist.
     base_sql: []const u8 = "",
 };
 
@@ -214,7 +214,7 @@ pub const SetOp = enum {
 /// Set operation definition (operation + query)
 pub const SetOpDef = struct {
     op: SetOp,
-    // Note: For Zig, we use sql string instead of nested QailCmd pointer
+    // Trusted/internal raw SQL escape hatch until nested AST set-ops exist.
     query_sql: []const u8 = "",
 };
 
@@ -284,6 +284,7 @@ pub const PolicyDef = struct {
     target: PolicyTarget = .all,
     permissiveness: PolicyPermissiveness = .permissive,
     role: ?[]const u8 = null,
+    // Trusted/internal raw SQL escape hatches until policy predicates are AST-native.
     using_sql: ?[]const u8 = null,
     with_check_sql: ?[]const u8 = null,
 };
