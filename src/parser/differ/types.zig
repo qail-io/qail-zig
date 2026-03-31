@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const io = @import("../../compat/io.zig");
+const render = @import("../../transpiler/postgres/render.zig");
 const schema = @import("../schema.zig");
 
 const ColumnDef = schema.ColumnDef;
@@ -237,10 +238,20 @@ pub const MigrationCmd = struct {
                 if (policy.role) |role| {
                     try w.print(" TO {s}", .{role});
                 }
-                if (policy.using_sql) |using_sql| {
+                if (policy.using_expr) |using_expr| {
+                    try w.writeAll(" USING (");
+                    var expr = using_expr;
+                    try render.writeExpr(w, &expr);
+                    try w.writeByte(')');
+                } else if (policy.using_sql) |using_sql| {
                     try w.print(" USING ({s})", .{using_sql});
                 }
-                if (policy.with_check_sql) |with_check_sql| {
+                if (policy.with_check_expr) |with_check_expr| {
+                    try w.writeAll(" WITH CHECK (");
+                    var expr = with_check_expr;
+                    try render.writeExpr(w, &expr);
+                    try w.writeByte(')');
+                } else if (policy.with_check_sql) |with_check_sql| {
                     try w.print(" WITH CHECK ({s})", .{with_check_sql});
                 }
             },
@@ -320,10 +331,20 @@ pub const MigrationCmd = struct {
                     if (policy.role) |role| {
                         try w.print(" TO {s}", .{role});
                     }
-                    if (policy.using_sql) |using_sql| {
+                    if (policy.using_expr) |using_expr| {
+                        try w.writeAll(" USING (");
+                        var expr = using_expr;
+                        try render.writeExpr(w, &expr);
+                        try w.writeByte(')');
+                    } else if (policy.using_sql) |using_sql| {
                         try w.print(" USING ({s})", .{using_sql});
                     }
-                    if (policy.with_check_sql) |with_check_sql| {
+                    if (policy.with_check_expr) |with_check_expr| {
+                        try w.writeAll(" WITH CHECK (");
+                        var expr = with_check_expr;
+                        try render.writeExpr(w, &expr);
+                        try w.writeByte(')');
+                    } else if (policy.with_check_sql) |with_check_sql| {
                         try w.print(" WITH CHECK ({s})", .{with_check_sql});
                     }
                 } else {

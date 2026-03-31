@@ -410,6 +410,57 @@ test "diff policy create and drop" {
     try std.testing.expect(has_create_policy);
 }
 
+test "diff policy predicate change emits drop and recreate" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+        \\policy orders_tenant_isolation on orders
+        \\  for all
+        \\  restrictive
+        \\  using (tenant_id = current_setting('app.tenant_id')::uuid)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+        \\policy orders_tenant_isolation on orders
+        \\  for all
+        \\  restrictive
+        \\  using (tenant_id = current_setting('app.current_tenant_id')::uuid)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    var saw_drop = false;
+    var saw_create = false;
+    for (cmds.items) |cmd| {
+        switch (cmd.action) {
+            .drop_policy => saw_drop = true,
+            .create_policy => {
+                saw_create = true;
+                const sql = try cmd.toSql(allocator);
+                defer allocator.free(sql);
+                try std.testing.expect(std.mem.indexOf(u8, sql, "current_setting('app.current_tenant_id')::uuid") != null);
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(saw_drop);
+    try std.testing.expect(saw_create);
+}
+
 test "diff grant removal emits revoke" {
     const allocator = std.testing.allocator;
 

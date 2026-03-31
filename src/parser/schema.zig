@@ -12,7 +12,12 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ast = @import("../ast/mod.zig");
 const schema_types = @import("schema/types.zig");
+
+const Expr = ast.Expr;
+const BinaryOp = ast.BinaryOp;
+const Value = ast.Value;
 
 pub const PolicyTarget = schema_types.PolicyTarget;
 pub const PolicyPermissiveness = schema_types.PolicyPermissiveness;
@@ -50,6 +55,8 @@ pub const Schema = struct {
             self.allocator.free(policy.name);
             self.allocator.free(policy.table);
             if (policy.role) |role| self.allocator.free(role);
+            if (policy.using_expr) |expr| freeOwnedExpr(self.allocator, expr);
+            if (policy.with_check_expr) |expr| freeOwnedExpr(self.allocator, expr);
             if (policy.using_sql) |using_sql| self.allocator.free(using_sql);
             if (policy.with_check_sql) |with_check_sql| self.allocator.free(with_check_sql);
         }
@@ -213,6 +220,30 @@ const Parser = struct {
         return self.allocator.dupe(u8, expr);
     }
 
+    fn parsePolicyPredicate(self: *Parser, expr_slot: *?Expr, raw_slot: *?[]const u8) !void {
+        const raw = try self.parseParenthesizedExpr();
+        errdefer self.allocator.free(raw);
+
+        const parsed = parseOwnedPolicyExpr(self.allocator, raw) catch |err| switch (err) {
+            error.InvalidPolicyExpression, error.UnsupportedPolicyExpr => {
+                if (expr_slot.*) |old_expr| {
+                    freeOwnedExpr(self.allocator, old_expr);
+                    expr_slot.* = null;
+                }
+                if (raw_slot.*) |old_raw| self.allocator.free(old_raw);
+                raw_slot.* = raw;
+                return;
+            },
+            else => return err,
+        };
+
+        if (expr_slot.*) |old_expr| freeOwnedExpr(self.allocator, old_expr);
+        if (raw_slot.*) |old_raw| self.allocator.free(old_raw);
+        expr_slot.* = parsed;
+        raw_slot.* = null;
+        self.allocator.free(raw);
+    }
+
     fn parsePolicy(self: *Parser) !PolicyDef {
         if (!self.matchKeyword("policy")) return error.ExpectedPolicy;
 
@@ -229,6 +260,8 @@ const Parser = struct {
             .target = .all,
             .permissiveness = .permissive,
             .role = null,
+            .using_expr = null,
+            .with_check_expr = null,
             .using_sql = null,
             .with_check_sql = null,
         };
@@ -236,6 +269,8 @@ const Parser = struct {
             self.allocator.free(policy.name);
             self.allocator.free(policy.table);
             if (policy.role) |role| self.allocator.free(role);
+            if (policy.using_expr) |expr| freeOwnedExpr(self.allocator, expr);
+            if (policy.with_check_expr) |expr| freeOwnedExpr(self.allocator, expr);
             if (policy.using_sql) |using_sql| self.allocator.free(using_sql);
             if (policy.with_check_sql) |with_check_sql| self.allocator.free(with_check_sql);
         }
@@ -256,24 +291,18 @@ const Parser = struct {
             }
 
             if (self.matchKeyword("using")) {
-                const using_sql = try self.parseParenthesizedExpr();
-                if (policy.using_sql) |old_using| self.allocator.free(old_using);
-                policy.using_sql = using_sql;
+                try self.parsePolicyPredicate(&policy.using_expr, &policy.using_sql);
                 continue;
             }
 
             if (self.matchKeyword("with_check")) {
-                const with_check_sql = try self.parseParenthesizedExpr();
-                if (policy.with_check_sql) |old_with_check| self.allocator.free(old_with_check);
-                policy.with_check_sql = with_check_sql;
+                try self.parsePolicyPredicate(&policy.with_check_expr, &policy.with_check_sql);
                 continue;
             }
 
             if (self.matchKeyword("with")) {
                 if (self.matchKeyword("check")) {
-                    const with_check_sql = try self.parseParenthesizedExpr();
-                    if (policy.with_check_sql) |old_with_check| self.allocator.free(old_with_check);
-                    policy.with_check_sql = with_check_sql;
+                    try self.parsePolicyPredicate(&policy.with_check_expr, &policy.with_check_sql);
                     continue;
                 }
                 self.pos = restore;
@@ -600,6 +629,449 @@ const Parser = struct {
     }
 };
 
+fn cloneOwnedValue(allocator: Allocator, value: Value) !Value {
+    return switch (value) {
+        .string => |s| .{ .string = try allocator.dupe(u8, s) },
+        .bytes => |b| .{ .bytes = try allocator.dupe(u8, b) },
+        .named_param => |p| .{ .named_param = try allocator.dupe(u8, p) },
+        .function => |f| .{ .function = try allocator.dupe(u8, f) },
+        .column => |c| .{ .column = try allocator.dupe(u8, c) },
+        .uuid => |u| .{ .uuid = try allocator.dupe(u8, u) },
+        .timestamp => |ts| .{ .timestamp = try allocator.dupe(u8, ts) },
+        .json => |j| .{ .json = try allocator.dupe(u8, j) },
+        .array => |items| blk: {
+            const cloned = try allocator.alloc(Value, items.len);
+            errdefer allocator.free(cloned);
+            for (items, 0..) |item, i| {
+                cloned[i] = try cloneOwnedValue(allocator, item);
+            }
+            break :blk .{ .array = cloned };
+        },
+        else => value,
+    };
+}
+
+fn freeOwnedValue(allocator: Allocator, value: Value) void {
+    switch (value) {
+        .string => |s| allocator.free(s),
+        .bytes => |b| allocator.free(b),
+        .named_param => |p| allocator.free(p),
+        .function => |f| allocator.free(f),
+        .column => |c| allocator.free(c),
+        .uuid => |u| allocator.free(u),
+        .timestamp => |ts| allocator.free(ts),
+        .json => |j| allocator.free(j),
+        .array => |items| {
+            for (items) |item| freeOwnedValue(allocator, item);
+            allocator.free(items);
+        },
+        else => {},
+    }
+}
+
+fn cloneOwnedExpr(allocator: Allocator, expr: Expr) !Expr {
+    return switch (expr) {
+        .named => |name| .{ .named = try allocator.dupe(u8, name) },
+        .literal => |value| .{ .literal = try cloneOwnedValue(allocator, value) },
+        .func_call => |fc| blk: {
+            const args = try allocator.alloc(Expr, fc.args.len);
+            errdefer allocator.free(args);
+            for (fc.args, 0..) |arg, i| {
+                args[i] = try cloneOwnedExpr(allocator, arg);
+            }
+            break :blk .{
+                .func_call = .{
+                    .name = try allocator.dupe(u8, fc.name),
+                    .args = args,
+                    .alias = if (fc.alias) |alias| try allocator.dupe(u8, alias) else null,
+                },
+            };
+        },
+        .cast => |c| blk: {
+            const inner = try allocator.create(Expr);
+            errdefer allocator.destroy(inner);
+            inner.* = try cloneOwnedExpr(allocator, c.expr.*);
+            break :blk .{
+                .cast = .{
+                    .expr = inner,
+                    .target_type = try allocator.dupe(u8, c.target_type),
+                    .alias = if (c.alias) |alias| try allocator.dupe(u8, alias) else null,
+                },
+            };
+        },
+        .binary => |b| blk: {
+            const left = try allocator.create(Expr);
+            errdefer allocator.destroy(left);
+            left.* = try cloneOwnedExpr(allocator, b.left.*);
+
+            const right = try allocator.create(Expr);
+            errdefer allocator.destroy(right);
+            right.* = try cloneOwnedExpr(allocator, b.right.*);
+
+            break :blk .{
+                .binary = .{
+                    .left = left,
+                    .op = b.op,
+                    .right = right,
+                    .alias = if (b.alias) |alias| try allocator.dupe(u8, alias) else null,
+                },
+            };
+        },
+        else => return error.UnsupportedPolicyExpr,
+    };
+}
+
+fn freeOwnedExprPtr(allocator: Allocator, ptr: *const Expr) void {
+    freeOwnedExpr(allocator, ptr.*);
+    allocator.destroy(@constCast(ptr));
+}
+
+fn freeOwnedExpr(allocator: Allocator, expr: Expr) void {
+    switch (expr) {
+        .named => |name| allocator.free(name),
+        .literal => |value| freeOwnedValue(allocator, value),
+        .func_call => |fc| {
+            allocator.free(fc.name);
+            for (fc.args) |arg| freeOwnedExpr(allocator, arg);
+            allocator.free(fc.args);
+            if (fc.alias) |alias| allocator.free(alias);
+        },
+        .cast => |c| {
+            freeOwnedExprPtr(allocator, c.expr);
+            allocator.free(c.target_type);
+            if (c.alias) |alias| allocator.free(alias);
+        },
+        .binary => |b| {
+            freeOwnedExprPtr(allocator, b.left);
+            freeOwnedExprPtr(allocator, b.right);
+            if (b.alias) |alias| allocator.free(alias);
+        },
+        else => {},
+    }
+}
+
+fn parseOwnedPolicyExpr(allocator: Allocator, input: []const u8) !Expr {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    var parser = PolicyExprParser.init(arena.allocator(), input);
+    const arena_expr = parser.parse() catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidPolicyExpression,
+    };
+
+    return cloneOwnedExpr(allocator, arena_expr);
+}
+
+const PolicyExprParser = struct {
+    allocator: Allocator,
+    input: []const u8,
+    pos: usize = 0,
+
+    fn init(allocator: Allocator, input: []const u8) PolicyExprParser {
+        return .{
+            .allocator = allocator,
+            .input = input,
+        };
+    }
+
+    fn remaining(self: *PolicyExprParser) []const u8 {
+        return self.input[self.pos..];
+    }
+
+    fn current(self: *PolicyExprParser) ?u8 {
+        if (self.pos >= self.input.len) return null;
+        return self.input[self.pos];
+    }
+
+    fn advance(self: *PolicyExprParser) void {
+        if (self.pos < self.input.len) self.pos += 1;
+    }
+
+    fn skipWhitespace(self: *PolicyExprParser) void {
+        while (self.current()) |ch| {
+            if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r') {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn isIdentChar(ch: u8) bool {
+        return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.';
+    }
+
+    fn matchKeyword(self: *PolicyExprParser, keyword: []const u8) bool {
+        self.skipWhitespace();
+        const rem = self.remaining();
+        if (rem.len < keyword.len) return false;
+        if (!std.ascii.eqlIgnoreCase(rem[0..keyword.len], keyword)) return false;
+        if (rem.len > keyword.len and isIdentChar(rem[keyword.len])) return false;
+        self.pos += keyword.len;
+        return true;
+    }
+
+    fn parse(self: *PolicyExprParser) anyerror!Expr {
+        const expr = try self.parseExpr();
+        self.skipWhitespace();
+        if (self.pos != self.input.len) return error.InvalidPolicyExpression;
+        return expr;
+    }
+
+    fn parseExpr(self: *PolicyExprParser) anyerror!Expr {
+        var expr = try self.parseComparison();
+
+        while (true) {
+            if (self.matchKeyword("or")) {
+                const left = try self.allocator.create(Expr);
+                left.* = expr;
+                errdefer self.allocator.destroy(left);
+
+                const right_expr = try self.parseComparison();
+                const right = try self.allocator.create(Expr);
+                right.* = right_expr;
+                errdefer self.allocator.destroy(right);
+
+                expr = .{
+                    .binary = .{
+                        .left = left,
+                        .op = .@"or",
+                        .right = right,
+                    },
+                };
+                continue;
+            }
+
+            if (self.matchKeyword("and")) {
+                const left = try self.allocator.create(Expr);
+                left.* = expr;
+                errdefer self.allocator.destroy(left);
+
+                const right_expr = try self.parseComparison();
+                const right = try self.allocator.create(Expr);
+                right.* = right_expr;
+                errdefer self.allocator.destroy(right);
+
+                expr = .{
+                    .binary = .{
+                        .left = left,
+                        .op = .@"and",
+                        .right = right,
+                    },
+                };
+                continue;
+            }
+
+            break;
+        }
+
+        return expr;
+    }
+
+    fn parseComparison(self: *PolicyExprParser) anyerror!Expr {
+        const left_expr = try self.parseAtom();
+        self.skipWhitespace();
+
+        const op = self.parseCmpOp() orelse return left_expr;
+
+        const left = try self.allocator.create(Expr);
+        left.* = left_expr;
+        errdefer self.allocator.destroy(left);
+
+        const right_expr = try self.parseAtom();
+        const right = try self.allocator.create(Expr);
+        right.* = right_expr;
+        errdefer self.allocator.destroy(right);
+
+        return .{
+            .binary = .{
+                .left = left,
+                .op = op,
+                .right = right,
+            },
+        };
+    }
+
+    fn parseCmpOp(self: *PolicyExprParser) ?BinaryOp {
+        self.skipWhitespace();
+        const rem = self.remaining();
+        if (std.mem.startsWith(u8, rem, ">=")) {
+            self.pos += 2;
+            return .gte;
+        }
+        if (std.mem.startsWith(u8, rem, "<=")) {
+            self.pos += 2;
+            return .lte;
+        }
+        if (std.mem.startsWith(u8, rem, "<>") or std.mem.startsWith(u8, rem, "!=")) {
+            self.pos += 2;
+            return .ne;
+        }
+        if (std.mem.startsWith(u8, rem, "=")) {
+            self.pos += 1;
+            return .eq;
+        }
+        if (std.mem.startsWith(u8, rem, ">")) {
+            self.pos += 1;
+            return .gt;
+        }
+        if (std.mem.startsWith(u8, rem, "<")) {
+            self.pos += 1;
+            return .lt;
+        }
+        return null;
+    }
+
+    fn parseAtom(self: *PolicyExprParser) anyerror!Expr {
+        self.skipWhitespace();
+        const ch = self.current() orelse return error.UnexpectedEnd;
+
+        if (ch == '(') return self.parseGrouped();
+        if (ch == '\'') return self.parseString();
+        if (std.ascii.isDigit(ch)) return self.parseNumber();
+        if (self.matchKeyword("true")) return .{ .literal = Value.fromBool(true) };
+        if (self.matchKeyword("false")) return .{ .literal = Value.fromBool(false) };
+
+        return self.parseFuncOrIdent();
+    }
+
+    fn parseGrouped(self: *PolicyExprParser) anyerror!Expr {
+        if (self.current() != '(') return error.InvalidPolicyExpression;
+        self.advance();
+        const expr = try self.parseExpr();
+        self.skipWhitespace();
+        if (self.current() != ')') return error.UnterminatedExpression;
+        self.advance();
+        return expr;
+    }
+
+    fn parseString(self: *PolicyExprParser) anyerror!Expr {
+        if (self.current() != '\'') return error.InvalidPolicyExpression;
+        self.advance();
+
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+
+        while (self.current()) |ch| {
+            if (ch == '\'') {
+                self.advance();
+                if (self.current() == '\'') {
+                    try buf.append(self.allocator, '\'');
+                    self.advance();
+                    continue;
+                }
+                return .{ .literal = Value.fromString(try buf.toOwnedSlice(self.allocator)) };
+            }
+
+            try buf.append(self.allocator, ch);
+            self.advance();
+        }
+
+        return error.UnterminatedStringLiteral;
+    }
+
+    fn parseNumber(self: *PolicyExprParser) anyerror!Expr {
+        self.skipWhitespace();
+        const start = self.pos;
+        var saw_dot = false;
+
+        while (self.current()) |ch| {
+            if (std.ascii.isDigit(ch)) {
+                self.advance();
+                continue;
+            }
+            if (ch == '.' and !saw_dot) {
+                saw_dot = true;
+                self.advance();
+                continue;
+            }
+            break;
+        }
+
+        const digits = self.input[start..self.pos];
+        if (digits.len == 0 or digits[0] == '.') return error.InvalidPolicyExpression;
+
+        if (std.mem.indexOfScalar(u8, digits, '.')) |_| {
+            return .{ .literal = Value.fromFloat(try std.fmt.parseFloat(f64, digits)) };
+        }
+
+        return .{ .literal = Value.fromInt(try std.fmt.parseInt(i64, digits, 10)) };
+    }
+
+    fn parseIdentifier(self: *PolicyExprParser) anyerror![]const u8 {
+        self.skipWhitespace();
+        const start = self.pos;
+        while (self.current()) |ch| {
+            if (isIdentChar(ch)) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if (self.pos == start) return error.ExpectedIdentifier;
+        return self.allocator.dupe(u8, self.input[start..self.pos]);
+    }
+
+    fn parseFuncOrIdent(self: *PolicyExprParser) anyerror!Expr {
+        const name = try self.parseIdentifier();
+
+        var expr: Expr = blk: {
+            self.skipWhitespace();
+            if (self.current() == '(') {
+                self.advance();
+                self.skipWhitespace();
+
+                var args: std.ArrayList(Expr) = .empty;
+                defer args.deinit(self.allocator);
+
+                if (self.current() != ')') {
+                    while (true) {
+                        try args.append(self.allocator, try self.parseExpr());
+                        self.skipWhitespace();
+                        if (self.current() == ',') {
+                            self.advance();
+                            self.skipWhitespace();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+
+                if (self.current() != ')') return error.UnterminatedExpression;
+                self.advance();
+
+                break :blk .{
+                    .func_call = .{
+                        .name = name,
+                        .args = try args.toOwnedSlice(self.allocator),
+                    },
+                };
+            }
+
+            break :blk .{ .named = name };
+        };
+
+        self.skipWhitespace();
+        const rem = self.remaining();
+        if (rem.len >= 2 and rem[0] == ':' and rem[1] == ':') {
+            self.pos += 2;
+            const cast_type = try self.parseIdentifier();
+            const inner = try self.allocator.create(Expr);
+            inner.* = expr;
+            expr = .{
+                .cast = .{
+                    .expr = inner,
+                    .target_type = cast_type,
+                },
+            };
+        }
+
+        return expr;
+    }
+};
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -724,8 +1196,43 @@ test "parse policy block" {
     try std.testing.expectEqual(PolicyTarget.all, policy.target);
     try std.testing.expectEqual(PolicyPermissiveness.restrictive, policy.permissiveness);
     try std.testing.expectEqualStrings("app_user", policy.role.?);
-    try std.testing.expect(policy.using_sql != null);
-    try std.testing.expect(policy.with_check_sql != null);
+    try std.testing.expect(policy.using_expr != null);
+    try std.testing.expect(policy.with_check_expr != null);
+    try std.testing.expect(policy.using_sql == null);
+    try std.testing.expect(policy.with_check_sql == null);
+
+    const using_expr = policy.using_expr.?;
+    try std.testing.expect(using_expr == .binary);
+    try std.testing.expectEqual(BinaryOp.eq, using_expr.binary.op);
+    try std.testing.expect(using_expr.binary.left.* == .named);
+    try std.testing.expectEqualStrings("tenant_id", using_expr.binary.left.named);
+    try std.testing.expect(using_expr.binary.right.* == .cast);
+    try std.testing.expectEqualStrings("uuid", using_expr.binary.right.cast.target_type);
+    try std.testing.expect(using_expr.binary.right.cast.expr.* == .func_call);
+    try std.testing.expectEqualStrings("current_setting", using_expr.binary.right.cast.expr.func_call.name);
+}
+
+test "parse policy block falls back to raw sql for unsupported predicate forms" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table users (
+        \\    id uuid primary_key,
+        \\    email text not null
+        \\)
+        \\
+        \\policy users_email_filter on users
+        \\    for select
+        \\    using (lower(email) like '%@qail.io')
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), schema.policies.items.len);
+    const policy = schema.policies.items[0];
+    try std.testing.expect(policy.using_expr == null);
+    try std.testing.expectEqualStrings("lower(email) like '%@qail.io'", policy.using_sql.?);
 }
 
 test "parse grant and revoke statements" {
