@@ -32,8 +32,11 @@ pub const TlsMode = enum {
 
 /// GSS session-encryption policy parsed from URL options.
 ///
-/// `PgDriver` currently supports plain TCP only; `.prefer`/`.require` are
-/// accepted by URL/builder parsing but rejected at connect time.
+/// `PgDriver` supports libpq-style negotiation semantics for `.prefer` and
+/// `.require`:
+/// - rejected/server-error prefaces can fall through on `.prefer`
+/// - accepted prefaces currently fail with an explicit unsupported transport
+///   error until encrypted GSSENC stream support lands
 pub const GssEncMode = enum {
     disable,
     prefer,
@@ -60,7 +63,10 @@ pub const ConnectOptions = struct {
     tls_mode: TlsMode = .disable,
     /// Optional TLS configuration used when `tls_mode` is not `.disable`.
     tls_config: ?TlsConfig = null,
-    /// Parsed libpq-style GSS encryption mode; only `.disable` is currently supported by `PgDriver`.
+    /// Parsed libpq-style GSS encryption mode.
+    ///
+    /// Negotiation preface support is implemented; accepted GSSENC transport is
+    /// still fail-closed until encrypted stream support lands.
     gss_enc_mode: GssEncMode = .disable,
 };
 

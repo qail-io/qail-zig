@@ -233,6 +233,29 @@ pub fn connectToAddress(selected: Backend, address: net.Address) !ConnectResult 
     };
 }
 
+/// Connect TCP stream to a hostname using selected backend.
+pub fn connectToHost(selected: Backend, allocator: std.mem.Allocator, host: []const u8, port: u16) !ConnectResult {
+    return switch (selected) {
+        .sync => .{
+            .stream = .{ .sync = try net.tcpConnectToHost(allocator, host, port) },
+            .backend = .sync,
+        },
+        .io_uring => blk: {
+            const stream = try net.tcpConnectToHost(allocator, host, port);
+            const uring_stream = IoUringStream.initFromNet(stream) catch {
+                break :blk .{
+                    .stream = .{ .sync = stream },
+                    .backend = .sync,
+                };
+            };
+            break :blk .{
+                .stream = .{ .io_uring = uring_stream },
+                .backend = .io_uring,
+            };
+        },
+    };
+}
+
 /// Connect TCP stream with timeout using selected backend.
 pub fn connectToIp4WithTimeout(selected: Backend, host: []const u8, port: u16, timeout_ms: i32) !ConnectResult {
     return switch (selected) {
@@ -242,6 +265,35 @@ pub fn connectToIp4WithTimeout(selected: Backend, host: []const u8, port: u16, t
         },
         .io_uring => blk: {
             const stream = try net.tcpConnectToIp4WithTimeout(host, port, timeout_ms);
+            const uring_stream = IoUringStream.initFromNet(stream) catch {
+                break :blk .{
+                    .stream = .{ .sync = stream },
+                    .backend = .sync,
+                };
+            };
+            break :blk .{
+                .stream = .{ .io_uring = uring_stream },
+                .backend = .io_uring,
+            };
+        },
+    };
+}
+
+/// Connect TCP stream to a hostname with timeout using selected backend.
+pub fn connectToHostWithTimeout(
+    selected: Backend,
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    timeout_ms: i32,
+) !ConnectResult {
+    return switch (selected) {
+        .sync => .{
+            .stream = .{ .sync = try net.tcpConnectToHostWithTimeout(allocator, host, port, timeout_ms) },
+            .backend = .sync,
+        },
+        .io_uring => blk: {
+            const stream = try net.tcpConnectToHostWithTimeout(allocator, host, port, timeout_ms);
             const uring_stream = IoUringStream.initFromNet(stream) catch {
                 break :blk .{
                     .stream = .{ .sync = stream },

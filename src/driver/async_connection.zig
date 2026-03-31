@@ -33,30 +33,12 @@ pub const AsyncConnection = struct {
 
     /// Connect with timeout (milliseconds). Returns error if connection takes too long.
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16, timeout_ms: i32) !AsyncConnection {
-        const address = try net.parseIp4(host, port);
-
-        // Create non-blocking socket
-        const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0);
-        errdefer posix.close(fd);
-
-        // Attempt connect (will return EINPROGRESS for non-blocking)
-        const result = posix.connect(fd, &address.any, address.getOsSockLen());
-        if (result) |_| {
-            // Connected immediately
-        } else |err| {
-            if (err == error.WouldBlock) {
-                // Wait for connection with timeout
-                if (!try pollWrite(fd, timeout_ms)) {
-                    return error.ConnectionTimeout;
-                }
-                // If poll says writable, connection succeeded (or failed with error on next write)
-            } else {
-                return err;
-            }
-        }
+        var stream = try net.tcpConnectToHostWithTimeout(allocator, host, port, timeout_ms);
+        errdefer stream.close();
+        try net.setStreamBlocking(stream, false);
 
         return .{
-            .fd = fd,
+            .fd = stream.handle,
             .allocator = allocator,
             .default_timeout_ms = timeout_ms,
         };
@@ -176,6 +158,7 @@ pub const AsyncConnection = struct {
         }
         var waiting_for_scram_final = false;
         var gss_mechanism: ?auth_options_mod.GssMechanism = null;
+        var gss_session_id: ?u64 = null;
         var gss_roundtrips: u32 = 0;
         const AuthFlow = enum { none, cleartext, md5, sasl, gss };
         var auth_flow: AuthFlow = .none;
@@ -201,6 +184,7 @@ pub const AsyncConnection = struct {
                             if (auth_flow == .sasl and !sasl_complete) return error.AuthenticationOkBeforeSaslFinal;
                             if (waiting_for_scram_final) return error.InvalidScramState;
                             gss_mechanism = null;
+                            gss_session_id = null;
                             gss_roundtrips = 0;
                             auth_flow = .none;
                             auth_ok = true;
@@ -234,22 +218,25 @@ pub const AsyncConnection = struct {
                             auth_flow = .gss;
                             if (!auth_options_mod.authTypeAllowed(auth_options, auth_type)) return error.AuthMechanismDisabled;
                             const mechanism = auth_options_mod.mechanismFromAuthType(auth_type).?;
-                            const token = try auth_options_mod.requestGssToken(auth_options, mechanism, null, self.allocator);
+                            const session_id = auth_options_mod.nextGssSessionId();
+                            const token = try auth_options_mod.requestGssToken(auth_options, session_id, mechanism, null, self.allocator);
                             if (token.len != 0) {
                                 try encoder.encodeSaslResponse(token);
                                 try self.send(encoder.getWritten());
                             }
                             gss_mechanism = mechanism;
+                            gss_session_id = session_id;
                             gss_roundtrips = 0;
                         },
                         .gss_continue => {
                             if (auth_flow != .gss) return error.InvalidGssState;
                             const mechanism = gss_mechanism orelse return error.InvalidGssState;
+                            const session_id = gss_session_id orelse return error.InvalidGssState;
                             gss_roundtrips += 1;
                             if (gss_roundtrips > auth_options.max_gss_roundtrips) return error.GssRoundtripLimitExceeded;
 
                             const server_token = try decoder.parseAuthenticationSaslData();
-                            const token = try auth_options_mod.requestGssToken(auth_options, mechanism, server_token, self.allocator);
+                            const token = try auth_options_mod.requestGssToken(auth_options, session_id, mechanism, server_token, self.allocator);
                             if (token.len != 0) {
                                 try encoder.encodeSaslResponse(token);
                                 try self.send(encoder.getWritten());
@@ -286,6 +273,7 @@ pub const AsyncConnection = struct {
                             scram_client = client;
                             waiting_for_scram_final = false;
                             gss_mechanism = null;
+                            gss_session_id = null;
                             gss_roundtrips = 0;
                         },
                         .sasl_continue => {

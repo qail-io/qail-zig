@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const net = @import("../compat/net.zig");
 const process = @import("../compat/process.zig");
 const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
@@ -22,6 +23,7 @@ const replication_mod = @import("replication.zig");
 const raw_policy_mod = @import("raw_policy.zig");
 const raw_cmd_mod = @import("raw_cmd.zig");
 const raw_sql_mod = @import("raw_sql.zig");
+const gssenc_request_mod = @import("gssenc_request.zig");
 const transpiler = @import("../transpiler/postgres.zig");
 
 const QailCmd = ast.QailCmd;
@@ -485,7 +487,15 @@ pub const PgDriver = struct {
         password: ?[]const u8,
         options: ConnectOptions,
     ) !PgDriver {
-        if (options.gss_enc_mode != .disable) return error.UnsupportedGssEncMode;
+        if (options.gss_enc_mode != .disable) {
+            const negotiation = try gssenc_request_mod.tryGssEncRequest(host, port, options.timeout_ms);
+            switch (negotiation) {
+                .accepted => return error.GssEncAcceptedButUnsupported,
+                .rejected, .server_error => {
+                    if (options.gss_enc_mode == .require) return error.GssEncRequiredButRejected;
+                },
+            }
+        }
 
         return connectWithStartupParamsAndAuth(
             allocator,
@@ -1716,6 +1726,164 @@ test "connect with options accepts tls timeout path" {
     } else |err| {
         try std.testing.expect(err != error.UnsupportedTlsConnectTimeout);
     }
+}
+
+const GssEncServerMode = enum {
+    accepted,
+    rejected,
+    rejected_then_plain_auth_ok,
+};
+
+const GssEncServerCtx = struct {
+    server: *net.Server,
+    mode: GssEncServerMode,
+};
+
+fn gssEncServerThread(ctx: *GssEncServerCtx) void {
+    defer ctx.server.deinit();
+
+    {
+        var conn = ctx.server.accept() catch return;
+        defer conn.stream.close();
+
+        var request: [8]u8 = undefined;
+        _ = net.readStream(conn.stream, &request) catch return;
+        const request_code = std.mem.readInt(u32, request[4..8], .big);
+        if (request_code != gssenc_request_mod.GSSENC_REQUEST_CODE) return;
+
+        switch (ctx.mode) {
+            .accepted => {
+                net.writeAllStream(conn.stream, "G") catch {};
+                return;
+            },
+            .rejected => {
+                net.writeAllStream(conn.stream, "N") catch {};
+                return;
+            },
+            .rejected_then_plain_auth_ok => {
+                net.writeAllStream(conn.stream, "N") catch {};
+            },
+        }
+    }
+
+    if (ctx.mode == .rejected_then_plain_auth_ok) {
+        var conn = ctx.server.accept() catch return;
+        defer conn.stream.close();
+
+        readStartupMessage(conn.stream) catch return;
+        sendAuthOk(conn.stream) catch return;
+        sendReadyForQuery(conn.stream, 'I') catch {};
+    }
+}
+
+fn readExactStream(stream: net.Stream, buffer: []u8) !void {
+    var filled: usize = 0;
+    while (filled < buffer.len) {
+        const n = try net.readStream(stream, buffer[filled..]);
+        if (n == 0) return error.EndOfStream;
+        filled += n;
+    }
+}
+
+fn readStartupMessage(stream: net.Stream) !void {
+    var len_buf: [4]u8 = undefined;
+    try readExactStream(stream, &len_buf);
+    const length = std.mem.readInt(u32, &len_buf, .big);
+    if (length < 8) return error.InvalidStartupLength;
+
+    var remaining_buf: [1024]u8 = undefined;
+    const remaining = length - 4;
+    if (remaining > remaining_buf.len) return error.StartupTooLarge;
+    try readExactStream(stream, remaining_buf[0..remaining]);
+}
+
+fn writeByte(stream: net.Stream, byte: u8) !void {
+    try net.writeAllStream(stream, &.{byte});
+}
+
+fn writeU32(stream: net.Stream, value: u32) !void {
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, value, .big);
+    try net.writeAllStream(stream, &buf);
+}
+
+fn sendAuthOk(stream: net.Stream) !void {
+    try writeByte(stream, 'R');
+    try writeU32(stream, 8);
+    try writeU32(stream, 0);
+}
+
+fn sendReadyForQuery(stream: net.Stream, status: u8) !void {
+    try writeByte(stream, 'Z');
+    try writeU32(stream, 5);
+    try writeByte(stream, status);
+}
+
+test "connect with options rejects accepted gssenc transport until implemented" {
+    var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var ctx = GssEncServerCtx{ .server = &server, .mode = .accepted };
+    var thread = try std.Thread.spawn(.{}, gssEncServerThread, .{&ctx});
+    defer thread.join();
+
+    try std.testing.expectError(
+        error.GssEncAcceptedButUnsupported,
+        PgDriver.connectWithOptions(
+            std.testing.allocator,
+            "127.0.0.1",
+            port,
+            "user",
+            "db",
+            null,
+            .{ .gss_enc_mode = .prefer },
+        ),
+    );
+}
+
+test "connect with options require fails when gssenc is rejected" {
+    var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var ctx = GssEncServerCtx{ .server = &server, .mode = .rejected };
+    var thread = try std.Thread.spawn(.{}, gssEncServerThread, .{&ctx});
+    defer thread.join();
+
+    try std.testing.expectError(
+        error.GssEncRequiredButRejected,
+        PgDriver.connectWithOptions(
+            std.testing.allocator,
+            "127.0.0.1",
+            port,
+            "user",
+            "db",
+            null,
+            .{ .gss_enc_mode = .require },
+        ),
+    );
+}
+
+test "connect with options prefer falls through after gssenc rejection over localhost" {
+    var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var ctx = GssEncServerCtx{ .server = &server, .mode = .rejected_then_plain_auth_ok };
+    var thread = try std.Thread.spawn(.{}, gssEncServerThread, .{&ctx});
+    defer thread.join();
+
+    var driver = try PgDriver.connectWithOptions(
+        std.testing.allocator,
+        "localhost",
+        port,
+        "user",
+        "db",
+        null,
+        .{ .gss_enc_mode = .prefer },
+    );
+    defer driver.deinit();
+
+    try std.testing.expect(driver.connect_port != null);
+    try std.testing.expectEqual(port, driver.connect_port.?);
 }
 
 test "connect with verify-full requires verification config" {

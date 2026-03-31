@@ -39,6 +39,20 @@ pub const GssTokenProvider = *const fn (
     allocator: std.mem.Allocator,
 ) anyerror![]const u8;
 
+pub const GssTokenRequest = struct {
+    mechanism: GssMechanism,
+    session_id: u64,
+    server_token: ?[]const u8,
+};
+
+pub const GssTokenProviderEx = *const fn (
+    ctx: ?*anyopaque,
+    request: GssTokenRequest,
+    allocator: std.mem.Allocator,
+) anyerror![]const u8;
+
+var gss_session_counter: std.atomic.Value(u64) = .init(1);
+
 pub const AuthOptions = struct {
     // Password/SASL policy
     allow_cleartext_password: bool = true,
@@ -61,9 +75,14 @@ pub const AuthOptions = struct {
 
     // GSS token exchange
     gss_token_provider: ?GssTokenProvider = null,
+    gss_token_provider_ex: ?GssTokenProviderEx = null,
     gss_context: ?*anyopaque = null,
     max_gss_roundtrips: u32 = 32,
 };
+
+pub fn nextGssSessionId() u64 {
+    return gss_session_counter.fetchAdd(1, .monotonic);
+}
 
 pub fn mechanismFromAuthType(auth_type: wire.AuthType) ?GssMechanism {
     return switch (auth_type) {
@@ -76,10 +95,19 @@ pub fn mechanismFromAuthType(auth_type: wire.AuthType) ?GssMechanism {
 
 pub fn requestGssToken(
     options: AuthOptions,
+    session_id: u64,
     mechanism: GssMechanism,
     server_token: ?[]const u8,
     allocator: std.mem.Allocator,
 ) ![]const u8 {
+    if (options.gss_token_provider_ex) |provider_ex| {
+        return provider_ex(options.gss_context, .{
+            .mechanism = mechanism,
+            .session_id = session_id,
+            .server_token = server_token,
+        }, allocator);
+    }
+
     const provider = options.gss_token_provider orelse return error.GssTokenProviderRequired;
     return provider(options.gss_context, mechanism, server_token, allocator);
 }
@@ -191,4 +219,46 @@ test "select SCRAM require plus fails when unavailable" {
 test "select SCRAM require fails without binding data" {
     const mechanisms = [_][]const u8{ SCRAM_SHA_256, SCRAM_SHA_256_PLUS };
     try std.testing.expectError(error.ChannelBindingUnavailable, selectScramMechanism(&mechanisms, null, .require));
+}
+
+fn legacyGssProvider(_: ?*anyopaque, mechanism: GssMechanism, server_token: ?[]const u8, allocator: std.mem.Allocator) ![]const u8 {
+    try std.testing.expectEqual(GssMechanism.gss, mechanism);
+    try std.testing.expect(server_token == null);
+    return allocator.dupe(u8, "legacy-token");
+}
+
+fn extendedGssProvider(_: ?*anyopaque, request: GssTokenRequest, allocator: std.mem.Allocator) ![]const u8 {
+    try std.testing.expectEqual(GssMechanism.kerberos_v5, request.mechanism);
+    try std.testing.expectEqual(@as(u64, 42), request.session_id);
+    try std.testing.expectEqualSlices(u8, "server", request.server_token.?);
+    return allocator.dupe(u8, "extended-token");
+}
+
+test "request GSS token uses legacy provider when configured" {
+    const token = try requestGssToken(
+        .{ .gss_token_provider = legacyGssProvider },
+        7,
+        .gss,
+        null,
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(token);
+
+    try std.testing.expectEqualStrings("legacy-token", token);
+}
+
+test "request GSS token prefers extended provider and passes session id" {
+    const token = try requestGssToken(
+        .{
+            .gss_token_provider = legacyGssProvider,
+            .gss_token_provider_ex = extendedGssProvider,
+        },
+        42,
+        .kerberos_v5,
+        "server",
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(token);
+
+    try std.testing.expectEqualStrings("extended-token", token);
 }

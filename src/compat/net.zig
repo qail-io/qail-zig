@@ -20,6 +20,27 @@ pub fn tcpConnectToHost(allocator: std.mem.Allocator, host: []const u8, port: u1
     return std.net.tcpConnectToHost(allocator, host, port);
 }
 
+pub fn tcpConnectToHostWithTimeout(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    timeout_ms: i32,
+) !Stream {
+    const list = try std.net.getAddressList(allocator, host, port);
+    defer list.deinit();
+
+    if (list.addrs.len == 0) return error.UnknownHostName;
+
+    for (list.addrs) |address| {
+        return tcpConnectToAddressWithTimeout(address, timeout_ms) catch |err| switch (err) {
+            error.ConnectionRefused => continue,
+            else => return err,
+        };
+    }
+
+    return error.ConnectionRefused;
+}
+
 pub fn tcpConnectToAddressWithTimeout(address: Address, timeout_ms: i32) !Stream {
     const posix = std.posix;
 
@@ -176,4 +197,26 @@ fn setBlocking(fd: std.posix.fd_t, blocking: bool) !void {
             flags | O_NONBLOCK;
         _ = try posix.fcntl(fd, posix.F.SETFL, new_flags);
     }
+}
+
+pub fn setStreamBlocking(stream: Stream, blocking: bool) !void {
+    try setBlocking(stream.handle, blocking);
+}
+
+fn localhostAcceptThread(server: *Server) void {
+    defer server.deinit();
+
+    var conn = server.accept() catch return;
+    defer conn.stream.close();
+}
+
+test "tcp connect to host with timeout resolves localhost" {
+    var server = try Address.listen(try Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var thread = try std.Thread.spawn(.{}, localhostAcceptThread, .{&server});
+    defer thread.join();
+
+    var stream = try tcpConnectToHostWithTimeout(std.testing.allocator, "localhost", port, 1000);
+    stream.close();
 }

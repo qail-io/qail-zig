@@ -26,6 +26,7 @@ pub const rls = @import("rls.zig");
 pub const connect_url = @import("connect_url.zig");
 pub const notification = @import("notification.zig");
 pub const replication = @import("replication.zig");
+pub const kerberos_preflight = @import("kerberos_preflight.zig");
 
 // Re-export main types
 pub const Connection = connection.Connection;
@@ -72,7 +73,13 @@ pub const AuthOptions = auth_options.AuthOptions;
 pub const CancelToken = driver.CancelToken;
 pub const GssMechanism = auth_options.GssMechanism;
 pub const GssTokenProvider = auth_options.GssTokenProvider;
+pub const GssTokenRequest = auth_options.GssTokenRequest;
+pub const GssTokenProviderEx = auth_options.GssTokenProviderEx;
 pub const ScramChannelBindingMode = auth_options.ScramChannelBindingMode;
+pub const LinuxKrb5ProviderConfig = kerberos_preflight.LinuxKrb5ProviderConfig;
+pub const LinuxKrb5PreflightReport = kerberos_preflight.LinuxKrb5PreflightReport;
+pub const linuxKrb5Preflight = kerberos_preflight.linuxKrb5Preflight;
+pub const linuxKrb5PreflightWithEnvMap = kerberos_preflight.linuxKrb5PreflightWithEnvMap;
 pub const RlsContext = rls.RlsContext;
 pub const SuperAdminToken = rls.SuperAdminToken;
 pub const sanitizeGucValue = rls.sanitizeGucValue;
