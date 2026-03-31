@@ -461,6 +461,70 @@ test "diff policy predicate change emits drop and recreate" {
     try std.testing.expect(saw_create);
 }
 
+test "diff policy ignores nullif wrapped tenant predicate equivalent" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+        \\policy orders_tenant_isolation on orders
+        \\  for all
+        \\  restrictive
+        \\  using (tenant_id = current_setting('app.current_tenant_id')::uuid)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+        \\policy orders_tenant_isolation on orders
+        \\  for all
+        \\  restrictive
+        \\  using (tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
+test "diff policy ignores coalesce wrapped boolean predicate equivalent" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table secrets (
+        \\    id uuid primary_key
+        \\)
+        \\policy admin_bypass on secrets
+        \\  using (current_setting('app.is_super_admin')::boolean = true)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table secrets (
+        \\    id uuid primary_key
+        \\)
+        \\policy admin_bypass on secrets
+        \\  using (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
 test "diff grant removal emits revoke" {
     const allocator = std.testing.allocator;
 

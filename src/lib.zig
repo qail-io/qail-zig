@@ -19,6 +19,7 @@ pub const QailCmd = ast.QailCmd;
 pub const Expr = ast.Expr;
 pub const Operator = ast.Operator;
 pub const Value = ast.Value;
+pub const OwnedExpr = ast.OwnedExpr;
 
 pub const PgDriver = driver.PgDriver;
 pub const PgRow = driver.PgRow;
@@ -56,6 +57,7 @@ pub const validateAst = sanitize.validateCmd;
 // Re-export builders for convenience
 pub const builders = ast.builders;
 pub const cmd = ast.cmd;
+pub const policy = ast.policy;
 
 test {
     @import("std").testing.refAllDecls(@This());

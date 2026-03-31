@@ -18,6 +18,8 @@ const schema_types = @import("schema/types.zig");
 const Expr = ast.Expr;
 const BinaryOp = ast.BinaryOp;
 const Value = ast.Value;
+const ast_policy = ast.policy;
+const freeOwnedExpr = ast_policy.freeOwnedExpr;
 
 pub const PolicyTarget = schema_types.PolicyTarget;
 pub const PolicyPermissiveness = schema_types.PolicyPermissiveness;
@@ -629,128 +631,12 @@ const Parser = struct {
     }
 };
 
-fn cloneOwnedValue(allocator: Allocator, value: Value) !Value {
-    return switch (value) {
-        .string => |s| .{ .string = try allocator.dupe(u8, s) },
-        .bytes => |b| .{ .bytes = try allocator.dupe(u8, b) },
-        .named_param => |p| .{ .named_param = try allocator.dupe(u8, p) },
-        .function => |f| .{ .function = try allocator.dupe(u8, f) },
-        .column => |c| .{ .column = try allocator.dupe(u8, c) },
-        .uuid => |u| .{ .uuid = try allocator.dupe(u8, u) },
-        .timestamp => |ts| .{ .timestamp = try allocator.dupe(u8, ts) },
-        .json => |j| .{ .json = try allocator.dupe(u8, j) },
-        .array => |items| blk: {
-            const cloned = try allocator.alloc(Value, items.len);
-            errdefer allocator.free(cloned);
-            for (items, 0..) |item, i| {
-                cloned[i] = try cloneOwnedValue(allocator, item);
-            }
-            break :blk .{ .array = cloned };
-        },
-        else => value,
-    };
-}
-
-fn freeOwnedValue(allocator: Allocator, value: Value) void {
-    switch (value) {
-        .string => |s| allocator.free(s),
-        .bytes => |b| allocator.free(b),
-        .named_param => |p| allocator.free(p),
-        .function => |f| allocator.free(f),
-        .column => |c| allocator.free(c),
-        .uuid => |u| allocator.free(u),
-        .timestamp => |ts| allocator.free(ts),
-        .json => |j| allocator.free(j),
-        .array => |items| {
-            for (items) |item| freeOwnedValue(allocator, item);
-            allocator.free(items);
-        },
-        else => {},
-    }
-}
-
-fn cloneOwnedExpr(allocator: Allocator, expr: Expr) !Expr {
-    return switch (expr) {
-        .named => |name| .{ .named = try allocator.dupe(u8, name) },
-        .literal => |value| .{ .literal = try cloneOwnedValue(allocator, value) },
-        .func_call => |fc| blk: {
-            const args = try allocator.alloc(Expr, fc.args.len);
-            errdefer allocator.free(args);
-            for (fc.args, 0..) |arg, i| {
-                args[i] = try cloneOwnedExpr(allocator, arg);
-            }
-            break :blk .{
-                .func_call = .{
-                    .name = try allocator.dupe(u8, fc.name),
-                    .args = args,
-                    .alias = if (fc.alias) |alias| try allocator.dupe(u8, alias) else null,
-                },
-            };
-        },
-        .cast => |c| blk: {
-            const inner = try allocator.create(Expr);
-            errdefer allocator.destroy(inner);
-            inner.* = try cloneOwnedExpr(allocator, c.expr.*);
-            break :blk .{
-                .cast = .{
-                    .expr = inner,
-                    .target_type = try allocator.dupe(u8, c.target_type),
-                    .alias = if (c.alias) |alias| try allocator.dupe(u8, alias) else null,
-                },
-            };
-        },
-        .binary => |b| blk: {
-            const left = try allocator.create(Expr);
-            errdefer allocator.destroy(left);
-            left.* = try cloneOwnedExpr(allocator, b.left.*);
-
-            const right = try allocator.create(Expr);
-            errdefer allocator.destroy(right);
-            right.* = try cloneOwnedExpr(allocator, b.right.*);
-
-            break :blk .{
-                .binary = .{
-                    .left = left,
-                    .op = b.op,
-                    .right = right,
-                    .alias = if (b.alias) |alias| try allocator.dupe(u8, alias) else null,
-                },
-            };
-        },
-        else => return error.UnsupportedPolicyExpr,
-    };
-}
-
-fn freeOwnedExprPtr(allocator: Allocator, ptr: *const Expr) void {
-    freeOwnedExpr(allocator, ptr.*);
-    allocator.destroy(@constCast(ptr));
-}
-
-fn freeOwnedExpr(allocator: Allocator, expr: Expr) void {
-    switch (expr) {
-        .named => |name| allocator.free(name),
-        .literal => |value| freeOwnedValue(allocator, value),
-        .func_call => |fc| {
-            allocator.free(fc.name);
-            for (fc.args) |arg| freeOwnedExpr(allocator, arg);
-            allocator.free(fc.args);
-            if (fc.alias) |alias| allocator.free(alias);
-        },
-        .cast => |c| {
-            freeOwnedExprPtr(allocator, c.expr);
-            allocator.free(c.target_type);
-            if (c.alias) |alias| allocator.free(alias);
-        },
-        .binary => |b| {
-            freeOwnedExprPtr(allocator, b.left);
-            freeOwnedExprPtr(allocator, b.right);
-            if (b.alias) |alias| allocator.free(alias);
-        },
-        else => {},
-    }
-}
-
 fn parseOwnedPolicyExpr(allocator: Allocator, input: []const u8) !Expr {
+    var normalized = try tryParseNormalizedPolicyExpr(allocator, input);
+    if (normalized != null) {
+        return normalized.?.take();
+    }
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -760,7 +646,359 @@ fn parseOwnedPolicyExpr(allocator: Allocator, input: []const u8) !Expr {
         else => return error.InvalidPolicyExpression,
     };
 
-    return cloneOwnedExpr(allocator, arena_expr);
+    return ast_policy.cloneOwnedExpr(allocator, arena_expr);
+}
+
+const PolicyLhs = union(enum) {
+    column: []const u8,
+    bool_literal: bool,
+};
+
+const ParsedSettingExpr = struct {
+    session_var: []const u8,
+    cast_type: []const u8,
+};
+
+fn tryParseNormalizedPolicyExpr(allocator: Allocator, input: []const u8) !?ast_policy.OwnedExpr {
+    const s = stripOuterParens(input);
+
+    if (findTopLevelOp(s, " OR ")) |pos| {
+        var left = (try tryParseNormalizedPolicyExpr(allocator, s[0..pos])) orelse return null;
+        defer left.deinit();
+
+        var right = (try tryParseNormalizedPolicyExpr(allocator, s[pos + 4 ..])) orelse return null;
+        defer right.deinit();
+
+        return try ast_policy.orExpr(allocator, left.root(), right.root());
+    }
+
+    if (findTopLevelOp(s, " AND ")) |pos| {
+        var left = (try tryParseNormalizedPolicyExpr(allocator, s[0..pos])) orelse return null;
+        defer left.deinit();
+
+        var right = (try tryParseNormalizedPolicyExpr(allocator, s[pos + 5 ..])) orelse return null;
+        defer right.deinit();
+
+        return try ast_policy.andExpr(allocator, left.root(), right.root());
+    }
+
+    if (findTopLevelOp(s, " = ")) |eq_pos| {
+        const lhs = std.mem.trim(u8, s[0..eq_pos], " \t\r\n");
+        const rhs = std.mem.trim(u8, s[eq_pos + 3 ..], " \t\r\n");
+
+        if (try tryBuildNormalizedPolicyCheck(allocator, lhs, rhs)) |expr| return expr;
+        if (try tryBuildNormalizedPolicyCheck(allocator, rhs, lhs)) |expr| return expr;
+    }
+
+    return null;
+}
+
+fn tryBuildNormalizedPolicyCheck(allocator: Allocator, lhs_sql: []const u8, rhs_sql: []const u8) !?ast_policy.OwnedExpr {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const setting = (try parseNormalizedSettingExpr(arena.allocator(), rhs_sql)) orelse return null;
+    const lhs = parsePolicyLhs(lhs_sql) orelse return null;
+
+    switch (lhs) {
+        .column => |column| return @as(?ast_policy.OwnedExpr, try ast_policy.tenantCheck(allocator, column, setting.session_var, setting.cast_type)),
+        .bool_literal => |bool_value| {
+            if (bool_value and std.ascii.eqlIgnoreCase(setting.cast_type, "boolean")) {
+                return @as(?ast_policy.OwnedExpr, try ast_policy.sessionBoolCheck(allocator, setting.session_var));
+            }
+
+            const session_arg = Expr.str(setting.session_var);
+            const args = [_]Expr{session_arg};
+            const current_setting: Expr = .{
+                .func_call = .{
+                    .name = "current_setting",
+                    .args = &args,
+                },
+            };
+            const cast_expr: Expr = .{
+                .cast = .{
+                    .expr = &current_setting,
+                    .target_type = setting.cast_type,
+                },
+            };
+            const expected = Expr.val(Value.fromBool(bool_value));
+            return @as(
+                ?ast_policy.OwnedExpr,
+                try ast_policy.OwnedExpr.init(
+                    allocator,
+                    .{
+                        .binary = .{
+                            .left = &cast_expr,
+                            .op = .eq,
+                            .right = &expected,
+                        },
+                    },
+                ),
+            );
+        },
+    }
+}
+
+fn parsePolicyLhs(input: []const u8) ?PolicyLhs {
+    const lhs = std.mem.trim(u8, stripOuterParens(input), " \t\r\n");
+    if (isSqlTrueLiteral(lhs)) return .{ .bool_literal = true };
+    if (isSqlFalseLiteral(lhs)) return .{ .bool_literal = false };
+    if (lhs.len == 0) return null;
+    return .{ .column = lhs };
+}
+
+fn parseNormalizedSettingExpr(allocator: Allocator, input: []const u8) anyerror!?ParsedSettingExpr {
+    var normalized = std.mem.trim(u8, stripOuterParens(input), " \t\r\n");
+
+    while (normalized.len > 0 and normalized[0] == '(') {
+        const close_idx = findMatchingParen(normalized, 0) orelse break;
+        const rest = std.mem.trim(u8, normalized[close_idx + 1 ..], " \t\r\n");
+        if (!std.mem.startsWith(u8, rest, "::")) break;
+        normalized = normalized[1..close_idx];
+        normalized = std.mem.trim(u8, normalized, " \t\r\n");
+        normalized = try std.fmt.allocPrint(allocator, "{s}{s}", .{ normalized, rest });
+    }
+
+    if (try parseCurrentSettingExpr(allocator, normalized)) |setting| {
+        return setting;
+    }
+
+    if (try parseWrappedSettingExpr(allocator, normalized, "NULLIF")) |setting| {
+        return setting;
+    }
+
+    if (try parseCoalesceSettingExpr(allocator, normalized)) |setting| {
+        return setting;
+    }
+
+    return null;
+}
+
+fn parseCurrentSettingExpr(allocator: Allocator, input: []const u8) anyerror!?ParsedSettingExpr {
+    const parsed = parseFunctionArgsAndRestCi(input, "current_setting") orelse return null;
+    const session_var = (try extractFirstStringLiteral(allocator, parsed.args)) orelse return null;
+    const cast_type = parseCastSuffix(parsed.rest) orelse "text";
+    return .{
+        .session_var = session_var,
+        .cast_type = cast_type,
+    };
+}
+
+fn parseWrappedSettingExpr(allocator: Allocator, input: []const u8, fn_name: []const u8) anyerror!?ParsedSettingExpr {
+    const parsed = parseFunctionArgsAndRestCi(input, fn_name) orelse return null;
+    const args = splitArgs2(parsed.args) orelse return null;
+    var setting = (try parseNormalizedSettingExpr(allocator, std.mem.trim(u8, args.left, " \t\r\n"))) orelse return null;
+    if (parseCastSuffix(parsed.rest)) |cast_type| {
+        setting.cast_type = cast_type;
+    }
+    return setting;
+}
+
+fn parseCoalesceSettingExpr(allocator: Allocator, input: []const u8) anyerror!?ParsedSettingExpr {
+    const parsed = parseFunctionArgsAndRestCi(input, "COALESCE") orelse return null;
+    const args = splitArgs2(parsed.args) orelse return null;
+    var setting = (try parseNormalizedSettingExpr(allocator, std.mem.trim(u8, args.left, " \t\r\n"))) orelse return null;
+
+    if (parseCastSuffix(parsed.rest)) |cast_type| {
+        setting.cast_type = cast_type;
+    } else if (isSqlBoolStringLiteral(std.mem.trim(u8, args.right, " \t\r\n"))) {
+        setting.cast_type = "boolean";
+    }
+
+    return setting;
+}
+
+const FunctionArgsAndRest = struct {
+    args: []const u8,
+    rest: []const u8,
+};
+
+fn parseFunctionArgsAndRestCi(input: []const u8, fn_name: []const u8) ?FunctionArgsAndRest {
+    const s = std.mem.trim(u8, input, " \t\r\n");
+    if (s.len <= fn_name.len + 1) return null;
+    if (!std.ascii.eqlIgnoreCase(s[0..fn_name.len], fn_name)) return null;
+    if (s[fn_name.len] != '(') return null;
+    const close_idx = findMatchingParen(s, fn_name.len) orelse return null;
+    return .{
+        .args = s[fn_name.len + 1 .. close_idx],
+        .rest = s[close_idx + 1 ..],
+    };
+}
+
+const SplitArgs2 = struct {
+    left: []const u8,
+    right: []const u8,
+};
+
+fn splitArgs2(input: []const u8) ?SplitArgs2 {
+    const idx = findTopLevelChar(input, ',') orelse return null;
+    return .{
+        .left = input[0..idx],
+        .right = input[idx + 1 ..],
+    };
+}
+
+fn parseCastSuffix(input: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, stripOuterParens(input), " \t\r\n");
+    if (!std.mem.startsWith(u8, trimmed, "::")) return null;
+    return std.mem.trim(u8, trimmed[2..], " \t\r\n");
+}
+
+fn extractFirstStringLiteral(allocator: Allocator, input: []const u8) !?[]const u8 {
+    const s = std.mem.trim(u8, input, " \t\r\n");
+    if (s.len == 0 or s[0] != '\'') return null;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    var i: usize = 1;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\'') {
+            if (i + 1 < s.len and s[i + 1] == '\'') {
+                try buf.append(allocator, '\'');
+                i += 1;
+                continue;
+            }
+            return try buf.toOwnedSlice(allocator);
+        }
+        try buf.append(allocator, s[i]);
+    }
+
+    return null;
+}
+
+fn isSqlTrueLiteral(input: []const u8) bool {
+    return eqlAsciiLowerTrimmed(input, "true") or
+        eqlAsciiLowerTrimmed(input, "'true'") or
+        eqlAsciiLowerTrimmed(input, "'true'::text") or
+        eqlAsciiLowerTrimmed(input, "'true'::varchar");
+}
+
+fn isSqlFalseLiteral(input: []const u8) bool {
+    return eqlAsciiLowerTrimmed(input, "false") or
+        eqlAsciiLowerTrimmed(input, "'false'") or
+        eqlAsciiLowerTrimmed(input, "'false'::text") or
+        eqlAsciiLowerTrimmed(input, "'false'::varchar");
+}
+
+fn isSqlBoolStringLiteral(input: []const u8) bool {
+    return isSqlTrueLiteral(input) or isSqlFalseLiteral(input);
+}
+
+fn eqlAsciiLowerTrimmed(input: []const u8, expected: []const u8) bool {
+    const trimmed = std.mem.trim(u8, input, " \t\r\n");
+    if (trimmed.len != expected.len) return false;
+    for (trimmed, expected) |actual, want| {
+        if (std.ascii.toLower(actual) != want) return false;
+    }
+    return true;
+}
+
+fn stripOuterParens(input: []const u8) []const u8 {
+    var s = std.mem.trim(u8, input, " \t\r\n");
+    while (s.len >= 2 and s[0] == '(' and s[s.len - 1] == ')') {
+        var depth: usize = 0;
+        var i: usize = 0;
+        var wraps = true;
+        while (i < s.len) : (i += 1) {
+            switch (s[i]) {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if (depth == 0 and i < s.len - 1) {
+                        wraps = false;
+                        break;
+                    }
+                },
+                else => {},
+            }
+        }
+        if (!wraps or depth != 0) break;
+        s = std.mem.trim(u8, s[1 .. s.len - 1], " \t\r\n");
+    }
+    return s;
+}
+
+fn findTopLevelOp(input: []const u8, op: []const u8) ?usize {
+    if (input.len < op.len) return null;
+    var depth: i32 = 0;
+    var in_string = false;
+    var i: usize = 0;
+    while (i + op.len <= input.len) : (i += 1) {
+        const ch = input[i];
+        if (in_string) {
+            if (ch == '\'') {
+                if (i + 1 < input.len and input[i + 1] == '\'') {
+                    i += 1;
+                } else {
+                    in_string = false;
+                }
+            }
+            continue;
+        }
+        switch (ch) {
+            '\'' => in_string = true,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            else => {},
+        }
+        if (depth == 0 and std.mem.eql(u8, input[i .. i + op.len], op)) return i;
+    }
+    return null;
+}
+
+fn findTopLevelChar(input: []const u8, needle: u8) ?usize {
+    var depth: i32 = 0;
+    var in_string = false;
+    for (input, 0..) |ch, i| {
+        if (in_string) {
+            if (ch == '\'') {
+                if (i + 1 < input.len and input[i + 1] == '\'') continue;
+                in_string = false;
+            }
+            continue;
+        }
+        switch (ch) {
+            '\'' => in_string = true,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            else => if (depth == 0 and ch == needle) return i,
+        }
+    }
+    return null;
+}
+
+fn findMatchingParen(input: []const u8, open_idx: usize) ?usize {
+    if (open_idx >= input.len or input[open_idx] != '(') return null;
+
+    var depth: usize = 0;
+    var in_string = false;
+    var i = open_idx;
+    while (i < input.len) : (i += 1) {
+        const ch = input[i];
+        if (in_string) {
+            if (ch == '\'') {
+                if (i + 1 < input.len and input[i + 1] == '\'') {
+                    i += 1;
+                    continue;
+                }
+                in_string = false;
+            }
+            continue;
+        }
+
+        switch (ch) {
+            '\'' => in_string = true,
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+
+    return null;
 }
 
 const PolicyExprParser = struct {
@@ -924,6 +1162,26 @@ const PolicyExprParser = struct {
     }
 
     fn parseAtom(self: *PolicyExprParser) anyerror!Expr {
+        var expr = try self.parsePrimary();
+        while (true) {
+            self.skipWhitespace();
+            const rem = self.remaining();
+            if (rem.len < 2 or rem[0] != ':' or rem[1] != ':') break;
+            self.pos += 2;
+            const cast_type = try self.parseIdentifier();
+            const inner = try self.allocator.create(Expr);
+            inner.* = expr;
+            expr = .{
+                .cast = .{
+                    .expr = inner,
+                    .target_type = cast_type,
+                },
+            };
+        }
+        return expr;
+    }
+
+    fn parsePrimary(self: *PolicyExprParser) anyerror!Expr {
         self.skipWhitespace();
         const ch = self.current() orelse return error.UnexpectedEnd;
 
@@ -1017,7 +1275,7 @@ const PolicyExprParser = struct {
     fn parseFuncOrIdent(self: *PolicyExprParser) anyerror!Expr {
         const name = try self.parseIdentifier();
 
-        var expr: Expr = blk: {
+        const expr: Expr = blk: {
             self.skipWhitespace();
             if (self.current() == '(') {
                 self.advance();
@@ -1052,21 +1310,6 @@ const PolicyExprParser = struct {
 
             break :blk .{ .named = name };
         };
-
-        self.skipWhitespace();
-        const rem = self.remaining();
-        if (rem.len >= 2 and rem[0] == ':' and rem[1] == ':') {
-            self.pos += 2;
-            const cast_type = try self.parseIdentifier();
-            const inner = try self.allocator.create(Expr);
-            inner.* = expr;
-            expr = .{
-                .cast = .{
-                    .expr = inner,
-                    .target_type = cast_type,
-                },
-            };
-        }
 
         return expr;
     }
@@ -1233,6 +1476,67 @@ test "parse policy block falls back to raw sql for unsupported predicate forms" 
     const policy = schema.policies.items[0];
     try std.testing.expect(policy.using_expr == null);
     try std.testing.expectEqualStrings("lower(email) like '%@qail.io'", policy.using_sql.?);
+}
+
+test "parse policy block normalizes nullif wrapped current_setting tenant predicate" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid not null
+        \\)
+        \\
+        \\policy orders_tenant_isolation on orders
+        \\    using (tenant_id = (NULLIF(current_setting('app.current_tenant_id'::text, true), ''::text))::uuid)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const policy = schema.policies.items[0];
+    try std.testing.expect(policy.using_expr != null);
+    try std.testing.expect(policy.using_sql == null);
+
+    const expr = policy.using_expr.?;
+    try std.testing.expect(expr == .binary);
+    try std.testing.expect(expr.binary.left.* == .named);
+    try std.testing.expectEqualStrings("tenant_id", expr.binary.left.named);
+    try std.testing.expectEqual(BinaryOp.eq, expr.binary.op);
+    try std.testing.expect(expr.binary.right.* == .cast);
+    try std.testing.expectEqualStrings("uuid", expr.binary.right.cast.target_type);
+    try std.testing.expect(expr.binary.right.cast.expr.* == .func_call);
+    try std.testing.expectEqualStrings("current_setting", expr.binary.right.cast.expr.func_call.name);
+}
+
+test "parse policy block normalizes coalesce wrapped current_setting boolean predicate" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table secrets (
+        \\    id uuid primary_key
+        \\)
+        \\
+        \\policy admin_bypass on secrets
+        \\    using (COALESCE(current_setting('app.is_super_admin'::text, true), 'false'::text) = 'true'::text)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const policy = schema.policies.items[0];
+    try std.testing.expect(policy.using_expr != null);
+    try std.testing.expect(policy.using_sql == null);
+
+    const expr = policy.using_expr.?;
+    try std.testing.expect(expr == .binary);
+    try std.testing.expect(expr.binary.left.* == .cast);
+    try std.testing.expectEqualStrings("boolean", expr.binary.left.cast.target_type);
+    try std.testing.expect(expr.binary.left.cast.expr.* == .func_call);
+    try std.testing.expectEqualStrings("current_setting", expr.binary.left.cast.expr.func_call.name);
+    try std.testing.expect(expr.binary.right.* == .literal);
+    try std.testing.expect(expr.binary.right.literal == .bool);
+    try std.testing.expectEqual(true, expr.binary.right.literal.bool);
 }
 
 test "parse grant and revoke statements" {
