@@ -37,6 +37,7 @@ pub const LogicalOp = operators.LogicalOp;
 pub const SortOrder = operators.SortOrder;
 pub const AggregateFunc = operators.AggregateFunc;
 pub const LockMode = operators.LockMode;
+pub const TableLockMode = operators.TableLockMode;
 pub const Distance = operators.Distance;
 pub const Constraint = expr.Constraint;
 pub const IndexDef = cmd.IndexDef;

@@ -49,6 +49,7 @@ pub const QailCmd = struct {
 
     // Row locking (FOR UPDATE/SHARE variants)
     lock_mode: ?operators.LockMode = null,
+    table_lock_mode: ?operators.TableLockMode = null,
 
     // Advanced query features
     distinct_on: []const Expr = &.{}, // DISTINCT ON (Postgres-specific)
@@ -685,6 +686,13 @@ pub const QailCmd = struct {
     /// LOCK TABLE
     pub fn lockTable(table: []const u8) QailCmd {
         return .{ .kind = .lock_table, .table = table };
+    }
+
+    /// LOCK TABLE ... IN <mode>
+    pub fn lockTableMode(self: QailCmd, mode: operators.TableLockMode) QailCmd {
+        var cmd = self;
+        cmd.table_lock_mode = mode;
+        return cmd;
     }
 
     /// COPY TO STDOUT (bulk export)

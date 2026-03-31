@@ -115,7 +115,6 @@ pub const Operator = enum {
     }
 };
 
-
 /// Logical operators for combining conditions
 pub const LogicalOp = enum {
     @"and",
@@ -198,6 +197,31 @@ pub const LockMode = enum {
             .no_key_update => "FOR NO KEY UPDATE",
             .share => "FOR SHARE",
             .key_share => "FOR KEY SHARE",
+        };
+    }
+};
+
+/// Table locking mode for LOCK TABLE.
+pub const TableLockMode = enum {
+    access_share,
+    row_share,
+    row_exclusive,
+    share_update_exclusive,
+    share,
+    share_row_exclusive,
+    exclusive,
+    access_exclusive,
+
+    pub fn toSql(self: TableLockMode) []const u8 {
+        return switch (self) {
+            .access_share => "ACCESS SHARE MODE",
+            .row_share => "ROW SHARE MODE",
+            .row_exclusive => "ROW EXCLUSIVE MODE",
+            .share_update_exclusive => "SHARE UPDATE EXCLUSIVE MODE",
+            .share => "SHARE MODE",
+            .share_row_exclusive => "SHARE ROW EXCLUSIVE MODE",
+            .exclusive => "EXCLUSIVE MODE",
+            .access_exclusive => "ACCESS EXCLUSIVE MODE",
         };
     }
 };
@@ -305,6 +329,14 @@ test "property: all AggregateFunc variants produce non-empty SQL" {
 test "property: all LockMode variants produce non-empty SQL" {
     inline for (std.meta.fields(LockMode)) |field| {
         const mode: LockMode = @enumFromInt(field.value);
+        const sql = mode.toSql();
+        try std.testing.expect(sql.len > 0);
+    }
+}
+
+test "property: all TableLockMode variants produce non-empty SQL" {
+    inline for (std.meta.fields(TableLockMode)) |field| {
+        const mode: TableLockMode = @enumFromInt(field.value);
         const sql = mode.toSql();
         try std.testing.expect(sql.len > 0);
     }

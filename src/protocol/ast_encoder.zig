@@ -564,7 +564,10 @@ pub const AstEncoder = struct {
             .lock_table => {
                 try writer.writeAll("LOCK TABLE ");
                 try writer.writeAll(cmd.table);
-                if (cmd.payload) |mode| {
+                if (cmd.table_lock_mode) |mode| {
+                    try writer.writeByte(' ');
+                    try writer.writeAll(mode.toSql());
+                } else if (cmd.payload) |mode| {
                     try writer.writeByte(' ');
                     try writer.writeAll(mode);
                 }
@@ -1441,6 +1444,19 @@ test "ast encoder update with or-filter grouping" {
         "UPDATE kb SET archived = true WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')",
         sql,
     );
+}
+
+test "ast encoder lock table uses typed mode" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const cmd = QailCmd.lockTable("users").lockTableMode(.access_exclusive);
+
+    var sql_buf: [256]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings("LOCK TABLE users ACCESS EXCLUSIVE MODE", writer.getWritten());
 }
 
 test "ast encoder delete with or-filter grouping" {

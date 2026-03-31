@@ -255,6 +255,11 @@ test "raw policy rejects raw ddl payloads in public ast commands" {
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&lock_cmd));
 }
 
+test "raw policy allows typed lock table mode" {
+    const cmd = QailCmd.lockTable("users").lockTableMode(.access_exclusive);
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
 test "source: public driver raw runtime api is not re-exported" {
     const allocator = std.testing.allocator;
 
