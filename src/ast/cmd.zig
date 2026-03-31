@@ -108,8 +108,6 @@ pub const QailCmd = struct {
 
     // INSERT/VIEW/EXPLAIN nested query source (preferred typed form)
     source_query: ?*const QailCmd = null,
-    // INSERT/VIEW/EXPLAIN raw source-query escape hatch (trusted/internal only)
-    source_query_sql: ?[]const u8 = null,
 
     // UPDATE ... FROM additional tables
     from_tables: []const []const u8 = &.{},

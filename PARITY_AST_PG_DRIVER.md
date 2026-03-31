@@ -51,9 +51,9 @@ Estimated gap: mostly maturity/polish, not missing core PG-driver features
 
 1. Keep the remaining trusted/internal raw escape hatches quarantined
 - Public driver execution is already fail-closed for `.raw` and nested raw procedural escapes.
-- Remaining raw surfaces are legacy/internal compatibility fields and trusted helper paths, not the default runtime contract.
-- Raw nested-query compatibility assignment is now confined to the internal helper module `src/ast/trusted_nested_query.zig`, and repo checks gate both assignment and field access spread.
-- Raw policy SQL compatibility assignment is now confined to the internal helper module `src/ast/trusted_policy_sql.zig`, and repo checks gate both assignment and field access spread.
+- Remaining raw surfaces are trusted helper paths and intentional raw AST variants, not legacy public string fields on the default runtime contract.
+- Legacy nested-query raw string fields (`source_query_sql`, `cte.base_sql`, `set_op.query_sql`) have been removed from the AST shape; trusted compatibility now flows through nested `QailCmd.raw(...)` nodes or the internal `src/ast/trusted_nested_query.zig` helper for raw view/materialized-view sources.
+- Legacy raw policy SQL string fields have also been removed from the AST shape; trusted compatibility now flows through the internal `src/ast/trusted_policy_sql.zig` helper, which maps fallback policy text into `Expr.raw(...)` so the existing public raw-policy gate can reject it.
 
 2. Finish enterprise auth polish
 - Keep the local TLS client fork isolated and covered so handshake-native `tls-server-end-point` extraction survives Zig stdlib churn.

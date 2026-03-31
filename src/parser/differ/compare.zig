@@ -42,6 +42,10 @@ fn exprEquals(a: *const Expr, b: *const Expr) bool {
             .named => |bn| std.mem.eql(u8, an, bn),
             else => false,
         },
+        .raw => |an| switch (b.*) {
+            .raw => |bn| std.mem.eql(u8, an, bn),
+            else => false,
+        },
         .literal => |av| switch (b.*) {
             .literal => |bv| valueEquals(av, bv),
             else => false,
@@ -84,9 +88,7 @@ pub fn policyEquals(a: *const PolicyDef, b: *const PolicyDef) bool {
         a.permissiveness == b.permissiveness and
         optionalStrEq(a.role, b.role) and
         optionalExprEq(a.using_expr, b.using_expr) and
-        optionalExprEq(a.with_check_expr, b.with_check_expr) and
-        optionalStrEq(a.using_sql, b.using_sql) and
-        optionalStrEq(a.with_check_sql, b.with_check_sql);
+        optionalExprEq(a.with_check_expr, b.with_check_expr);
 }
 
 pub fn grantEquals(a: *const GrantDef, b: *const GrantDef) bool {

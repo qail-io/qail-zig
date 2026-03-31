@@ -8,6 +8,7 @@ const io = @import("../compat/io.zig");
 const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");
+    pub const raw_cmd = @import("../ast/raw_cmd.zig");
     pub const trusted_policy_sql = @import("../ast/trusted_policy_sql.zig");
     pub const values = @import("../ast/values.zig");
     pub const operators = @import("../ast/operators.zig");
@@ -425,8 +426,6 @@ pub const AstEncoder = struct {
                 try writer.writeAll(" AS ");
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
-                } else if (cmd.source_query_sql) |source_sql| {
-                    try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 } else {
@@ -443,8 +442,6 @@ pub const AstEncoder = struct {
                 try writer.writeAll(" AS ");
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
-                } else if (cmd.source_query_sql) |source_sql| {
-                    try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 } else {
@@ -581,8 +578,6 @@ pub const AstEncoder = struct {
                 try writer.writeAll("EXPLAIN ");
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
-                } else if (cmd.source_query_sql) |source_sql| {
-                    try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 } else if (cmd.table.len > 0) {
@@ -596,8 +591,6 @@ pub const AstEncoder = struct {
                 try writer.writeAll("EXPLAIN ANALYZE ");
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
-                } else if (cmd.source_query_sql) |source_sql| {
-                    try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 } else if (cmd.table.len > 0) {
@@ -793,20 +786,12 @@ pub const AstEncoder = struct {
                     var expr = using_expr;
                     try writeExpr(writer, &expr);
                     try writer.writeByte(')');
-                } else if (policy.using_sql) |using_expr| {
-                    try writer.writeAll(" USING (");
-                    try writer.writeAll(using_expr);
-                    try writer.writeByte(')');
                 }
 
                 if (policy.with_check_expr) |with_check_expr| {
                     try writer.writeAll(" WITH CHECK (");
                     var expr = with_check_expr;
                     try writeExpr(writer, &expr);
-                    try writer.writeByte(')');
-                } else if (policy.with_check_sql) |with_check_expr| {
-                    try writer.writeAll(" WITH CHECK (");
-                    try writer.writeAll(with_check_expr);
                     try writer.writeByte(')');
                 }
             },
@@ -957,6 +942,7 @@ fn writeNestedQueryableCmd(writer: anytype, cmd: *const QailCmd) anyerror!void {
         .cnt => writeSelect(writer, cmd, true),
         .search => writeSelect(writer, cmd, false),
         .over => writeSelect(writer, cmd, false),
+        .raw => try writer.writeAll(cmd.raw_sql orelse return error.MissingNestedRawQuery),
         else => error.UnsupportedNestedQueryCommand,
     };
 }
@@ -974,8 +960,6 @@ fn writeSetOps(writer: anytype, cmd: *const QailCmd) anyerror!void {
 
         if (set_op.query) |query| {
             try writeNestedQueryableCmd(writer, query);
-        } else if (set_op.query_sql.len != 0) {
-            try writer.writeAll(set_op.query_sql);
         } else {
             return error.MissingSetOpQuery;
         }
@@ -1014,8 +998,6 @@ fn writeCtePrefix(writer: anytype, cmd: *const QailCmd) !void {
         try writer.writeAll(" AS (");
         if (cte.base_query) |query| {
             try writeNestedQueryableCmd(writer, query);
-        } else if (cte.base_sql.len != 0) {
-            try writer.writeAll(cte.base_sql);
         } else {
             return error.MissingCteQuery;
         }
@@ -1082,7 +1064,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
     } else if (cmd.source_query) |source_query| {
         try writer.writeByte(' ');
         try writeNestedQueryableCmd(writer, source_query);
-    } else if (cmd.source_query_sql) |source_sql| {
+    } else if (cmd.raw_sql) |source_sql| {
         try writer.writeByte(' ');
         try writer.writeAll(source_sql);
     } else if (cmd.insert_values.len > 0) {
@@ -1726,6 +1708,24 @@ test "ast encoder cte uses typed base query" {
     );
 }
 
+test "ast encoder cte supports raw nested query compatibility via nested raw command" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var raw = ast.raw_cmd.command("SELECT 1");
+    const ctes = [_]ast.cmd.CTEDef{ast.cmd.CTEDef.fromQuery("legacy", &raw)};
+    const cmd = QailCmd.get("legacy").withCtes(&ctes);
+
+    var sql_buf: [256]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "WITH legacy AS (SELECT 1) SELECT * FROM legacy",
+        writer.getWritten(),
+    );
+}
+
 test "ast encoder recursive cte uses typed recursive query" {
     var encoder = AstEncoder.init(std.testing.allocator);
     defer encoder.deinit();
@@ -1766,6 +1766,25 @@ test "ast encoder set ops use typed queries" {
 
     try std.testing.expectEqualStrings(
         "SELECT id FROM users UNION ALL SELECT id FROM admins",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder set ops support raw nested query compatibility via nested raw command" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const left_cols = [_]Expr{Expr.col("id")};
+    var raw = ast.raw_cmd.command("SELECT id FROM legacy_admins");
+    const set_ops = [_]ast.cmd.SetOpDef{ast.cmd.SetOpDef.fromQuery(.union_all, &raw)};
+    const cmd = QailCmd.get("users").select(&left_cols).withSetOps(&set_ops);
+
+    var sql_buf: [256]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "SELECT id FROM users UNION ALL SELECT id FROM legacy_admins",
         writer.getWritten(),
     );
 }

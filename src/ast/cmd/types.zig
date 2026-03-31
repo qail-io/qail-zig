@@ -189,8 +189,6 @@ pub const CTEDef = struct {
     base_query: ?*const QailCmd = null,
     recursive_query: ?*const QailCmd = null,
     source_table: ?[]const u8 = null,
-    // Trusted/internal raw SQL fallback for legacy callers.
-    base_sql: []const u8 = "",
 
     pub fn fromQuery(name: []const u8, query: *const QailCmd) CTEDef {
         return .{
@@ -248,8 +246,6 @@ pub const SetOp = enum {
 pub const SetOpDef = struct {
     op: SetOp,
     query: ?*const QailCmd = null,
-    // Trusted/internal raw SQL fallback for legacy callers.
-    query_sql: []const u8 = "",
 
     pub fn fromQuery(op: SetOp, query: *const QailCmd) SetOpDef {
         return .{
@@ -327,9 +323,6 @@ pub const PolicyDef = struct {
     role: ?[]const u8 = null,
     using_expr: ?Expr = null,
     with_check_expr: ?Expr = null,
-    // Trusted/internal raw SQL fallback for legacy callers.
-    using_sql: ?[]const u8 = null,
-    with_check_sql: ?[]const u8 = null,
 
     pub fn create(name: []const u8, table: []const u8) PolicyDef {
         return .{

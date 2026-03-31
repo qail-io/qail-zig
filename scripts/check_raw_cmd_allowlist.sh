@@ -8,8 +8,10 @@ repo_root="$(
 
 allowlist=(
   "src/data_safety/snapshot.zig"
+  "src/driver/raw_policy.zig"
   "src/driver/cursor.zig"
   "src/driver/raw_cmd.zig"
+  "src/protocol/ast_encoder.zig"
   "src/sanitize/tests.zig"
 )
 

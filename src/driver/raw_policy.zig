@@ -1,6 +1,6 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
-const trusted_nested_query = @import("../ast/trusted_nested_query.zig");
+const raw_cmd = @import("../ast/raw_cmd.zig");
 const trusted_policy_sql = @import("../ast/trusted_policy_sql.zig");
 
 const QailCmd = ast.QailCmd;
@@ -47,8 +47,6 @@ fn tableConstraintHasTrustedOnlyEscapeHatch(constraint: TableConstraint) bool {
 }
 
 fn policyHasTrustedOnlyEscapeHatch(policy: *const PolicyDef) bool {
-    if (policy.using_sql != null or policy.with_check_sql != null) return true;
-
     if (policy.using_expr) |using_expr| {
         var expr = using_expr;
         if (exprHasTrustedOnlyEscapeHatch(&expr)) return true;
@@ -132,7 +130,6 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
         else => {},
     }
 
-    if (cmd.source_query_sql != null) return true;
     if (cmd.source_query) |source_query| {
         if (cmdHasTrustedOnlyEscapeHatch(source_query)) return true;
     }
@@ -168,7 +165,6 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
     }
 
     for (cmd.ctes) |cte| {
-        if (cte.base_sql.len != 0) return true;
         if (cte.base_query) |query| {
             if (cmdHasTrustedOnlyEscapeHatch(query)) return true;
         }
@@ -177,7 +173,6 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
         }
     }
     for (cmd.set_ops) |set_op| {
-        if (set_op.query_sql.len != 0) return true;
         if (set_op.query) |query| {
             if (cmdHasTrustedOnlyEscapeHatch(query)) return true;
         }
@@ -208,8 +203,8 @@ test "raw policy allows regular ast commands" {
 }
 
 test "raw policy rejects raw command helper" {
-    const raw_cmd = @import("../ast/raw_cmd.zig").command("SELECT 1");
-    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&raw_cmd));
+    const raw = @import("../ast/raw_cmd.zig").command("SELECT 1");
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&raw));
 }
 
 test "raw policy rejects command slices containing raw sql" {
@@ -231,9 +226,17 @@ test "raw policy rejects subquery expressions in public ast commands" {
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 
-test "raw policy rejects raw cte source sql in public ast commands" {
-    const ctes = [_]ast.CTEDef{trusted_nested_query.cteFromSql("danger", "SELECT 1")};
+test "raw policy rejects raw cte base query in public ast commands" {
+    var raw_query = raw_cmd.command("SELECT 1");
+    const ctes = [_]ast.CTEDef{ast.CTEDef.fromQuery("danger", &raw_query)};
     const cmd = QailCmd.get("users").withCtes(&ctes);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects raw set op query in public ast commands" {
+    var raw_query = raw_cmd.command("SELECT id FROM admins");
+    const set_ops = [_]ast.SetOpDef{ast.SetOpDef.fromQuery(.union_all, &raw_query)};
+    const cmd = QailCmd.get("users").select(&.{Expr.col("id")}).withSetOps(&set_ops);
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 
@@ -251,8 +254,9 @@ test "raw policy rejects raw ddl fragments in public ast commands" {
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&constrained));
 }
 
-test "raw policy rejects raw source query sql in public ast commands" {
-    const cmd = trusted_nested_query.createMaterializedViewFromSql("mv_users", "SELECT * FROM users");
+test "raw policy rejects raw source query in public ast commands" {
+    var raw_query = raw_cmd.command("SELECT * FROM users");
+    const cmd = QailCmd.createMaterializedView("mv_users").withSourceQuery(&raw_query);
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 

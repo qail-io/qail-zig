@@ -59,8 +59,6 @@ pub const Schema = struct {
             if (policy.role) |role| self.allocator.free(role);
             if (policy.using_expr) |expr| freeOwnedExpr(self.allocator, expr);
             if (policy.with_check_expr) |expr| freeOwnedExpr(self.allocator, expr);
-            if (policy.using_sql) |using_sql| self.allocator.free(using_sql);
-            if (policy.with_check_sql) |with_check_sql| self.allocator.free(with_check_sql);
         }
         for (self.grants.items) |grant| {
             grant.deinit(self.allocator);
@@ -222,7 +220,7 @@ const Parser = struct {
         return self.allocator.dupe(u8, expr);
     }
 
-    fn parsePolicyPredicate(self: *Parser, expr_slot: *?Expr, raw_slot: *?[]const u8) !void {
+    fn parsePolicyPredicate(self: *Parser, expr_slot: *?Expr) !void {
         const raw = try self.parseParenthesizedExpr();
         errdefer self.allocator.free(raw);
 
@@ -230,19 +228,15 @@ const Parser = struct {
             error.InvalidPolicyExpression, error.UnsupportedPolicyExpr => {
                 if (expr_slot.*) |old_expr| {
                     freeOwnedExpr(self.allocator, old_expr);
-                    expr_slot.* = null;
                 }
-                if (raw_slot.*) |old_raw| self.allocator.free(old_raw);
-                raw_slot.* = raw;
+                expr_slot.* = .{ .raw = raw };
                 return;
             },
             else => return err,
         };
 
         if (expr_slot.*) |old_expr| freeOwnedExpr(self.allocator, old_expr);
-        if (raw_slot.*) |old_raw| self.allocator.free(old_raw);
         expr_slot.* = parsed;
-        raw_slot.* = null;
         self.allocator.free(raw);
     }
 
@@ -264,8 +258,6 @@ const Parser = struct {
             .role = null,
             .using_expr = null,
             .with_check_expr = null,
-            .using_sql = null,
-            .with_check_sql = null,
         };
         errdefer {
             self.allocator.free(policy.name);
@@ -273,8 +265,6 @@ const Parser = struct {
             if (policy.role) |role| self.allocator.free(role);
             if (policy.using_expr) |expr| freeOwnedExpr(self.allocator, expr);
             if (policy.with_check_expr) |expr| freeOwnedExpr(self.allocator, expr);
-            if (policy.using_sql) |using_sql| self.allocator.free(using_sql);
-            if (policy.with_check_sql) |with_check_sql| self.allocator.free(with_check_sql);
         }
 
         while (true) {
@@ -293,18 +283,18 @@ const Parser = struct {
             }
 
             if (self.matchKeyword("using")) {
-                try self.parsePolicyPredicate(&policy.using_expr, &policy.using_sql);
+                try self.parsePolicyPredicate(&policy.using_expr);
                 continue;
             }
 
             if (self.matchKeyword("with_check")) {
-                try self.parsePolicyPredicate(&policy.with_check_expr, &policy.with_check_sql);
+                try self.parsePolicyPredicate(&policy.with_check_expr);
                 continue;
             }
 
             if (self.matchKeyword("with")) {
                 if (self.matchKeyword("check")) {
-                    try self.parsePolicyPredicate(&policy.with_check_expr, &policy.with_check_sql);
+                    try self.parsePolicyPredicate(&policy.with_check_expr);
                     continue;
                 }
                 self.pos = restore;
@@ -1441,8 +1431,6 @@ test "parse policy block" {
     try std.testing.expectEqualStrings("app_user", policy.role.?);
     try std.testing.expect(policy.using_expr != null);
     try std.testing.expect(policy.with_check_expr != null);
-    try std.testing.expect(policy.using_sql == null);
-    try std.testing.expect(policy.with_check_sql == null);
 
     const using_expr = policy.using_expr.?;
     try std.testing.expect(using_expr == .binary);
@@ -1474,8 +1462,14 @@ test "parse policy block falls back to raw sql for unsupported predicate forms" 
 
     try std.testing.expectEqual(@as(usize, 1), schema.policies.items.len);
     const policy = schema.policies.items[0];
-    try std.testing.expect(policy.using_expr == null);
-    try std.testing.expectEqualStrings("lower(email) like '%@qail.io'", policy.using_sql.?);
+    try std.testing.expect(policy.using_expr != null);
+    try std.testing.expectEqualStrings(
+        "lower(email) like '%@qail.io'",
+        switch (policy.using_expr.?) {
+            .raw => |raw| raw,
+            else => unreachable,
+        },
+    );
 }
 
 test "parse policy block normalizes nullif wrapped current_setting tenant predicate" {
@@ -1496,7 +1490,6 @@ test "parse policy block normalizes nullif wrapped current_setting tenant predic
 
     const policy = schema.policies.items[0];
     try std.testing.expect(policy.using_expr != null);
-    try std.testing.expect(policy.using_sql == null);
 
     const expr = policy.using_expr.?;
     try std.testing.expect(expr == .binary);
@@ -1526,7 +1519,6 @@ test "parse policy block normalizes coalesce wrapped current_setting boolean pre
 
     const policy = schema.policies.items[0];
     try std.testing.expect(policy.using_expr != null);
-    try std.testing.expect(policy.using_sql == null);
 
     const expr = policy.using_expr.?;
     try std.testing.expect(expr == .binary);

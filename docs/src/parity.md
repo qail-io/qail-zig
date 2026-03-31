@@ -46,10 +46,10 @@ Parity is not complete across the entire qail.rs ecosystem. The largest gaps rem
 The main remaining policy difference is narrower now:
 
 - `qail.rs` removed raw runtime SQL APIs from the normal execution path entirely.
-- `qail-zig` now rejects `.raw` and nested procedural/raw escape hatches on the public driver path by default, but still keeps some trusted/internal compatibility fields in the AST.
+- `qail-zig` now rejects `.raw` and nested procedural/raw escape hatches on the public driver path by default.
 - On TLS connections, `qail-zig` now treats connection-derived `tls-server-end-point` bytes as authoritative instead of allowing caller-supplied binding overrides.
 - Typed RLS helpers and typed policy parsing are now present on the Zig side, including normalization of common wrapped `current_setting(...)` forms emitted by `pg_dump`.
-- The remaining raw nested-query and raw policy-SQL compatibility fields are now quarantined behind internal trusted helper modules plus repo allowlist checks, rather than ad hoc direct assignment or normal AST re-exports.
+- The old raw nested-query and raw policy-SQL string fields have been removed from the Zig AST shape entirely; trusted compatibility now flows through internal helper modules and raw AST variants that the public runtime gate already rejects.
 
 ## PG Driver Focus
 

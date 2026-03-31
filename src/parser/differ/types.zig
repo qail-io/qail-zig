@@ -243,16 +243,12 @@ pub const MigrationCmd = struct {
                     var expr = using_expr;
                     try render.writeExpr(w, &expr);
                     try w.writeByte(')');
-                } else if (policy.using_sql) |using_sql| {
-                    try w.print(" USING ({s})", .{using_sql});
                 }
                 if (policy.with_check_expr) |with_check_expr| {
                     try w.writeAll(" WITH CHECK (");
                     var expr = with_check_expr;
                     try render.writeExpr(w, &expr);
                     try w.writeByte(')');
-                } else if (policy.with_check_sql) |with_check_sql| {
-                    try w.print(" WITH CHECK ({s})", .{with_check_sql});
                 }
             },
             .drop_policy => {
@@ -336,16 +332,12 @@ pub const MigrationCmd = struct {
                         var expr = using_expr;
                         try render.writeExpr(w, &expr);
                         try w.writeByte(')');
-                    } else if (policy.using_sql) |using_sql| {
-                        try w.print(" USING ({s})", .{using_sql});
                     }
                     if (policy.with_check_expr) |with_check_expr| {
                         try w.writeAll(" WITH CHECK (");
                         var expr = with_check_expr;
                         try render.writeExpr(w, &expr);
                         try w.writeByte(')');
-                    } else if (policy.with_check_sql) |with_check_sql| {
-                        try w.print(" WITH CHECK ({s})", .{with_check_sql});
                     }
                 } else {
                     try w.print("-- Cannot auto-rollback DROP POLICY (definition missing)", .{});

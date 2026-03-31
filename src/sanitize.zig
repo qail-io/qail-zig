@@ -284,9 +284,6 @@ fn checkPolicy(policy: *const PolicyDef) ?SanitizeError {
         var expr = with_check_expr;
         if (checkExpr("policy.with_check", &expr)) |err| return err;
     }
-    if (policy.using_sql != null or policy.with_check_sql != null) {
-        return rawError("policy.raw");
-    }
     return null;
 }
 
@@ -400,7 +397,6 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
         if (cte.source_table) |table| {
             if (checkIdent("cte.source_table", table)) |err| return err;
         }
-        if (cte.base_sql.len != 0) return rawError("cte.base_sql");
         if (cte.base_query) |query| {
             if (validateCmd(query)) |err| return err;
         }
@@ -410,12 +406,10 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     }
 
     for (cmd.set_ops) |set_op| {
-        if (set_op.query_sql.len != 0) return rawError("set_ops.query_sql");
         if (set_op.query) |query| {
             if (validateCmd(query)) |err| return err;
         }
     }
-    if (cmd.source_query_sql != null) return rawError("source_query_sql");
     if (cmd.source_query) |query| {
         if (validateCmd(query)) |err| return err;
     }

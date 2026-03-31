@@ -141,19 +141,11 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
                 var expr = using_expr;
                 try render.writeExpr(writer, &expr);
                 try writer.writeByte(')');
-            } else if (policy.using_sql) |using_sql| {
-                try writer.writeAll(" USING (");
-                try writer.writeAll(using_sql);
-                try writer.writeByte(')');
             }
             if (policy.with_check_expr) |with_check_expr| {
                 try writer.writeAll(" WITH CHECK (");
                 var expr = with_check_expr;
                 try render.writeExpr(writer, &expr);
-                try writer.writeByte(')');
-            } else if (policy.with_check_sql) |with_check_sql| {
-                try writer.writeAll(" WITH CHECK (");
-                try writer.writeAll(with_check_sql);
                 try writer.writeByte(')');
             }
         },

@@ -1,50 +1,27 @@
 const cmd = @import("cmd.zig");
 
 const QailCmd = cmd.QailCmd;
-const CTEDef = cmd.CTEDef;
-const SetOp = cmd.SetOp;
-const SetOpDef = cmd.SetOpDef;
 
-/// Trusted/internal helper for legacy raw nested-query compatibility paths.
+/// Trusted/internal helper for legacy raw view/materialized-view compatibility paths.
 /// Public driver execution rejects these commands by default.
-pub fn withSourceQuerySql(base: QailCmd, sql: []const u8) QailCmd {
+pub fn withRawQuerySource(base: QailCmd, sql: []const u8) QailCmd {
     var cmd_copy = base;
-    cmd_copy.source_query_sql = sql;
+    cmd_copy.raw_sql = sql;
     return cmd_copy;
 }
 
 pub fn createViewFromSql(name: []const u8, sql: []const u8) QailCmd {
-    return withSourceQuerySql(QailCmd.createView(name), sql);
+    return withRawQuerySource(QailCmd.createView(name), sql);
 }
 
 pub fn createMaterializedViewFromSql(name: []const u8, sql: []const u8) QailCmd {
-    return withSourceQuerySql(QailCmd.createMaterializedView(name), sql);
+    return withRawQuerySource(QailCmd.createMaterializedView(name), sql);
 }
 
-pub fn cteFromSql(name: []const u8, sql: []const u8) CTEDef {
-    return .{
-        .name = name,
-        .base_sql = sql,
-    };
-}
-
-pub fn setOpFromSql(op: SetOp, sql: []const u8) SetOpDef {
-    return .{
-        .op = op,
-        .query_sql = sql,
-    };
-}
-
-test "trusted nested query raw helpers set compatibility fields" {
-    const cte = cteFromSql("legacy", "SELECT 1");
-    try @import("std").testing.expectEqualStrings("SELECT 1", cte.base_sql);
-
-    const set_op = setOpFromSql(.union_all, "SELECT 2");
-    try @import("std").testing.expectEqualStrings("SELECT 2", set_op.query_sql);
-
+test "trusted nested query raw helpers use parent raw_sql for legacy view paths" {
     const cmd_view = createViewFromSql("v_legacy", "SELECT 3");
-    try @import("std").testing.expectEqualStrings("SELECT 3", cmd_view.source_query_sql.?);
+    try @import("std").testing.expectEqualStrings("SELECT 3", cmd_view.raw_sql.?);
 
     const cmd_mv = createMaterializedViewFromSql("mv_legacy", "SELECT 4");
-    try @import("std").testing.expectEqualStrings("SELECT 4", cmd_mv.source_query_sql.?);
+    try @import("std").testing.expectEqualStrings("SELECT 4", cmd_mv.raw_sql.?);
 }

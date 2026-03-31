@@ -58,6 +58,7 @@ fn freeOwnedValue(allocator: Allocator, value: Value) void {
 pub fn cloneOwnedExpr(allocator: Allocator, expr: Expr) !Expr {
     return switch (expr) {
         .named => |name| .{ .named = try allocator.dupe(u8, name) },
+        .raw => |raw| .{ .raw = try allocator.dupe(u8, raw) },
         .literal => |value| .{ .literal = try cloneOwnedValue(allocator, value) },
         .func_call => |fc| blk: {
             const args = try allocator.alloc(Expr, fc.args.len);
@@ -133,6 +134,7 @@ fn freeOwnedExprPtr(allocator: Allocator, ptr: *const Expr) void {
 pub fn freeOwnedExpr(allocator: Allocator, expr: Expr) void {
     switch (expr) {
         .named => |name| allocator.free(name),
+        .raw => |raw| allocator.free(raw),
         .literal => |value| freeOwnedValue(allocator, value),
         .func_call => |fc| {
             allocator.free(fc.name);
