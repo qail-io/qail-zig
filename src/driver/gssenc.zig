@@ -346,6 +346,11 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
         return try self.session.unwrap(self.allocator, wrapped);
     }
 } else struct {
+    process_id: u32 = 0,
+    secret_key: u32 = 0,
+    ready: bool = false,
+    in_transaction: bool = false,
+
     pub fn connectFromAcceptedStream(
         _: std.mem.Allocator,
         _: []const u8,

@@ -59,7 +59,7 @@ extract_zig_cmd_kinds() {
     if (/^\s*([a-z_][a-z0-9_]*)\s*,/) {
       print "$1\n";
     }
-  ' "${ROOT_DIR}/src/ast/cmd.zig" | sort -u
+  ' "${ROOT_DIR}/src/ast/cmd/types.zig" | sort -u
 }
 
 extract_rust_encoder_actions() {
