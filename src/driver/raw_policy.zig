@@ -45,7 +45,18 @@ fn tableConstraintHasTrustedOnlyEscapeHatch(constraint: TableConstraint) bool {
 }
 
 fn policyHasTrustedOnlyEscapeHatch(policy: *const PolicyDef) bool {
-    return policy.using_sql != null or policy.with_check_sql != null;
+    if (policy.using_sql != null or policy.with_check_sql != null) return true;
+
+    if (policy.using_expr) |using_expr| {
+        var expr = using_expr;
+        if (exprHasTrustedOnlyEscapeHatch(&expr)) return true;
+    }
+    if (policy.with_check_expr) |with_check_expr| {
+        var expr = with_check_expr;
+        if (exprHasTrustedOnlyEscapeHatch(&expr)) return true;
+    }
+
+    return false;
 }
 
 fn exprHasTrustedOnlyEscapeHatch(expr: *const Expr) bool {
@@ -120,6 +131,9 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
     }
 
     if (cmd.source_query_sql != null) return true;
+    if (cmd.source_query) |source_query| {
+        if (cmdHasTrustedOnlyEscapeHatch(source_query)) return true;
+    }
 
     for (cmd.columns) |*expr| {
         if (exprHasTrustedOnlyEscapeHatch(expr)) return true;
@@ -153,9 +167,15 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
 
     for (cmd.ctes) |cte| {
         if (cte.base_sql.len != 0) return true;
+        if (cte.base_query) |query| {
+            if (cmdHasTrustedOnlyEscapeHatch(query)) return true;
+        }
     }
     for (cmd.set_ops) |set_op| {
         if (set_op.query_sql.len != 0) return true;
+        if (set_op.query) |query| {
+            if (cmdHasTrustedOnlyEscapeHatch(query)) return true;
+        }
     }
     if (cmd.policy_def) |*policy| {
         if (policyHasTrustedOnlyEscapeHatch(policy)) return true;
@@ -230,6 +250,45 @@ test "raw policy rejects raw source query sql in public ast commands" {
     var cmd = QailCmd.createMaterializedView("mv_users");
     cmd.source_query_sql = "SELECT * FROM users";
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy allows typed source query in public ast commands" {
+    const source = QailCmd.get("users").select(&.{Expr.col("id")});
+    const cmd = QailCmd.createMaterializedView("mv_users").withSourceQuery(&source);
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
+test "raw policy allows typed cte queries in public ast commands" {
+    const source = QailCmd.get("orders").select(&.{Expr.col("user_id")});
+    const ctes = [_]ast.CTEDef{ast.CTEDef.fromQuery("active_orders", &source)};
+    const cmd = QailCmd.get("active_orders").withCtes(&ctes);
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
+test "raw policy allows typed set op queries in public ast commands" {
+    const rhs = QailCmd.get("admins").select(&.{Expr.col("id")});
+    const set_ops = [_]ast.SetOpDef{ast.SetOpDef.fromQuery(.union_all, &rhs)};
+    const cmd = QailCmd.get("users").withSetOps(&set_ops);
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
+test "raw policy allows typed policy predicates in public ast commands" {
+    const left = Expr.col("tenant_id");
+    const right = Expr.int(42);
+    const predicate: Expr = .{
+        .binary = .{
+            .left = &left,
+            .op = .eq,
+            .right = &right,
+        },
+    };
+    const policy = PolicyDef.create("tenant_only", "orders")
+        .restrictive()
+        .toRole("app_user")
+        .usingExpr(predicate)
+        .withCheckExpr(predicate);
+    const cmd = QailCmd.createPolicy(policy);
+    try rejectPublicRuntimeCmd(&cmd);
 }
 
 test "raw policy rejects policy sql in public ast commands" {

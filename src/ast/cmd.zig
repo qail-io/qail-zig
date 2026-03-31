@@ -105,6 +105,8 @@ pub const QailCmd = struct {
 
     // ==================== DML Extensions ====================
 
+    // INSERT/VIEW/EXPLAIN nested query source (preferred typed form)
+    source_query: ?*const QailCmd = null,
     // INSERT/VIEW/EXPLAIN raw source-query escape hatch (trusted/internal only)
     source_query_sql: ?[]const u8 = null,
 
@@ -658,6 +660,13 @@ pub const QailCmd = struct {
     pub fn withSetOps(self: QailCmd, ops: []const SetOpDef) QailCmd {
         var cmd = self;
         cmd.set_ops = ops;
+        return cmd;
+    }
+
+    /// Set a nested AST query source for INSERT .. SELECT, CREATE VIEW, etc.
+    pub fn withSourceQuery(self: QailCmd, query: *const QailCmd) QailCmd {
+        var cmd = self;
+        cmd.source_query = query;
         return cmd;
     }
 

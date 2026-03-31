@@ -44,3 +44,42 @@ test "sanitize: long identifier rejected" {
     const err = validateCmd(&cmd).?;
     try std.testing.expectEqualStrings("table", err.field);
 }
+
+test "sanitize: typed source query passes" {
+    const source = QailCmd.get("users").select(&.{Expr.col("id")});
+    const cmd = QailCmd.createView("user_ids").withSourceQuery(&source);
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: typed cte query passes" {
+    const source = QailCmd.get("orders").select(&.{Expr.col("user_id")});
+    const ctes = [_]ast.CTEDef{ast.CTEDef.fromQuery("active_orders", &source)};
+    const cmd = QailCmd.get("active_orders").withCtes(&ctes);
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: typed set op query passes" {
+    const rhs = QailCmd.get("admins").select(&.{Expr.col("id")});
+    const set_ops = [_]ast.SetOpDef{ast.SetOpDef.fromQuery(.union_all, &rhs)};
+    const cmd = QailCmd.get("users").withSetOps(&set_ops);
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: typed policy predicates pass" {
+    const left = Expr.col("tenant_id");
+    const right = Expr.int(42);
+    const predicate: Expr = .{
+        .binary = .{
+            .left = &left,
+            .op = .eq,
+            .right = &right,
+        },
+    };
+    const policy = ast.PolicyDef.create("tenant_only", "orders")
+        .restrictive()
+        .toRole("app_user")
+        .usingExpr(predicate)
+        .withCheckExpr(predicate);
+    const cmd = QailCmd.createPolicy(policy);
+    try std.testing.expect(validateCmd(&cmd) == null);
+}

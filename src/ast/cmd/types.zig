@@ -4,9 +4,11 @@ const operators = @import("../operators.zig");
 const values = @import("../values.zig");
 
 const Condition = expr.Condition;
+const Expr = expr.Expr;
 const LogicalOp = operators.LogicalOp;
 const SortOrder = operators.SortOrder;
 const Value = values.Value;
+const QailCmd = @import("../cmd.zig").QailCmd;
 
 /// Command type (GET, SET, DEL, ADD, etc.)
 pub const CmdKind = enum {
@@ -184,8 +186,24 @@ pub const CTEDef = struct {
     name: []const u8,
     recursive: bool = false,
     columns: []const []const u8 = &.{},
-    // Trusted/internal raw SQL escape hatch until nested AST CTEs exist.
+    base_query: ?*const QailCmd = null,
+    // Trusted/internal raw SQL fallback for legacy callers.
     base_sql: []const u8 = "",
+
+    pub fn fromQuery(name: []const u8, query: *const QailCmd) CTEDef {
+        return .{
+            .name = name,
+            .base_query = query,
+        };
+    }
+
+    pub fn fromQueryColumns(name: []const u8, columns: []const []const u8, query: *const QailCmd) CTEDef {
+        return .{
+            .name = name,
+            .columns = columns,
+            .base_query = query,
+        };
+    }
 };
 
 /// ON CONFLICT action for upsert
@@ -214,8 +232,16 @@ pub const SetOp = enum {
 /// Set operation definition (operation + query)
 pub const SetOpDef = struct {
     op: SetOp,
-    // Trusted/internal raw SQL escape hatch until nested AST set-ops exist.
+    query: ?*const QailCmd = null,
+    // Trusted/internal raw SQL fallback for legacy callers.
     query_sql: []const u8 = "",
+
+    pub fn fromQuery(op: SetOp, query: *const QailCmd) SetOpDef {
+        return .{
+            .op = op,
+            .query = query,
+        };
+    }
 };
 
 /// Index definition for CREATE INDEX
@@ -284,9 +310,72 @@ pub const PolicyDef = struct {
     target: PolicyTarget = .all,
     permissiveness: PolicyPermissiveness = .permissive,
     role: ?[]const u8 = null,
-    // Trusted/internal raw SQL escape hatches until policy predicates are AST-native.
+    using_expr: ?Expr = null,
+    with_check_expr: ?Expr = null,
+    // Trusted/internal raw SQL fallback for legacy callers.
     using_sql: ?[]const u8 = null,
     with_check_sql: ?[]const u8 = null,
+
+    pub fn create(name: []const u8, table: []const u8) PolicyDef {
+        return .{
+            .name = name,
+            .table = table,
+        };
+    }
+
+    pub fn forAll(self: PolicyDef) PolicyDef {
+        var policy = self;
+        policy.target = .all;
+        return policy;
+    }
+
+    pub fn forSelect(self: PolicyDef) PolicyDef {
+        var policy = self;
+        policy.target = .select;
+        return policy;
+    }
+
+    pub fn forInsert(self: PolicyDef) PolicyDef {
+        var policy = self;
+        policy.target = .insert;
+        return policy;
+    }
+
+    pub fn forUpdate(self: PolicyDef) PolicyDef {
+        var policy = self;
+        policy.target = .update;
+        return policy;
+    }
+
+    pub fn forDelete(self: PolicyDef) PolicyDef {
+        var policy = self;
+        policy.target = .delete;
+        return policy;
+    }
+
+    pub fn restrictive(self: PolicyDef) PolicyDef {
+        var policy = self;
+        policy.permissiveness = .restrictive;
+        return policy;
+    }
+
+    pub fn toRole(self: PolicyDef, role_name: []const u8) PolicyDef {
+        var policy = self;
+        policy.role = role_name;
+        return policy;
+    }
+
+    pub fn usingExpr(self: PolicyDef, predicate: Expr) PolicyDef {
+        var policy = self;
+        policy.using_expr = predicate;
+        return policy;
+    }
+
+    pub fn withCheckExpr(self: PolicyDef, predicate: Expr) PolicyDef {
+        var policy = self;
+        policy.with_check_expr = predicate;
+        return policy;
+    }
 };
 
 /// Create a simple filter condition

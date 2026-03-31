@@ -422,7 +422,9 @@ pub const AstEncoder = struct {
                 try writer.writeAll("CREATE VIEW ");
                 try writer.writeAll(cmd.table);
                 try writer.writeAll(" AS ");
-                if (cmd.source_query_sql) |source_sql| {
+                if (cmd.source_query) |source_query| {
+                    try writeNestedQueryableCmd(writer, source_query);
+                } else if (cmd.source_query_sql) |source_sql| {
                     try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
@@ -438,7 +440,9 @@ pub const AstEncoder = struct {
                 try writer.writeAll("CREATE MATERIALIZED VIEW ");
                 try writer.writeAll(cmd.table);
                 try writer.writeAll(" AS ");
-                if (cmd.source_query_sql) |source_sql| {
+                if (cmd.source_query) |source_query| {
+                    try writeNestedQueryableCmd(writer, source_query);
+                } else if (cmd.source_query_sql) |source_sql| {
                     try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
@@ -574,7 +578,9 @@ pub const AstEncoder = struct {
             },
             .explain => {
                 try writer.writeAll("EXPLAIN ");
-                if (cmd.source_query_sql) |source_sql| {
+                if (cmd.source_query) |source_query| {
+                    try writeNestedQueryableCmd(writer, source_query);
+                } else if (cmd.source_query_sql) |source_sql| {
                     try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
@@ -587,7 +593,9 @@ pub const AstEncoder = struct {
             },
             .explain_analyze => {
                 try writer.writeAll("EXPLAIN ANALYZE ");
-                if (cmd.source_query_sql) |source_sql| {
+                if (cmd.source_query) |source_query| {
+                    try writeNestedQueryableCmd(writer, source_query);
+                } else if (cmd.source_query_sql) |source_sql| {
                     try writer.writeAll(source_sql);
                 } else if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
@@ -779,13 +787,23 @@ pub const AstEncoder = struct {
                     try writer.writeAll(role);
                 }
 
-                if (policy.using_sql) |using_expr| {
+                if (policy.using_expr) |using_expr| {
+                    try writer.writeAll(" USING (");
+                    var expr = using_expr;
+                    try writeExpr(writer, &expr);
+                    try writer.writeByte(')');
+                } else if (policy.using_sql) |using_expr| {
                     try writer.writeAll(" USING (");
                     try writer.writeAll(using_expr);
                     try writer.writeByte(')');
                 }
 
-                if (policy.with_check_sql) |with_check_expr| {
+                if (policy.with_check_expr) |with_check_expr| {
+                    try writer.writeAll(" WITH CHECK (");
+                    var expr = with_check_expr;
+                    try writeExpr(writer, &expr);
+                    try writer.writeByte(')');
+                } else if (policy.with_check_sql) |with_check_expr| {
                     try writer.writeAll(" WITH CHECK (");
                     try writer.writeAll(with_check_expr);
                     try writer.writeByte(')');
@@ -916,6 +934,8 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
         try writer.print(" OFFSET {d}", .{offset});
     }
 
+    try writeSetOps(writer, cmd);
+
     if (cmd.fetch_count) |count| {
         if (cmd.fetch_with_ties) {
             try writer.print(" FETCH FIRST {d} ROWS WITH TIES", .{count});
@@ -926,6 +946,38 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
 
     if (cmd.lock_mode) |lock| {
         try writer.print(" {s}", .{lock.toSql()});
+    }
+}
+
+fn writeNestedQueryableCmd(writer: anytype, cmd: *const QailCmd) anyerror!void {
+    return switch (cmd.kind) {
+        .get => writeSelect(writer, cmd, false),
+        .with => writeSelect(writer, cmd, false),
+        .cnt => writeSelect(writer, cmd, true),
+        .search => writeSelect(writer, cmd, false),
+        .over => writeSelect(writer, cmd, false),
+        else => error.UnsupportedNestedQueryCommand,
+    };
+}
+
+fn writeSetOps(writer: anytype, cmd: *const QailCmd) anyerror!void {
+    for (cmd.set_ops) |set_op| {
+        switch (set_op.op) {
+            .@"union" => try writer.writeAll(" UNION "),
+            .union_all => try writer.writeAll(" UNION ALL "),
+            .intersect => try writer.writeAll(" INTERSECT "),
+            .intersect_all => try writer.writeAll(" INTERSECT ALL "),
+            .except => try writer.writeAll(" EXCEPT "),
+            .except_all => try writer.writeAll(" EXCEPT ALL "),
+        }
+
+        if (set_op.query) |query| {
+            try writeNestedQueryableCmd(writer, query);
+        } else if (set_op.query_sql.len != 0) {
+            try writer.writeAll(set_op.query_sql);
+        } else {
+            return error.MissingSetOpQuery;
+        }
     }
 }
 
@@ -959,7 +1011,13 @@ fn writeCtePrefix(writer: anytype, cmd: *const QailCmd) !void {
         }
 
         try writer.writeAll(" AS (");
-        try writer.writeAll(cte.base_sql);
+        if (cte.base_query) |query| {
+            try writeNestedQueryableCmd(writer, query);
+        } else if (cte.base_sql.len != 0) {
+            try writer.writeAll(cte.base_sql);
+        } else {
+            return error.MissingCteQuery;
+        }
         try writer.writeAll(")");
     }
 
@@ -1014,6 +1072,9 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
 
     if (cmd.default_values) {
         try writer.writeAll(" DEFAULT VALUES");
+    } else if (cmd.source_query) |source_query| {
+        try writer.writeByte(' ');
+        try writeNestedQueryableCmd(writer, source_query);
     } else if (cmd.source_query_sql) |source_sql| {
         try writer.writeByte(' ');
         try writer.writeAll(source_sql);
@@ -1172,6 +1233,20 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             }
         },
         .literal => |val| try writeValue(writer, &val),
+        .binary => |b| {
+            try writeExpr(writer, b.left);
+            switch (b.op) {
+                .is_null, .is_not_null => try writer.print(" {s}", .{b.op.toSql()}),
+                else => {
+                    try writer.print(" {s} ", .{b.op.toSql()});
+                    try writeExpr(writer, b.right);
+                },
+            }
+            if (b.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
         .func_call => |fc| {
             try writer.writeAll(fc.name);
             try writer.writeAll("(");
@@ -1181,6 +1256,44 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             }
             try writer.writeAll(")");
             if (fc.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .case_expr => |c| {
+            try writer.writeAll("CASE");
+            for (c.when_clauses) |when_clause| {
+                try writer.writeAll(" WHEN ");
+                if (when_clause.condition.column.len != 0) {
+                    try writer.writeAll(when_clause.condition.column);
+                } else {
+                    try writeExpr(writer, &when_clause.condition.left);
+                }
+                switch (when_clause.condition.op) {
+                    .is_null, .is_not_null => try writer.print(" {s}", .{when_clause.condition.op.toSql()}),
+                    else => {
+                        try writer.print(" {s} ", .{when_clause.condition.op.toSql()});
+                        try writeValue(writer, &when_clause.condition.value);
+                    },
+                }
+                try writer.writeAll(" THEN ");
+                try writeExpr(writer, &when_clause.result);
+            }
+            if (c.else_value) |else_expr| {
+                try writer.writeAll(" ELSE ");
+                try writeExpr(writer, else_expr);
+            }
+            try writer.writeAll(" END");
+            if (c.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .subquery => |sq| {
+            try writer.writeByte('(');
+            try writer.writeAll(sq.sql);
+            try writer.writeByte(')');
+            if (sq.alias) |alias| {
                 try writer.writeAll(" AS ");
                 try writer.writeAll(alias);
             }
@@ -1252,7 +1365,79 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
                 try writer.writeAll(a);
             }
         },
-        else => {},
+        .array_constructor => |a| {
+            try writer.writeAll("ARRAY[");
+            for (a.elements, 0..) |elem, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExpr(writer, &elem);
+            }
+            try writer.writeByte(']');
+            if (a.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .row_constructor => |r| {
+            try writer.writeAll("ROW(");
+            for (r.elements, 0..) |elem, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExpr(writer, &elem);
+            }
+            try writer.writeByte(')');
+            if (r.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .subscript => |s| {
+            try writeExpr(writer, s.base);
+            try writer.writeByte('[');
+            try writeExpr(writer, s.index);
+            try writer.writeByte(']');
+            if (s.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .collate => |c| {
+            try writeExpr(writer, c.expr);
+            try writer.writeAll(" COLLATE ");
+            try writer.writeAll(c.collation);
+            if (c.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .field_access => |f| {
+            try writer.writeByte('(');
+            try writeExpr(writer, f.expr);
+            try writer.writeAll(").");
+            try writer.writeAll(f.field);
+            if (f.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .exists_subquery => |sq| {
+            if (sq.negated) {
+                try writer.writeAll("NOT EXISTS (");
+            } else {
+                try writer.writeAll("EXISTS (");
+            }
+            try writer.writeAll(sq.sql);
+            try writer.writeByte(')');
+            if (sq.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .unary => |u| {
+            switch (u.op) {
+                .not => try writer.writeAll("NOT "),
+                else => try writer.writeAll(u.op.toSql()),
+            }
+            try writeExpr(writer, u.operand);
+        },
     }
 }
 
@@ -1459,6 +1644,83 @@ test "ast encoder lock table uses typed mode" {
     try std.testing.expectEqualStrings("LOCK TABLE users ACCESS EXCLUSIVE MODE", writer.getWritten());
 }
 
+test "ast encoder insert uses typed source query" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const target_cols = [_]Expr{ Expr.col("id"), Expr.col("email") };
+    const source_cols = [_]Expr{ Expr.col("id"), Expr.col("email") };
+    const source = QailCmd.get("users_archive").select(&source_cols);
+    const cmd = QailCmd.add("users").select(&target_cols).withSourceQuery(&source);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (id, email) SELECT id, email FROM users_archive",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder create view uses typed source query" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const source_cols = [_]Expr{ Expr.col("id"), Expr.col("email") };
+    const source = QailCmd.get("users").select(&source_cols);
+    const cmd = QailCmd.createView("user_emails").withSourceQuery(&source);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "CREATE VIEW user_emails AS SELECT id, email FROM users",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder cte uses typed base query" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const source_cols = [_]Expr{Expr.col("user_id")};
+    const outer_cols = [_]Expr{Expr.col("user_id")};
+    const source = QailCmd.get("orders").select(&source_cols);
+    const ctes = [_]ast.cmd.CTEDef{ast.cmd.CTEDef.fromQuery("active_orders", &source)};
+    const cmd = QailCmd.get("active_orders").select(&outer_cols).withCtes(&ctes);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "WITH active_orders AS (SELECT user_id FROM orders) SELECT user_id FROM active_orders",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder set ops use typed queries" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const left_cols = [_]Expr{Expr.col("id")};
+    const right_cols = [_]Expr{Expr.col("id")};
+    const rhs = QailCmd.get("admins").select(&right_cols);
+    const set_ops = [_]ast.cmd.SetOpDef{ast.cmd.SetOpDef.fromQuery(.union_all, &rhs)};
+    const cmd = QailCmd.get("users").select(&left_cols).withSetOps(&set_ops);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "SELECT id FROM users UNION ALL SELECT id FROM admins",
+        writer.getWritten(),
+    );
+}
+
 test "ast encoder delete with or-filter grouping" {
     const wheres = [_]ast.cmd.WhereClause{
         ast.cmd.orFilter("topic", .ilike, .{ .string = "%test%" }),
@@ -1567,6 +1829,34 @@ test "ast encoder create and drop policy" {
     const drop_cmd = QailCmd.dropPolicy("orders_tenant_isolation", "orders");
     try encoder.encodeQuery(&drop_cmd);
     try std.testing.expect(std.mem.indexOf(u8, encoder.getWritten(), "DROP POLICY IF EXISTS orders_tenant_isolation ON orders") != null);
+}
+
+test "ast encoder create policy with typed predicates" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const left = Expr.col("tenant_id");
+    const right = Expr.int(42);
+    const predicate: Expr = .{
+        .binary = .{
+            .left = &left,
+            .op = .eq,
+            .right = &right,
+        },
+    };
+    const policy = ast.cmd.PolicyDef.create("orders_tenant_isolation", "orders")
+        .restrictive()
+        .toRole("app_user")
+        .usingExpr(predicate)
+        .withCheckExpr(predicate);
+    const create_cmd = QailCmd.createPolicy(policy);
+
+    try encoder.encodeQuery(&create_cmd);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoder.getWritten(),
+        "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = 42) WITH CHECK (tenant_id = 42)",
+    ) != null);
 }
 
 test "ast encoder privilege and policy validation" {

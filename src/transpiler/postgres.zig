@@ -9,6 +9,7 @@
 const std = @import("std");
 const io = @import("../compat/io.zig");
 const commands = @import("postgres/commands.zig");
+const render = @import("postgres/render.zig");
 const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");
@@ -133,12 +134,22 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
                 try writer.writeAll(" TO ");
                 try writer.writeAll(role);
             }
-            if (policy.using_sql) |using_sql| {
+            if (policy.using_expr) |using_expr| {
+                try writer.writeAll(" USING (");
+                var expr = using_expr;
+                try render.writeExpr(writer, &expr);
+                try writer.writeByte(')');
+            } else if (policy.using_sql) |using_sql| {
                 try writer.writeAll(" USING (");
                 try writer.writeAll(using_sql);
                 try writer.writeByte(')');
             }
-            if (policy.with_check_sql) |with_check_sql| {
+            if (policy.with_check_expr) |with_check_expr| {
+                try writer.writeAll(" WITH CHECK (");
+                var expr = with_check_expr;
+                try render.writeExpr(writer, &expr);
+                try writer.writeByte(')');
+            } else if (policy.with_check_sql) |with_check_sql| {
                 try writer.writeAll(" WITH CHECK (");
                 try writer.writeAll(with_check_sql);
                 try writer.writeByte(')');
@@ -464,4 +475,30 @@ test "transpile grant revoke and policy commands" {
     const drop_policy_sql = try toSql(std.testing.allocator, &drop_policy_cmd);
     defer std.testing.allocator.free(drop_policy_sql);
     try std.testing.expectEqualStrings("DROP POLICY IF EXISTS orders_tenant_isolation ON orders", drop_policy_sql);
+}
+
+test "transpile typed policy predicates" {
+    const left = Expr.col("tenant_id");
+    const right = Expr.int(42);
+    const predicate: Expr = .{
+        .binary = .{
+            .left = &left,
+            .op = .eq,
+            .right = &right,
+        },
+    };
+    const policy = ast.cmd.PolicyDef.create("orders_tenant_isolation", "orders")
+        .restrictive()
+        .toRole("app_user")
+        .usingExpr(predicate)
+        .withCheckExpr(predicate);
+    const cmd = QailCmd.createPolicy(policy);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = 42) WITH CHECK (tenant_id = 42)",
+        sql,
+    );
 }
