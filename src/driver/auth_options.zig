@@ -53,9 +53,10 @@ pub const AuthOptions = struct {
     // SCRAM channel-binding policy
     scram_channel_binding: ScramChannelBindingMode = .prefer,
     /// Optional `tls-server-end-point` bytes used when selecting SCRAM-SHA-256-PLUS.
-    /// For TLS connections this is auto-derived from the handshake leaf cert
-    /// when available, with `TlsConfig.tls_server_end_point_cert_der` as
-    /// fallback or test input.
+    /// On plain connections this can supply binding bytes explicitly.
+    /// On TLS connections the driver uses the connection-derived binding
+    /// (handshake leaf cert, or `TlsConfig.tls_server_end_point_cert_der`
+    /// fallback) as the authoritative value.
     scram_tls_server_end_point_binding: ?[]const u8 = null,
 
     // GSS token exchange

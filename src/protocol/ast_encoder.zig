@@ -8,6 +8,7 @@ const io = @import("../compat/io.zig");
 const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");
+    pub const trusted_policy_sql = @import("../ast/trusted_policy_sql.zig");
     pub const values = @import("../ast/values.zig");
     pub const operators = @import("../ast/operators.zig");
     pub const QailCmd = cmd.QailCmd;
@@ -1856,15 +1857,13 @@ test "ast encoder create and drop policy" {
     var encoder = AstEncoder.init(std.testing.allocator);
     defer encoder.deinit();
 
-    const policy = ast.cmd.PolicyDef{
-        .name = "orders_tenant_isolation",
-        .table = "orders",
-        .target = .all,
-        .permissiveness = .restrictive,
-        .role = "app_user",
-        .using_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
-        .with_check_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
-    };
+    const policy = ast.trusted_policy_sql.usingAndCheckSql(
+        ast.cmd.PolicyDef.create("orders_tenant_isolation", "orders")
+            .restrictive()
+            .toRole("app_user"),
+        "tenant_id = current_setting('app.tenant_id')::uuid",
+        "tenant_id = current_setting('app.tenant_id')::uuid",
+    );
 
     const create_cmd = QailCmd.createPolicy(policy);
     try encoder.encodeQuery(&create_cmd);

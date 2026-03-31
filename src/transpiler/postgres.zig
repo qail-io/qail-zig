@@ -14,6 +14,7 @@ const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");
     pub const policy = @import("../ast/policy.zig");
+    pub const trusted_policy_sql = @import("../ast/trusted_policy_sql.zig");
     pub const values = @import("../ast/values.zig");
     pub const operators = @import("../ast/operators.zig");
     pub const QailCmd = cmd.QailCmd;
@@ -455,15 +456,13 @@ test "transpile grant revoke and policy commands" {
     defer std.testing.allocator.free(revoke_sql);
     try std.testing.expectEqualStrings("REVOKE SELECT, INSERT ON users FROM app_role", revoke_sql);
 
-    const policy = ast.cmd.PolicyDef{
-        .name = "orders_tenant_isolation",
-        .table = "orders",
-        .target = .all,
-        .permissiveness = .restrictive,
-        .role = "app_user",
-        .using_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
-        .with_check_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
-    };
+    const policy = ast.trusted_policy_sql.usingAndCheckSql(
+        ast.cmd.PolicyDef.create("orders_tenant_isolation", "orders")
+            .restrictive()
+            .toRole("app_user"),
+        "tenant_id = current_setting('app.tenant_id')::uuid",
+        "tenant_id = current_setting('app.tenant_id')::uuid",
+    );
     const create_policy_cmd = QailCmd.createPolicy(policy);
     const create_policy_sql = try toSql(std.testing.allocator, &create_policy_cmd);
     defer std.testing.allocator.free(create_policy_sql);

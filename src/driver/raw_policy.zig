@@ -1,5 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const trusted_nested_query = @import("../ast/trusted_nested_query.zig");
+const trusted_policy_sql = @import("../ast/trusted_policy_sql.zig");
 
 const QailCmd = ast.QailCmd;
 const Expr = ast.Expr;
@@ -230,7 +232,7 @@ test "raw policy rejects subquery expressions in public ast commands" {
 }
 
 test "raw policy rejects raw cte source sql in public ast commands" {
-    const ctes = [_]ast.CTEDef{ast.trusted_nested_query.cteFromSql("danger", "SELECT 1")};
+    const ctes = [_]ast.CTEDef{trusted_nested_query.cteFromSql("danger", "SELECT 1")};
     const cmd = QailCmd.get("users").withCtes(&ctes);
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
@@ -250,7 +252,7 @@ test "raw policy rejects raw ddl fragments in public ast commands" {
 }
 
 test "raw policy rejects raw source query sql in public ast commands" {
-    const cmd = ast.trusted_nested_query.createMaterializedViewFromSql("mv_users", "SELECT * FROM users");
+    const cmd = trusted_nested_query.createMaterializedViewFromSql("mv_users", "SELECT * FROM users");
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 
@@ -304,11 +306,10 @@ test "raw policy allows typed policy predicates in public ast commands" {
 }
 
 test "raw policy rejects policy sql in public ast commands" {
-    const policy: PolicyDef = .{
-        .name = "tenant_only",
-        .table = "users",
-        .using_sql = "tenant_id = current_setting('app.tenant_id')::uuid",
-    };
+    const policy = trusted_policy_sql.usingSql(
+        PolicyDef.create("tenant_only", "users"),
+        "tenant_id = current_setting('app.tenant_id')::uuid",
+    );
     const cmd = QailCmd.createPolicy(policy);
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
@@ -337,6 +338,8 @@ test "source: public driver raw runtime api is not re-exported" {
     const ast_mod = try std.fs.cwd().readFileAlloc(allocator, "src/ast/mod.zig", 32 * 1024);
     defer allocator.free(ast_mod);
     try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const raw_cmd =") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const trusted_policy_sql =") == null);
+    try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const trusted_nested_query =") == null);
 
     const expr_src = try std.fs.cwd().readFileAlloc(allocator, "src/ast/expr.zig", 48 * 1024);
     defer allocator.free(expr_src);

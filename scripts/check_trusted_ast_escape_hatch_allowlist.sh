@@ -65,6 +65,7 @@ check_allowlist \
 check_allowlist \
   "policy using_sql field access" \
   '\.using_sql\b' \
+  "src/ast/trusted_policy_sql.zig" \
   "src/driver/raw_policy.zig" \
   "src/parser/differ/compare.zig" \
   "src/parser/differ/types.zig" \
@@ -76,6 +77,7 @@ check_allowlist \
 check_allowlist \
   "policy with_check_sql field access" \
   '\.with_check_sql\b' \
+  "src/ast/trusted_policy_sql.zig" \
   "src/driver/raw_policy.zig" \
   "src/parser/differ/compare.zig" \
   "src/parser/differ/types.zig" \

@@ -158,19 +158,15 @@ pub const TlsConnection = struct {
         // Initialize TLS client (performs handshake)
         self.tls_client = try net.initTlsClient(&self.stream_reader.?, &self.stream_writer.?, tls_client_options);
         self.ssl_enabled = true;
-
-        if (self.tls_client) |client| {
-            self.tls_server_end_point_binding = client.tls_server_end_point_binding;
-        }
-
-        if (self.tls_server_end_point_binding == null) {
-            if (config.tls_server_end_point_cert_der) |cert_der| {
-                self.tls_server_end_point_binding = try tls_mod.config.deriveTlsServerEndPointBindingFromCertDer(
-                    self.allocator,
-                    cert_der,
-                );
-            }
-        }
+        const handshake_binding = if (self.tls_client) |client|
+            client.tls_server_end_point_binding
+        else
+            null;
+        self.tls_server_end_point_binding = try resolveTlsServerEndPointBinding(
+            self.allocator,
+            handshake_binding,
+            config,
+        );
     }
 
     pub fn close(self: *TlsConnection) void {
@@ -283,10 +279,10 @@ pub const TlsConnection = struct {
         extra_params: []const StartupParam,
         auth_options: AuthOptions,
     ) !void {
-        var effective_auth_options = auth_options;
-        if (effective_auth_options.scram_tls_server_end_point_binding == null) {
-            effective_auth_options.scram_tls_server_end_point_binding = self.tls_server_end_point_binding;
-        }
+        const effective_auth_options = effectiveStartupAuthOptions(
+            auth_options,
+            self.tls_server_end_point_binding,
+        );
 
         var encoder = Encoder.init(self.allocator);
         defer encoder.deinit();
@@ -457,6 +453,40 @@ pub const TlsConnection = struct {
     }
 };
 
+fn effectiveStartupAuthOptions(
+    auth_options: AuthOptions,
+    tls_server_end_point_binding: ?[]const u8,
+) AuthOptions {
+    var effective = auth_options;
+    // On TLS connections the connection-derived binding is authoritative.
+    // This preserves handshake capture, config fallback, and fail-closed
+    // behavior for channel_binding=require.
+    effective.scram_tls_server_end_point_binding = tls_server_end_point_binding;
+    return effective;
+}
+
+fn resolveTlsServerEndPointBinding(
+    allocator: std.mem.Allocator,
+    handshake_binding: ?[]u8,
+    config: TlsConfig,
+) !?[]u8 {
+    if (handshake_binding) |binding| return binding;
+    if (config.tls_server_end_point_cert_der) |cert_der| {
+        return try tls_mod.config.deriveTlsServerEndPointBindingFromCertDer(allocator, cert_der);
+    }
+    return null;
+}
+
+fn decodeTestCertDer(allocator: std.mem.Allocator) ![]u8 {
+    const encoded =
+        "MIIDCTCCAfGgAwIBAgIUJojaTt+v2LcFZHOWijhpmmI63U8wDQYJKoZIhvcNAQELBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMzMTEyNDMyNloXDTI2MDQwMTEyNDMyNlowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvwSPBIfL/++L6vcoLqI7nOJ4iImJfJgxFCs7JkkL9cvf33WKrIUAMNVQZN9+gD8GMdCDmDcKvcJ2ROaBmQQTYvzPqbA3KGaNxeXatca75Zox6U6GX4czYF3p7E9SbeCIxc4DHD+0upn3+eA+R47RxB0DT871X0iRPthkvnMPsW7CfcjNzjGsX95hf/YH3zSaEBQItF5NGvF6C9lhYlUuzTDvYzR6vKdfl8m+/Z2LNTNClnDilMlyg4VSZAeapuk4p6OpJ+au28Y2miUwlnwauB8DelbhPHs1cwB5PYx/tQaaQ0VXal0d7G0PM4RHOL2NuCP9+18JMDXkkKa0uhrthQIDAQABo1MwUTAdBgNVHQ4EFgQUTF/wMdCCQnEhc0choa5NpY5gFckwHwYDVR0jBBgwFoAUTF/wMdCCQnEhc0choa5NpY5gFckwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAK/hZDwxozLtn77A12PagEqrpezFX0EETzX1ZEYnybkWsP6Sen73JiJHVo4mXwwqUHvyfk7F4OyDuuwjp2DH4lfYVu2jDm5Qn5SSsI4xAVB//eLN5p9iNrvUthaA2AnYytK6ZTrfrIL7SfDEkNtWZFmvpat605RTZl0BoR8cuXK7Z+o1P80weMJYL7TQ+zP9fNnuuV20eZ/PsZ4/1ykpiU0L0Lmvyvyskq9yLx4vyRWbY47qXZ3epJ3zf3uxrBgZWitzA1/TkMzRCpw1YHgi5HXoxXgjEPC+XSbmrn/plunlDUsMVpg7MQxsenknvSTTn7fy5F64ol8BeGa0BZVt9ag==";
+    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(encoded);
+    const decoded = try allocator.alloc(u8, decoded_len);
+    errdefer allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, encoded);
+    return decoded;
+}
+
 // ==================== Tests ====================
 
 test "TlsConnection struct" {
@@ -467,4 +497,59 @@ test "TlsConnection struct" {
 
 test "SSL request code" {
     try std.testing.expectEqual(@as(u32, 80877103), SSL_REQUEST_CODE);
+}
+
+test "TLS startup auth options prefer connection channel binding" {
+    const caller_binding = [_]u8{ 0xAA, 0xBB };
+    const tls_binding = [_]u8{ 0x01, 0x02, 0x03 };
+    const effective = effectiveStartupAuthOptions(
+        .{ .scram_tls_server_end_point_binding = &caller_binding },
+        &tls_binding,
+    );
+
+    try std.testing.expect(effective.scram_tls_server_end_point_binding != null);
+    try std.testing.expectEqualSlices(u8, &tls_binding, effective.scram_tls_server_end_point_binding.?);
+}
+
+test "TLS startup auth options clear caller binding when TLS binding unavailable" {
+    const caller_binding = [_]u8{ 0xAA, 0xBB };
+    const effective = effectiveStartupAuthOptions(
+        .{ .scram_tls_server_end_point_binding = &caller_binding },
+        null,
+    );
+
+    try std.testing.expect(effective.scram_tls_server_end_point_binding == null);
+}
+
+test "TLS binding resolver prefers handshake binding over config fallback" {
+    var handshake_binding = [_]u8{ 0x01, 0x02, 0x03 };
+    const resolved = try resolveTlsServerEndPointBinding(
+        std.testing.allocator,
+        handshake_binding[0..],
+        .{ .tls_server_end_point_cert_der = "not-a-valid-cert" },
+    );
+
+    try std.testing.expect(resolved != null);
+    try std.testing.expectEqualSlices(u8, &handshake_binding, resolved.?);
+}
+
+test "TLS binding resolver falls back to configured cert DER" {
+    const cert_der = try decodeTestCertDer(std.testing.allocator);
+    defer std.testing.allocator.free(cert_der);
+
+    const resolved = try resolveTlsServerEndPointBinding(
+        std.testing.allocator,
+        null,
+        .{ .tls_server_end_point_cert_der = cert_der },
+    );
+    defer if (resolved) |binding| std.testing.allocator.free(binding);
+
+    const expected = try tls_mod.config.deriveTlsServerEndPointBindingFromCertDer(
+        std.testing.allocator,
+        cert_der,
+    );
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expect(resolved != null);
+    try std.testing.expectEqualSlices(u8, expected, resolved.?);
 }

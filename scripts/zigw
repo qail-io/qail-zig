@@ -119,10 +119,12 @@ run_direct_test() {
 run_check_raw() {
   "$repo_root/scripts/check_no_direct_raw.sh"
   "$repo_root/scripts/check_no_public_raw_runtime.sh"
+  "$repo_root/scripts/check_no_public_trusted_ast_helpers.sh"
   "$repo_root/scripts/check_execute_raw_allowlist.sh"
   "$repo_root/scripts/check_raw_cmd_allowlist.sh"
   "$repo_root/scripts/check_trusted_ast_escape_hatch_allowlist.sh"
   "$repo_root/scripts/check_trusted_nested_query_assignment_allowlist.sh"
+  "$repo_root/scripts/check_trusted_policy_sql_assignment_allowlist.sh"
 }
 
 build_pgzig_bench_direct() {

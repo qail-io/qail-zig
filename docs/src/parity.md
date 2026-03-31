@@ -24,6 +24,7 @@ That means the Rust-driven AST porting/codegen path is working for its current s
 - logical replication core
 - RLS helper APIs
 - startup/auth policy controls
+- TLS SCRAM channel-binding derivation and fail-closed precedence on TLS startup
 - protocol hardening suites
 - typed policy parsing and diff normalization for common `pg_dump` wrappers
 - typed recursive CTE AST support and typed source-query constructors for views/materialized views
@@ -46,8 +47,9 @@ The main remaining policy difference is narrower now:
 
 - `qail.rs` removed raw runtime SQL APIs from the normal execution path entirely.
 - `qail-zig` now rejects `.raw` and nested procedural/raw escape hatches on the public driver path by default, but still keeps some trusted/internal compatibility fields in the AST.
+- On TLS connections, `qail-zig` now treats connection-derived `tls-server-end-point` bytes as authoritative instead of allowing caller-supplied binding overrides.
 - Typed RLS helpers and typed policy parsing are now present on the Zig side, including normalization of common wrapped `current_setting(...)` forms emitted by `pg_dump`.
-- The remaining raw nested-query compatibility fields are now quarantined behind a dedicated trusted helper module plus repo allowlist checks, rather than ad hoc direct assignment.
+- The remaining raw nested-query and raw policy-SQL compatibility fields are now quarantined behind internal trusted helper modules plus repo allowlist checks, rather than ad hoc direct assignment or normal AST re-exports.
 
 ## PG Driver Focus
 
