@@ -5,6 +5,7 @@
 pub const connection = @import("connection.zig");
 pub const async_connection = @import("async_connection.zig");
 pub const tls = @import("tls.zig");
+pub const gssenc = @import("gssenc.zig");
 pub const driver = @import("driver.zig");
 pub const row = @import("row.zig");
 pub const pipeline = @import("pipeline.zig");
@@ -33,6 +34,7 @@ pub const kerberos_provider = @import("kerberos_provider.zig");
 pub const Connection = connection.Connection;
 pub const AsyncConnection = async_connection.AsyncConnection;
 pub const TlsConnection = tls.TlsConnection;
+pub const GssEncConnection = gssenc.GssEncConnection;
 pub const TlsConfig = tls.TlsConfig;
 pub const VerifyMode = tls.VerifyMode;
 pub const PgDriver = driver.PgDriver;

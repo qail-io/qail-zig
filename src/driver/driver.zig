@@ -3,6 +3,7 @@
 // Main driver struct for executing QAIL AST queries.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ast = @import("../ast/mod.zig");
 const net = @import("../compat/net.zig");
 const process = @import("../compat/process.zig");
@@ -24,6 +25,7 @@ const raw_policy_mod = @import("raw_policy.zig");
 const raw_cmd_mod = @import("raw_cmd.zig");
 const raw_sql_mod = @import("raw_sql.zig");
 const gssenc_request_mod = @import("gssenc_request.zig");
+const gssenc_mod = @import("gssenc.zig");
 const transpiler = @import("../transpiler/postgres.zig");
 
 const QailCmd = ast.QailCmd;
@@ -38,6 +40,7 @@ const Connection = conn_mod.Connection;
 const AuthOptions = conn_mod.AuthOptions;
 const TlsConnection = tls_driver_mod.TlsConnection;
 const TlsConfig = tls_driver_mod.TlsConfig;
+const GssEncConnection = gssenc_mod.GssEncConnection;
 const CancelKey = cancel_mod.CancelKey;
 const PgRow = row_mod.PgRow;
 const StatementCache = query_mod.StatementCache;
@@ -235,11 +238,13 @@ pub const PgDriverBuilder = struct {
 pub const DriverConnection = union(enum) {
     plain: Connection,
     tls: TlsConnection,
+    gssenc: GssEncConnection,
 
     pub fn close(self: *DriverConnection) void {
         switch (self.*) {
             .plain => |*conn| conn.close(),
             .tls => |*conn| conn.close(),
+            .gssenc => |*conn| conn.close(),
         }
     }
 
@@ -247,6 +252,7 @@ pub const DriverConnection = union(enum) {
         return switch (self.*) {
             .plain => |conn| conn.ioBackend(),
             .tls => .sync,
+            .gssenc => .sync,
         };
     }
 
@@ -254,6 +260,7 @@ pub const DriverConnection = union(enum) {
         switch (self.*) {
             .plain => |*conn| try conn.send(bytes),
             .tls => |*conn| try conn.send(bytes),
+            .gssenc => |*conn| try conn.send(bytes),
         }
     }
 
@@ -264,6 +271,10 @@ pub const DriverConnection = union(enum) {
                 break :blk .{ .msg_type = msg.msg_type, .payload = msg.payload };
             },
             .tls => |*conn| blk: {
+                const msg = try conn.readMessage();
+                break :blk .{ .msg_type = msg.msg_type, .payload = msg.payload };
+            },
+            .gssenc => |*conn| blk: {
                 const msg = try conn.readMessage();
                 break :blk .{ .msg_type = msg.msg_type, .payload = msg.payload };
             },
@@ -281,6 +292,7 @@ pub const DriverConnection = union(enum) {
         switch (self.*) {
             .plain => |*conn| try conn.startupWithParamsAndAuth(user, database, password, startup_params, auth_options),
             .tls => |*conn| try conn.startupWithParamsAndAuth(user, database, password, startup_params, auth_options),
+            .gssenc => |*conn| try conn.startupWithParamsAndAuth(user, database, password, startup_params, auth_options),
         }
     }
 
@@ -288,6 +300,7 @@ pub const DriverConnection = union(enum) {
         return switch (self.*) {
             .plain => false,
             .tls => |conn| conn.sslAccepted(),
+            .gssenc => false,
         };
     }
 
@@ -295,6 +308,7 @@ pub const DriverConnection = union(enum) {
         return switch (self.*) {
             .plain => |conn| conn.process_id,
             .tls => |conn| conn.process_id,
+            .gssenc => |conn| conn.process_id,
         };
     }
 
@@ -302,6 +316,7 @@ pub const DriverConnection = union(enum) {
         return switch (self.*) {
             .plain => |conn| conn.secret_key,
             .tls => |conn| conn.secret_key,
+            .gssenc => |conn| conn.secret_key,
         };
     }
 };
@@ -488,9 +503,27 @@ pub const PgDriver = struct {
         options: ConnectOptions,
     ) !PgDriver {
         if (options.gss_enc_mode != .disable) {
-            const negotiation = try gssenc_request_mod.tryGssEncRequest(host, port, options.timeout_ms);
+            const negotiation = try gssenc_request_mod.tryGssEncRequestStream(allocator, host, port, options.timeout_ms);
             switch (negotiation) {
-                .accepted => return error.GssEncAcceptedButUnsupported,
+                .accepted => |stream| {
+                    const gssenc_conn = gssenc_mod.GssEncConnection.connectFromAcceptedStream(allocator, host, stream) catch |err| {
+                        if (builtin.os.tag != .linux and err == error.UnsupportedGssEncTransportPlatform) {
+                            return error.GssEncAcceptedButUnsupported;
+                        }
+                        return err;
+                    };
+                    return initDriverFromTransport(
+                        allocator,
+                        host,
+                        port,
+                        user,
+                        database,
+                        password,
+                        options.startup_params,
+                        options.auth_options,
+                        .{ .gssenc = gssenc_conn },
+                    );
+                },
                 .rejected, .server_error => {
                     if (options.gss_enc_mode == .require) return error.GssEncRequiredButRejected;
                 },
@@ -656,7 +689,7 @@ pub const PgDriver = struct {
         tls_mode: TlsMode,
         tls_config: ?TlsConfig,
     ) !PgDriver {
-        var transport: DriverConnection = switch (tls_mode) {
+        const transport: DriverConnection = switch (tls_mode) {
             .disable => blk: {
                 const conn = if (timeout_ms) |ms|
                     try Connection.connectWithTimeout(allocator, host, port, ms)
@@ -687,11 +720,37 @@ pub const PgDriver = struct {
                 break :blk .{ .tls = tls_conn };
             },
         };
-        errdefer transport.close();
+        return initDriverFromTransport(
+            allocator,
+            host,
+            port,
+            user,
+            database,
+            password,
+            startup_params,
+            auth_options,
+            transport,
+        );
+    }
 
-        try transport.startupWithParamsAndAuth(user, database, password, startup_params, auth_options);
+    fn initDriverFromTransport(
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        startup_params: []const StartupParam,
+        auth_options: AuthOptions,
+        transport: DriverConnection,
+    ) !PgDriver {
+        var owned_transport = transport;
+        errdefer owned_transport.close();
 
-        var driver = PgDriver.initTransport(transport, allocator);
+        try owned_transport.startupWithParamsAndAuth(user, database, password, startup_params, auth_options);
+
+        var driver = PgDriver.initTransport(owned_transport, allocator);
+        errdefer driver.deinit();
         driver.connect_host = try allocator.dupe(u8, host);
         driver.connect_port = port;
         driver.replication_mode_enabled = connect_url_mod.hasLogicalReplicationStartupMode(startup_params);
@@ -1819,7 +1878,7 @@ fn sendReadyForQuery(stream: net.Stream, status: u8) !void {
     try writeByte(stream, status);
 }
 
-test "connect with options rejects accepted gssenc transport until implemented" {
+test "connect with options handles accepted gssenc by platform" {
     var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
     const port = server.listen_address.getPort();
 
@@ -1827,18 +1886,33 @@ test "connect with options rejects accepted gssenc transport until implemented" 
     var thread = try std.Thread.spawn(.{}, gssEncServerThread, .{&ctx});
     defer thread.join();
 
-    try std.testing.expectError(
-        error.GssEncAcceptedButUnsupported,
-        PgDriver.connectWithOptions(
-            std.testing.allocator,
-            "127.0.0.1",
-            port,
-            "user",
-            "db",
-            null,
-            .{ .gss_enc_mode = .prefer },
-        ),
-    );
+    if (builtin.os.tag == .linux) {
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            PgDriver.connectWithOptions(
+                std.testing.allocator,
+                "127.0.0.1",
+                port,
+                "user",
+                "db",
+                null,
+                .{ .gss_enc_mode = .prefer },
+            ),
+        );
+    } else {
+        try std.testing.expectError(
+            error.GssEncAcceptedButUnsupported,
+            PgDriver.connectWithOptions(
+                std.testing.allocator,
+                "127.0.0.1",
+                port,
+                "user",
+                "db",
+                null,
+                .{ .gss_enc_mode = .prefer },
+            ),
+        );
+    }
 }
 
 test "connect with options require fails when gssenc is rejected" {

@@ -35,8 +35,8 @@ pub const TlsMode = enum {
 /// `PgDriver` supports libpq-style negotiation semantics for `.prefer` and
 /// `.require`:
 /// - rejected/server-error prefaces can fall through on `.prefer`
-/// - accepted prefaces currently fail with an explicit unsupported transport
-///   error until encrypted GSSENC stream support lands
+/// - accepted prefaces proceed into the encrypted GSS transport on Linux and
+///   fail closed on unsupported platforms
 pub const GssEncMode = enum {
     disable,
     prefer,
@@ -65,8 +65,8 @@ pub const ConnectOptions = struct {
     tls_config: ?TlsConfig = null,
     /// Parsed libpq-style GSS encryption mode.
     ///
-    /// Negotiation preface support is implemented; accepted GSSENC transport is
-    /// still fail-closed until encrypted stream support lands.
+    /// Negotiation preface support is implemented. Accepted GSSENC transport
+    /// proceeds on Linux and fails closed on unsupported platforms.
     gss_enc_mode: GssEncMode = .disable,
 };
 

@@ -25,6 +25,7 @@ pub const OwnedPolicyDef = ast.OwnedPolicyDef;
 pub const PgDriver = driver.PgDriver;
 pub const PgRow = driver.PgRow;
 pub const TlsConnection = driver.TlsConnection;
+pub const GssEncConnection = driver.GssEncConnection;
 pub const TlsConfig = driver.TlsConfig;
 pub const VerifyMode = driver.VerifyMode;
 pub const ExplainEstimate = driver.ExplainEstimate;

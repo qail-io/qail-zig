@@ -6,34 +6,35 @@ const kerberos_preflight = @import("kerberos_preflight.zig");
 pub const LinuxKrb5ProviderConfig = kerberos_preflight.LinuxKrb5ProviderConfig;
 
 pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
-    const OmUint32 = u32;
+    pub const OmUint32 = u32;
 
-    const GssOidDesc = extern struct {
+    pub const GssOidDesc = extern struct {
         length: OmUint32,
         elements: ?*anyopaque,
     };
 
-    const GssBufferDesc = extern struct {
+    pub const GssBufferDesc = extern struct {
         length: usize,
         value: ?*anyopaque,
     };
 
-    const GssOid = ?*GssOidDesc;
-    const GssName = ?*anyopaque;
-    const GssContext = ?*anyopaque;
-    const GssCredential = ?*anyopaque;
-    const GssChannelBindings = ?*anyopaque;
+    pub const GssOid = ?*GssOidDesc;
+    pub const GssName = ?*anyopaque;
+    pub const GssContext = ?*anyopaque;
+    pub const GssCredential = ?*anyopaque;
+    pub const GssChannelBindings = ?*anyopaque;
 
-    const GSS_S_COMPLETE: OmUint32 = 0;
-    const GSS_S_CONTINUE_NEEDED: OmUint32 = 1;
-    const GSS_C_GSS_CODE: i32 = 1;
-    const GSS_C_MECH_CODE: i32 = 2;
-    const GSS_C_MUTUAL_FLAG: OmUint32 = 0x0000_0002;
-    const GSS_C_SEQUENCE_FLAG: OmUint32 = 0x0000_0008;
+    pub const GSS_S_COMPLETE: OmUint32 = 0;
+    pub const GSS_S_CONTINUE_NEEDED: OmUint32 = 1;
+    pub const GSS_C_GSS_CODE: i32 = 1;
+    pub const GSS_C_MECH_CODE: i32 = 2;
+    pub const GSS_C_MUTUAL_FLAG: OmUint32 = 0x0000_0002;
+    pub const GSS_C_SEQUENCE_FLAG: OmUint32 = 0x0000_0008;
+    pub const GSS_C_CONF_FLAG: OmUint32 = 0x0000_0010;
     const GSS_SESSION_TTL_MS: i64 = 120_000;
     const GSS_MAX_SESSIONS: usize = 256;
 
-    const Api = struct {
+    pub const Api = struct {
         lib: std.DynLib,
         hostbased_service_name: *GssOid,
         gss_import_name: *const fn (
@@ -78,8 +79,25 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             message_context: *OmUint32,
             status_string: *GssBufferDesc,
         ) callconv(.c) OmUint32,
+        gss_wrap: *const fn (
+            minor_status: *OmUint32,
+            context_handle: GssContext,
+            conf_req_flag: i32,
+            qop_req: OmUint32,
+            input_message_buffer: *const GssBufferDesc,
+            conf_state: *i32,
+            output_message_buffer: *GssBufferDesc,
+        ) callconv(.c) OmUint32,
+        gss_unwrap: *const fn (
+            minor_status: *OmUint32,
+            context_handle: GssContext,
+            input_message_buffer: *const GssBufferDesc,
+            output_message_buffer: *GssBufferDesc,
+            conf_state: *i32,
+            qop_state: *OmUint32,
+        ) callconv(.c) OmUint32,
 
-        fn load() !Api {
+        pub fn load() !Api {
             for ([_][]const u8{
                 "libgssapi_krb5.so.2",
                 "libgssapi_krb5.so",
@@ -96,6 +114,8 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
                 const gss_delete_sec_context = lib.lookup(*const fn (*OmUint32, *GssContext, ?*GssBufferDesc) callconv(.c) OmUint32, "gss_delete_sec_context") orelse continue;
                 const gss_release_buffer = lib.lookup(*const fn (*OmUint32, *GssBufferDesc) callconv(.c) OmUint32, "gss_release_buffer") orelse continue;
                 const gss_display_status = lib.lookup(*const fn (*OmUint32, OmUint32, i32, GssOid, *OmUint32, *GssBufferDesc) callconv(.c) OmUint32, "gss_display_status") orelse continue;
+                const gss_wrap = lib.lookup(*const fn (*OmUint32, GssContext, i32, OmUint32, *const GssBufferDesc, *i32, *GssBufferDesc) callconv(.c) OmUint32, "gss_wrap") orelse continue;
+                const gss_unwrap = lib.lookup(*const fn (*OmUint32, GssContext, *const GssBufferDesc, *GssBufferDesc, *i32, *OmUint32) callconv(.c) OmUint32, "gss_unwrap") orelse continue;
 
                 return .{
                     .lib = lib,
@@ -106,29 +126,32 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
                     .gss_delete_sec_context = gss_delete_sec_context,
                     .gss_release_buffer = gss_release_buffer,
                     .gss_display_status = gss_display_status,
+                    .gss_wrap = gss_wrap,
+                    .gss_unwrap = gss_unwrap,
                 };
             }
 
             return error.GssApiLibraryUnavailable;
         }
 
-        fn deinit(self: *Api) void {
+        pub fn deinit(self: *Api) void {
             self.lib.close();
         }
     };
 
-    const StepResult = struct {
+    pub const StepResult = struct {
         token: []u8,
         complete: bool,
+        ret_flags: OmUint32,
     };
 
-    const LinuxKrb5Session = struct {
+    pub const LinuxKrb5Session = struct {
         api: *const Api,
         context: GssContext = null,
         target_name: GssName = null,
         mechanism: auth_options.GssMechanism,
 
-        fn init(api: *const Api, target: []const u8, mechanism: auth_options.GssMechanism) !LinuxKrb5Session {
+        pub fn init(api: *const Api, target: []const u8, mechanism: auth_options.GssMechanism) !LinuxKrb5Session {
             switch (mechanism) {
                 .kerberos_v5, .gss => {},
                 .sspi => return error.UnsupportedGssMechanism,
@@ -157,7 +180,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             };
         }
 
-        fn deinit(self: *LinuxKrb5Session) void {
+        pub fn deinit(self: *LinuxKrb5Session) void {
             var minor: OmUint32 = 0;
 
             if (self.context != null) {
@@ -171,10 +194,20 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             }
         }
 
-        fn step(self: *LinuxKrb5Session, allocator: std.mem.Allocator, input_token: ?[]const u8) !StepResult {
+        pub fn step(self: *LinuxKrb5Session, allocator: std.mem.Allocator, input_token: ?[]const u8) !StepResult {
+            return self.stepWithFlags(allocator, input_token, GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG);
+        }
+
+        pub fn stepWithFlags(
+            self: *LinuxKrb5Session,
+            allocator: std.mem.Allocator,
+            input_token: ?[]const u8,
+            req_flags: OmUint32,
+        ) !StepResult {
             var minor: OmUint32 = 0;
             var output = GssBufferDesc{ .length = 0, .value = null };
             var input = GssBufferDesc{ .length = 0, .value = null };
+            var ret_flags: OmUint32 = 0;
             const input_ptr: ?*const GssBufferDesc = if (input_token) |bytes| blk: {
                 input.length = bytes.len;
                 input.value = if (bytes.len == 0) null else @ptrCast(@constCast(bytes.ptr));
@@ -187,13 +220,13 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
                 &self.context,
                 self.target_name,
                 null,
-                GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG,
+                req_flags,
                 0,
                 null,
                 input_ptr,
                 null,
                 &output,
-                null,
+                &ret_flags,
                 null,
             );
             const token = try takeGssBuffer(self.api, allocator, &output);
@@ -208,7 +241,65 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             const continue_needed = (major & GSS_S_CONTINUE_NEEDED) != 0;
             if (!complete and !continue_needed) return error.GssUnexpectedStatus;
 
-            return .{ .token = token, .complete = complete };
+            return .{ .token = token, .complete = complete, .ret_flags = ret_flags };
+        }
+
+        pub fn wrap(self: *const LinuxKrb5Session, allocator: std.mem.Allocator, plaintext: []const u8) ![]u8 {
+            var minor: OmUint32 = 0;
+            var conf_state: i32 = 0;
+            var input = GssBufferDesc{
+                .length = plaintext.len,
+                .value = if (plaintext.len == 0) null else @ptrCast(@constCast(plaintext.ptr)),
+            };
+            var output = GssBufferDesc{ .length = 0, .value = null };
+
+            const major = self.api.gss_wrap(
+                &minor,
+                self.context,
+                1,
+                0,
+                &input,
+                &conf_state,
+                &output,
+            );
+            const token = try takeGssBuffer(self.api, allocator, &output);
+            errdefer allocator.free(token);
+
+            if (isGssError(major)) {
+                logGssError(self.api, "gss_wrap failed", major, minor);
+                return error.GssWrapFailed;
+            }
+            if (conf_state == 0) return error.GssWrapWithoutConfidentiality;
+            return token;
+        }
+
+        pub fn unwrap(self: *const LinuxKrb5Session, allocator: std.mem.Allocator, wrapped: []const u8) ![]u8 {
+            var minor: OmUint32 = 0;
+            var conf_state: i32 = 0;
+            var qop_state: OmUint32 = 0;
+            var input = GssBufferDesc{
+                .length = wrapped.len,
+                .value = if (wrapped.len == 0) null else @ptrCast(@constCast(wrapped.ptr)),
+            };
+            var output = GssBufferDesc{ .length = 0, .value = null };
+
+            const major = self.api.gss_unwrap(
+                &minor,
+                self.context,
+                &input,
+                &output,
+                &conf_state,
+                &qop_state,
+            );
+            const token = try takeGssBuffer(self.api, allocator, &output);
+            errdefer allocator.free(token);
+
+            if (isGssError(major)) {
+                logGssError(self.api, "gss_unwrap failed", major, minor);
+                return error.GssUnwrapFailed;
+            }
+            if (conf_state == 0) return error.GssUnwrapWithoutConfidentiality;
+            return token;
         }
     };
 
@@ -385,6 +476,7 @@ fn logGssError(api: anytype, prefix: []const u8, major: u32, minor: u32) void {
 
 fn statusMessages(api: anytype, status: u32, status_type: i32) []const u8 {
     if (builtin.os.tag != .linux) return "unsupported";
+    const GssBufferDesc = LinuxKrb5Provider.GssBufferDesc;
 
     var buffer: [512]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buffer);
@@ -394,7 +486,7 @@ fn statusMessages(api: anytype, status: u32, status_type: i32) []const u8 {
 
     while (true) {
         var minor: u32 = 0;
-        var msg_buf = if (builtin.os.tag == .linux) @TypeOf(api).GssBufferDesc{ .length = 0, .value = null } else unreachable;
+        var msg_buf: GssBufferDesc = .{ .length = 0, .value = null };
         const major = api.gss_display_status(
             &minor,
             status,

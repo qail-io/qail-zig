@@ -10,16 +10,24 @@ pub const GssEncNegotiationResult = enum {
     server_error,
 };
 
-pub fn tryGssEncRequest(
+pub const GssEncNegotiationStreamResult = union(enum) {
+    accepted: net.Stream,
+    rejected,
+    server_error,
+};
+
+pub fn tryGssEncRequestStream(
+    allocator: std.mem.Allocator,
     host: []const u8,
     port: u16,
     timeout_ms: ?i32,
-) !GssEncNegotiationResult {
+) !GssEncNegotiationStreamResult {
     var stream = if (timeout_ms) |ms|
-        try net.tcpConnectToHostWithTimeout(std.heap.page_allocator, host, port, ms)
+        try net.tcpConnectToHostWithTimeout(allocator, host, port, ms)
     else
-        try net.tcpConnectToHost(std.heap.page_allocator, host, port);
-    defer stream.close();
+        try net.tcpConnectToHost(allocator, host, port);
+    var handoff = false;
+    defer if (!handoff) stream.close();
 
     var request: [8]u8 = undefined;
     std.mem.writeInt(u32, request[0..4], 8, .big);
@@ -41,11 +49,30 @@ pub fn tryGssEncRequest(
                 else => return err,
             };
             if (extra_n > 0) return error.GssEncBufferStuffingDetected;
-            break :blk .accepted;
+
+            handoff = true;
+            break :blk .{ .accepted = stream };
         },
         'N' => .rejected,
         'E' => .server_error,
         else => error.InvalidGssEncResponse,
+    };
+}
+
+pub fn tryGssEncRequest(
+    host: []const u8,
+    port: u16,
+    timeout_ms: ?i32,
+) !GssEncNegotiationResult {
+    const result = try tryGssEncRequestStream(std.heap.page_allocator, host, port, timeout_ms);
+    return switch (result) {
+        .accepted => |stream| blk: {
+            var owned = stream;
+            owned.close();
+            break :blk .accepted;
+        },
+        .rejected => .rejected,
+        .server_error => .server_error,
     };
 }
 
