@@ -19,6 +19,7 @@ const connect_url_mod = @import("connect_url.zig");
 const explain_estimate_mod = @import("explain_estimate.zig");
 const notification_mod = @import("notification.zig");
 const replication_mod = @import("replication.zig");
+const raw_policy_mod = @import("raw_policy.zig");
 const raw_cmd_mod = @import("raw_cmd.zig");
 const raw_sql_mod = @import("raw_sql.zig");
 const transpiler = @import("../transpiler/postgres.zig");
@@ -691,6 +692,11 @@ pub const PgDriver = struct {
 
     /// Execute a QAIL AST command and fetch all rows
     pub fn fetchAll(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.fetchAllTrusted(cmd);
+    }
+
+    fn fetchAllTrusted(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
         // Encode AST to wire protocol
         try self.encoder.encodeQuery(cmd);
         try self.conn.send(self.encoder.getWritten());
@@ -783,6 +789,11 @@ pub const PgDriver = struct {
 
     /// Execute a QAIL AST command (for mutations) - returns affected row count
     pub fn execute(self: *PgDriver, cmd: *const QailCmd) !u64 {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.executeTrusted(cmd);
+    }
+
+    fn executeTrusted(self: *PgDriver, cmd: *const QailCmd) !u64 {
         try self.encoder.encodeQuery(cmd);
         try self.conn.send(self.encoder.getWritten());
 
@@ -823,28 +834,28 @@ pub const PgDriver = struct {
 
     /// Begin a transaction
     pub fn begin(self: *PgDriver) !void {
-        _ = try self.executeRaw(raw_sql_mod.begin());
+        _ = try self.executeTrustedRaw(raw_sql_mod.begin());
     }
 
     /// Commit the transaction
     pub fn commit(self: *PgDriver) !void {
-        _ = try self.executeRaw(raw_sql_mod.commit());
+        _ = try self.executeTrustedRaw(raw_sql_mod.commit());
     }
 
     /// Rollback the transaction
     pub fn rollback(self: *PgDriver) !void {
-        _ = try self.executeRaw(raw_sql_mod.rollback());
+        _ = try self.executeTrustedRaw(raw_sql_mod.rollback());
     }
 
-    /// Execute raw SQL string (for migrations, DDL, etc.)
-    pub fn executeRaw(self: *PgDriver, sql: []const u8) !u64 {
+    /// Execute trusted internal raw SQL string.
+    fn executeTrustedRaw(self: *PgDriver, sql: []const u8) !u64 {
         const cmd = raw_cmd_mod.command(sql);
-        return try self.execute(&cmd);
+        return try self.executeTrusted(&cmd);
     }
 
-    fn fetchAllRaw(self: *PgDriver, sql: []const u8) ![]PgRow {
+    fn fetchAllTrustedRaw(self: *PgDriver, sql: []const u8) ![]PgRow {
         const cmd = raw_cmd_mod.command(sql);
-        return try self.fetchAll(&cmd);
+        return try self.fetchAllTrusted(&cmd);
     }
 
     // ==================== COPY Helpers ====================
@@ -941,14 +952,14 @@ pub const PgDriver = struct {
     pub fn setRlsContext(self: *PgDriver, ctx: *const rls_mod.RlsContext) !void {
         const sql = try rls_mod.contextToSql(self.allocator, ctx);
         defer self.allocator.free(sql);
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// Configure RLS context and statement timeout in one roundtrip.
     pub fn setRlsContextWithTimeout(self: *PgDriver, ctx: *const rls_mod.RlsContext, timeout_ms: u32) !void {
         const sql = try rls_mod.contextToSqlWithTimeout(self.allocator, ctx, timeout_ms);
         defer self.allocator.free(sql);
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// Configure RLS context plus statement/lock timeout in one roundtrip.
@@ -960,46 +971,47 @@ pub const PgDriver = struct {
     ) !void {
         const sql = try rls_mod.contextToSqlWithTimeouts(self.allocator, ctx, statement_timeout_ms, lock_timeout_ms);
         defer self.allocator.free(sql);
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// Reset transaction-local RLS/session context.
     pub fn clearRlsContext(self: *PgDriver) !void {
-        _ = try self.executeRaw(rls_mod.resetSql());
+        _ = try self.executeTrustedRaw(rls_mod.resetSql());
     }
 
     /// ALTER TABLE ... ENABLE ROW LEVEL SECURITY.
     pub fn enableRls(self: *PgDriver, table: []const u8) !void {
         const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .enable);
         defer self.allocator.free(sql);
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// ALTER TABLE ... DISABLE ROW LEVEL SECURITY.
     pub fn disableRls(self: *PgDriver, table: []const u8) !void {
         const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .disable);
         defer self.allocator.free(sql);
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// ALTER TABLE ... FORCE ROW LEVEL SECURITY.
     pub fn forceRls(self: *PgDriver, table: []const u8) !void {
         const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .force);
         defer self.allocator.free(sql);
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// ALTER TABLE ... NO FORCE ROW LEVEL SECURITY.
     pub fn noForceRls(self: *PgDriver, table: []const u8) !void {
         const sql = try raw_sql_mod.buildAlterTableRls(self.allocator, table, .no_force);
         defer self.allocator.free(sql);
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     // ==================== EXPLAIN Helpers ====================
 
     /// Run EXPLAIN (FORMAT JSON) for a QAIL command and parse estimate.
     pub fn explainEstimate(self: *PgDriver, cmd: *const QailCmd) !?ExplainEstimate {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         const sql = try transpiler.toSql(self.allocator, cmd);
         defer self.allocator.free(sql);
         return try self.explainEstimateSql(sql);
@@ -1010,7 +1022,7 @@ pub const PgDriver = struct {
         const explain_sql = try raw_sql_mod.buildExplainFormatJson(self.allocator, sql);
         defer self.allocator.free(explain_sql);
 
-        const rows = try self.fetchAllRaw(explain_sql);
+        const rows = try self.fetchAllTrustedRaw(explain_sql);
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return null;
@@ -1025,7 +1037,7 @@ pub const PgDriver = struct {
         const sql = try raw_sql_mod.buildListen(self.allocator, channel);
         defer self.allocator.free(sql);
 
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// Unsubscribe from a notification channel.
@@ -1033,12 +1045,12 @@ pub const PgDriver = struct {
         const sql = try raw_sql_mod.buildUnlisten(self.allocator, channel);
         defer self.allocator.free(sql);
 
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// Unsubscribe from all notification channels.
     pub fn unlistenAll(self: *PgDriver) !void {
-        _ = try self.executeRaw(raw_sql_mod.unlistenAll());
+        _ = try self.executeTrustedRaw(raw_sql_mod.unlistenAll());
     }
 
     /// Drain buffered notifications without blocking.
@@ -1086,7 +1098,7 @@ pub const PgDriver = struct {
         try self.ensureReplicationMode("IDENTIFY_SYSTEM");
         try self.ensureReplicationControlIdle("IDENTIFY_SYSTEM");
 
-        const rows = try self.fetchAllRaw(raw_sql_mod.identifySystem());
+        const rows = try self.fetchAllTrustedRaw(raw_sql_mod.identifySystem());
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return error.InvalidReplicationResponse;
@@ -1107,7 +1119,7 @@ pub const PgDriver = struct {
         const sql = try replication_mod.buildCreateLogicalReplicationSlotSql(self.allocator, slot_name, output_plugin, temporary, two_phase);
         defer self.allocator.free(sql);
 
-        const rows = try self.fetchAllRaw(sql);
+        const rows = try self.fetchAllTrustedRaw(sql);
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return error.InvalidReplicationResponse;
@@ -1122,7 +1134,7 @@ pub const PgDriver = struct {
         const sql = try replication_mod.buildDropReplicationSlotSql(self.allocator, slot_name, wait);
         defer self.allocator.free(sql);
 
-        _ = try self.executeRaw(sql);
+        _ = try self.executeTrustedRaw(sql);
     }
 
     /// Start logical replication in CopyBoth mode.
@@ -1282,6 +1294,7 @@ pub const PgDriver = struct {
 
     /// Internal: transpile, hash, and prepare (on cache miss)
     fn getOrPrepare(self: *PgDriver, cmd: *const QailCmd) ![]const u8 {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         // Transpile AST → SQL
         const sql = try transpiler.toSql(self.allocator, cmd);
         defer self.allocator.free(sql);
@@ -1337,6 +1350,7 @@ pub const PgDriver = struct {
     /// Prepare a statement for later execution with parameters
     /// Returns immediately after Parse completes
     pub fn prepare(self: *PgDriver, stmt_name: []const u8, cmd: *const QailCmd) !void {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         // Encode Parse message only (no Bind/Execute)
         try self.encoder.encodePrepare(stmt_name, cmd);
         try self.conn.send(self.encoder.getWritten());

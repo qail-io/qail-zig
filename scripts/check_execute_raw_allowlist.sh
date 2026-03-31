@@ -13,7 +13,7 @@ allowlist=(
 hits=()
 while IFS= read -r line; do
   [[ -n "$line" ]] && hits+=("$line")
-done < <(rg -n 'executeRaw\(' "$repo_root/src" | cut -d: -f1 | sort -u || true)
+done < <(rg -n 'executeTrustedRaw\(' "$repo_root/src" | cut -d: -f1 | sort -u || true)
 
 offenders=()
 for file in "${hits[@]}"; do
@@ -30,9 +30,9 @@ for file in "${hits[@]}"; do
 done
 
 if [[ ${#offenders[@]} -gt 0 ]]; then
-  echo "executeRaw() callsites escaped allowlist:"
+  echo "executeTrustedRaw() callsites escaped allowlist:"
   printf '  %s\n' "${offenders[@]}"
   exit 1
 fi
 
-echo "OK: executeRaw() callsites are confined to allowlist."
+echo "OK: executeTrustedRaw() callsites are confined to allowlist."

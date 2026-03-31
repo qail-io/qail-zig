@@ -1169,6 +1169,57 @@ fn writeExpr(writer: anytype, expr: *const Expr) !void {
             }
         },
         .literal => |val| try writeValue(writer, &val),
+        .func_call => |fc| {
+            try writer.writeAll(fc.name);
+            try writer.writeAll("(");
+            for (fc.args, 0..) |arg, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExpr(writer, &arg);
+            }
+            try writer.writeAll(")");
+            if (fc.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .coalesce => |c| {
+            try writer.writeAll("COALESCE(");
+            for (c.exprs, 0..) |ex_inner, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeExpr(writer, &ex_inner);
+            }
+            try writer.writeAll(")");
+            if (c.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .cast => |c| {
+            try writeExpr(writer, c.expr);
+            try writer.writeAll("::");
+            try writer.writeAll(c.target_type);
+            if (c.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .json_access => |ja| {
+            try writer.writeAll(ja.column);
+            for (ja.path) |seg| {
+                if (seg.as_text) {
+                    try writer.writeAll("->>'");
+                } else {
+                    try writer.writeAll("->'");
+                }
+                try writer.writeAll(seg.key);
+                try writer.writeAll("'");
+            }
+            if (ja.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .raw => |raw| try writer.writeAll(raw),
         .column_def => |def| try writeColumnDefExpr(writer, def),
         .window => |w| try writeWindowExpr(writer, w),
         .col_mod => |m| {

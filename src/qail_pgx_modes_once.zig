@@ -1,5 +1,9 @@
 //! One-shot QAIL Zig benchmark runner for comparison against qail-rs and pgx.
 //!
+//! QAIL workloads are authored as native QailCmd ASTs here. The benchmark still
+//! uses PostgreSQL prepared statements on the wire, but it does not start from
+//! raw SQL literals on the QAIL side.
+//!
 //! Compile directly with:
 //!   zig build-exe src/qail_pgx_modes_once.zig -O ReleaseFast -femit-bin=/tmp/qail_zig_modes_once
 //!
@@ -10,22 +14,53 @@
 const std = @import("std");
 const process_compat = @import("compat/process.zig");
 const time = @import("compat/time.zig");
+const ast = @import("ast/mod.zig");
 const Connection = @import("driver/connection.zig").Connection;
 const pool_mod = @import("driver/pool.zig");
 const protocol = @import("protocol/mod.zig");
 
+const QailCmd = ast.QailCmd;
+const Expr = ast.Expr;
+const WhereClause = ast.WhereClause;
+const OrderBy = ast.OrderBy;
 const PgPool = pool_mod.PgPool;
 const PoolConfig = pool_mod.PoolConfig;
 const Encoder = protocol.Encoder;
+const Decoder = protocol.Decoder;
+const AstEncoder = protocol.AstEncoder;
 
 const HOST = "127.0.0.1";
 const USER = "orion";
 const DATABASE = "example_staging";
-const SQL_BY_ID = "SELECT id, name FROM harbors WHERE id = $1";
 const PORT: u16 = 5432;
 const POOL_SIZE: usize = 10;
-const INT4_OID: u32 = 23;
 const STMT_NAME = "qail_zig_modes_stmt";
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 1099511628211;
+const BENCH_PAYLOAD_TARGET_ROWS: usize = 20_000;
+const BENCH_MANY_PARAMS_TARGET_ROWS: usize = 512;
+const BENCH_SETUP_LOCK_SQL = "SELECT pg_advisory_lock(60119029)";
+const BENCH_SETUP_UNLOCK_SQL = "SELECT pg_advisory_unlock(60119029)";
+const CREATE_BENCH_PAYLOAD_SQL =
+    "CREATE TABLE IF NOT EXISTS qail_bench_payload (" ++
+    "id INTEGER PRIMARY KEY, " ++
+    "name TEXT NOT NULL, " ++
+    "bio TEXT NOT NULL, " ++
+    "region TEXT NOT NULL, " ++
+    "visits INTEGER NOT NULL, " ++
+    "active BOOLEAN NOT NULL, " ++
+    "ratio NUMERIC(12, 3) NOT NULL, " ++
+    "optional_note TEXT NULL" ++
+    ")";
+const MANY_PARAMS_PARAM_COUNT: usize = 32;
+const MANY_PARAM_COLUMNS = buildManyParamColumns();
+const CREATE_BENCH_MANY_PARAMS_SQL = buildManyParamsCreateSql();
+const CREATE_BENCH_MANY_PARAMS_INDEX_SQL = buildManyParamsIndexSql();
+const MANY_PARAMS_SUM_COEFF: usize = blk: {
+    var sum: usize = 0;
+    for (1..MANY_PARAMS_PARAM_COUNT + 1) |idx| sum += idx;
+    break :blk sum;
+};
 
 const Mode = enum {
     single,
@@ -43,20 +78,25 @@ const Mode = enum {
 const Workload = enum {
     point,
     wide_rows,
+    large_rows,
     many_params,
+    aggregate,
 
     fn parse(input: []const u8) ?Workload {
         if (std.mem.eql(u8, input, "point") or std.mem.eql(u8, input, "lookup")) return .point;
         if (std.mem.eql(u8, input, "wide_rows") or std.mem.eql(u8, input, "wide")) return .wide_rows;
+        if (std.mem.eql(u8, input, "large_rows") or std.mem.eql(u8, input, "large")) return .large_rows;
         if (std.mem.eql(u8, input, "many_params") or std.mem.eql(u8, input, "params")) return .many_params;
+        if (std.mem.eql(u8, input, "aggregate") or std.mem.eql(u8, input, "agg") or std.mem.eql(u8, input, "server_heavy")) return .aggregate;
         return null;
     }
 };
 
 const ResultMode = enum {
-    complete_only,
-    scalar_int,
+    point_rows,
     wide_rows,
+    scalar_int,
+    aggregate_scalars,
 };
 
 const ParamSet = []const ?[]const u8;
@@ -85,64 +125,69 @@ const BenchmarkResult = struct {
 const WorkloadSpec = struct {
     workload: Workload,
     name: []const u8,
-    sql: []const u8,
-    param_types: []const u32,
     total_queries: usize,
     iterations: usize,
     result_mode: ResultMode,
+    requires_payload: bool,
+    requires_many_params: bool,
+    cmd: *const QailCmd,
 };
 
 const POINT_TOTAL_QUERIES: usize = 10_000;
 const POINT_ITERATIONS: usize = 5;
 const WIDE_ROWS_TOTAL_QUERIES: usize = 100;
 const WIDE_ROWS_ITERATIONS: usize = 3;
+const LARGE_ROWS_TOTAL_QUERIES: usize = 20;
+const LARGE_ROWS_ITERATIONS: usize = 2;
 const MANY_PARAMS_TOTAL_QUERIES: usize = 5_000;
 const MANY_PARAMS_ITERATIONS: usize = 5;
-const WIDE_ROWS_SQL =
-    "SELECT gs AS id, " ++
-    "('harbor-' || gs)::text AS name, " ++
-    "repeat(md5(gs::text), 4) AS bio, " ++
-    "repeat(md5((gs * 17)::text), 3) AS region, " ++
-    "(gs * 11) AS visits, " ++
-    "(gs % 2 = 0) AS active, " ++
-    "round((gs::numeric / 7.0), 3) AS ratio, " ++
-    "CASE WHEN gs % 5 = 0 THEN NULL ELSE repeat(md5((gs * 3)::text), 2) END AS optional_note " ++
-    "FROM generate_series(1, $1::int) AS gs";
-const MANY_PARAMS_PARAM_COUNT: usize = 32;
-const MANY_PARAMS_SQL = buildManyParamsSql();
-const MANY_PARAMS_PARAM_TYPES = buildManyParamsOids();
+const AGGREGATE_TOTAL_QUERIES: usize = 2_000;
+const AGGREGATE_ITERATIONS: usize = 3;
 
-fn workloadSpec(workload: Workload) WorkloadSpec {
-    return switch (workload) {
-        .point => .{
-            .workload = .point,
-            .name = "point",
-            .sql = SQL_BY_ID,
-            .param_types = &.{INT4_OID},
-            .total_queries = POINT_TOTAL_QUERIES,
-            .iterations = POINT_ITERATIONS,
-            .result_mode = .complete_only,
-        },
-        .wide_rows => .{
-            .workload = .wide_rows,
-            .name = "wide_rows",
-            .sql = WIDE_ROWS_SQL,
-            .param_types = &.{INT4_OID},
-            .total_queries = WIDE_ROWS_TOTAL_QUERIES,
-            .iterations = WIDE_ROWS_ITERATIONS,
-            .result_mode = .wide_rows,
-        },
-        .many_params => .{
-            .workload = .many_params,
-            .name = "many_params",
-            .sql = MANY_PARAMS_SQL,
-            .param_types = MANY_PARAMS_PARAM_TYPES[0..],
-            .total_queries = MANY_PARAMS_TOTAL_QUERIES,
-            .iterations = MANY_PARAMS_ITERATIONS,
-            .result_mode = .scalar_int,
-        },
-    };
-}
+const POINT_COLS = [_]Expr{ Expr.col("id"), Expr.col("name") };
+const PAYLOAD_COLS = [_]Expr{
+    Expr.col("id"),
+    Expr.col("name"),
+    Expr.col("bio"),
+    Expr.col("region"),
+    Expr.col("visits"),
+    Expr.col("active"),
+    Expr.col("ratio"),
+    Expr.col("optional_note"),
+};
+const AGGREGATE_COLS = [_]Expr{
+    Expr.sum("visits").withAlias("sum_visits"),
+    Expr.max("visits").withAlias("max_visits"),
+    Expr.count().withAlias("row_count"),
+    .{ .raw = "SUM(CASE WHEN active THEN 1 ELSE 0 END) AS active_count" },
+};
+const MANY_PARAMS_SELECT = [_]Expr{Expr.col("total")};
+const POINT_WHERE = [_]WhereClause{.{
+    .condition = .{ .column = "id", .op = .eq, .value = .{ .param = 1 } },
+}};
+const PAYLOAD_WHERE = [_]WhereClause{.{
+    .condition = .{ .column = "id", .op = .lte, .value = .{ .param = 1 } },
+}};
+const PAYLOAD_ORDER = [_]OrderBy{.{ .column = "id", .order = .asc }};
+const MANY_PARAM_CLAUSES = buildManyParamClauses();
+
+const POINT_CMD = QailCmd.get("harbors")
+    .select(&POINT_COLS)
+    .where(&POINT_WHERE);
+
+const PAYLOAD_ROWS_CMD = QailCmd.get("qail_bench_payload")
+    .select(&PAYLOAD_COLS)
+    .where(&PAYLOAD_WHERE)
+    .orderBy(&PAYLOAD_ORDER);
+
+const AGGREGATE_CMD = QailCmd.get("qail_bench_payload")
+    .select(&AGGREGATE_COLS)
+    .where(&PAYLOAD_WHERE);
+
+const MANY_PARAMS_CMD = QailCmd.get("qail_bench_many_params")
+    .select(&MANY_PARAMS_SELECT)
+    .where(MANY_PARAM_CLAUSES[0..])
+    .limit(1);
 
 const PoolSync = struct {
     ready_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -201,6 +246,7 @@ pub fn main() !void {
 
     const selected_mode = mode orelse usageAndExit("missing mode argument");
     const spec = workloadSpec(workload);
+    try ensureWorkloadReady(spec);
     const params = try buildParamBatch(allocator, spec);
 
     const result = switch (selected_mode) {
@@ -212,34 +258,88 @@ pub fn main() !void {
     if (plain) {
         try stdout.print("{d:.3}\n", .{result.qps});
     } else {
-        try stdout.print("qail-zig {s}/{s}: {d:.0} q/s", .{ @tagName(selected_mode), spec.name, result.qps });
+        try stdout.print("qail-zig(native) {s}/{s}: {d:.0} q/s", .{ @tagName(selected_mode), spec.name, result.qps });
         if (result.rows_per_sec) |rows_per_sec| {
             try stdout.print(" | {d:.0} rows/s", .{rows_per_sec});
         }
         if (result.mib_per_sec) |mib_per_sec| {
             try stdout.print(" | {d:.2} MiB/s", .{mib_per_sec});
         }
-        if (spec.result_mode != .complete_only) {
-            try stdout.print(" | checksum=0x{x}", .{result.checksum});
-        }
-        try stdout.writeByte('\n');
+        try stdout.print(" | checksum=0x{x}\n", .{result.checksum});
     }
 }
 
 fn usageAndExit(reason: []const u8) noreturn {
     std.debug.print("Error: {s}\n", .{reason});
     std.debug.print(
-        "Usage: qail_pgx_modes_once <single|pipeline|pool10> [--workload point|wide_rows|many_params] [--plain]\n",
+        "Usage: qail_pgx_modes_once <single|pipeline|pool10> [--workload point|wide_rows|large_rows|many_params|aggregate] [--plain]\n",
         .{},
     );
     std.process.exit(1);
+}
+
+fn workloadSpec(workload: Workload) WorkloadSpec {
+    return switch (workload) {
+        .point => .{
+            .workload = .point,
+            .name = "point",
+            .total_queries = POINT_TOTAL_QUERIES,
+            .iterations = POINT_ITERATIONS,
+            .result_mode = .point_rows,
+            .requires_payload = false,
+            .requires_many_params = false,
+            .cmd = &POINT_CMD,
+        },
+        .wide_rows => .{
+            .workload = .wide_rows,
+            .name = "wide_rows",
+            .total_queries = WIDE_ROWS_TOTAL_QUERIES,
+            .iterations = WIDE_ROWS_ITERATIONS,
+            .result_mode = .wide_rows,
+            .requires_payload = true,
+            .requires_many_params = false,
+            .cmd = &PAYLOAD_ROWS_CMD,
+        },
+        .large_rows => .{
+            .workload = .large_rows,
+            .name = "large_rows",
+            .total_queries = LARGE_ROWS_TOTAL_QUERIES,
+            .iterations = LARGE_ROWS_ITERATIONS,
+            .result_mode = .wide_rows,
+            .requires_payload = true,
+            .requires_many_params = false,
+            .cmd = &PAYLOAD_ROWS_CMD,
+        },
+        .many_params => .{
+            .workload = .many_params,
+            .name = "many_params",
+            .total_queries = MANY_PARAMS_TOTAL_QUERIES,
+            .iterations = MANY_PARAMS_ITERATIONS,
+            .result_mode = .scalar_int,
+            .requires_payload = false,
+            .requires_many_params = true,
+            .cmd = &MANY_PARAMS_CMD,
+        },
+        .aggregate => .{
+            .workload = .aggregate,
+            .name = "aggregate",
+            .total_queries = AGGREGATE_TOTAL_QUERIES,
+            .iterations = AGGREGATE_ITERATIONS,
+            .result_mode = .aggregate_scalars,
+            .requires_payload = true,
+            .requires_many_params = false,
+            .cmd = &AGGREGATE_CMD,
+        },
+    };
 }
 
 fn buildParamBatch(allocator: std.mem.Allocator, spec: WorkloadSpec) ![]ParamSet {
     return switch (spec.workload) {
         .point => buildPointParams(allocator, spec.total_queries),
         .wide_rows => buildWideRowsParams(allocator, spec.total_queries),
+        .large_rows => buildLargeRowsParams(allocator, spec.total_queries),
         .many_params => buildManyParamsBatch(allocator, spec.total_queries),
+        .aggregate => buildAggregateParams(allocator, spec.total_queries),
     };
 }
 
@@ -265,29 +365,239 @@ fn buildWideRowsParams(allocator: std.mem.Allocator, total: usize) ![]ParamSet {
     return params;
 }
 
+fn buildLargeRowsParams(allocator: std.mem.Allocator, total: usize) ![]ParamSet {
+    const params = try allocator.alloc(ParamSet, total);
+    const row_counts = [_][]const u8{ "10000", "12000", "14000", "16000" };
+    for (params, 0..) |*slot, i| {
+        const inner = try allocator.alloc(?[]const u8, 1);
+        inner[0] = row_counts[i % row_counts.len];
+        slot.* = inner;
+    }
+    return params;
+}
+
+fn buildAggregateParams(allocator: std.mem.Allocator, total: usize) ![]ParamSet {
+    const params = try allocator.alloc(ParamSet, total);
+    const row_counts = [_][]const u8{ "8000", "12000", "16000", "20000" };
+    for (params, 0..) |*slot, i| {
+        const inner = try allocator.alloc(?[]const u8, 1);
+        inner[0] = row_counts[i % row_counts.len];
+        slot.* = inner;
+    }
+    return params;
+}
+
 fn buildManyParamsBatch(allocator: std.mem.Allocator, total: usize) ![]ParamSet {
     const params = try allocator.alloc(ParamSet, total);
-    const cache = try allocator.alloc([]const u8, 256);
-    for (cache, 0..) |*slot, i| {
-        slot.* = try std.fmt.allocPrint(allocator, "{d}", .{i + 1});
-    }
-
     for (params, 0..) |*slot, query_idx| {
         const inner = try allocator.alloc(?[]const u8, MANY_PARAMS_PARAM_COUNT);
+        const row_slot = (query_idx % BENCH_MANY_PARAMS_TARGET_ROWS) + 1;
         for (0..MANY_PARAMS_PARAM_COUNT) |param_idx| {
-            const value_idx = (query_idx + param_idx * 7) % cache.len;
-            inner[param_idx] = cache[value_idx];
+            inner[param_idx] = try std.fmt.allocPrint(allocator, "{d}", .{row_slot * (param_idx + 1)});
         }
         slot.* = inner;
     }
     return params;
 }
 
+fn ensureWorkloadReady(spec: WorkloadSpec) !void {
+    if (!spec.requires_payload and !spec.requires_many_params) return;
+
+    var conn = try Connection.connect(std.heap.page_allocator, HOST, PORT);
+    defer conn.close();
+    try conn.startup(USER, DATABASE, null);
+
+    try executeSimpleQuery(&conn, BENCH_SETUP_LOCK_SQL);
+    errdefer executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL) catch {};
+
+    if (spec.requires_payload) try ensureBenchPayload(&conn);
+    if (spec.requires_many_params) try ensureBenchManyParams(&conn);
+
+    try executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL);
+}
+
+fn ensureBenchPayload(conn: *Connection) !void {
+    try executeSimpleQuery(conn, CREATE_BENCH_PAYLOAD_SQL);
+
+    const current_rows = try querySingleInt(conn, "SELECT COALESCE(MAX(id), 0) FROM qail_bench_payload");
+    if (current_rows >= BENCH_PAYLOAD_TARGET_ROWS) return;
+
+    const insert_sql = try std.fmt.allocPrint(
+        std.heap.page_allocator,
+        "INSERT INTO qail_bench_payload " ++
+            "(id, name, bio, region, visits, active, ratio, optional_note) " ++
+            "SELECT gs, " ++
+            "       ('harbor-' || gs)::text, " ++
+            "       repeat(md5(gs::text), 4), " ++
+            "       repeat(md5((gs * 17)::text), 3), " ++
+            "       (gs * 11), " ++
+            "       (gs % 2 = 0), " ++
+            "       round((gs::numeric / 7.0), 3), " ++
+            "       CASE WHEN gs % 5 = 0 THEN NULL ELSE repeat(md5((gs * 3)::text), 2) END " ++
+            "FROM generate_series({d}, {d}) AS gs " ++
+            "ON CONFLICT (id) DO NOTHING",
+        .{ current_rows + 1, BENCH_PAYLOAD_TARGET_ROWS },
+    );
+    defer std.heap.page_allocator.free(insert_sql);
+
+    try executeSimpleQuery(conn, insert_sql);
+    _ = executeSimpleQuery(conn, "ANALYZE qail_bench_payload") catch {};
+}
+
+fn ensureBenchManyParams(conn: *Connection) !void {
+    try executeSimpleQuery(conn, CREATE_BENCH_MANY_PARAMS_SQL);
+    try executeSimpleQuery(conn, CREATE_BENCH_MANY_PARAMS_INDEX_SQL);
+
+    const current_rows = try querySingleInt(conn, "SELECT COALESCE(MAX(slot), 0) FROM qail_bench_many_params");
+    if (current_rows >= BENCH_MANY_PARAMS_TARGET_ROWS) return;
+
+    const insert_sql = try buildManyParamsInsertSql(std.heap.page_allocator, @intCast(current_rows + 1), BENCH_MANY_PARAMS_TARGET_ROWS);
+    defer std.heap.page_allocator.free(insert_sql);
+
+    try executeSimpleQuery(conn, insert_sql);
+    _ = executeSimpleQuery(conn, "ANALYZE qail_bench_many_params") catch {};
+}
+
+fn executeSimpleQuery(conn: *Connection, sql: []const u8) !void {
+    var encoder = Encoder.init(std.heap.page_allocator);
+    defer encoder.deinit();
+    try encoder.encodeQuery(sql);
+    try conn.send(encoder.getWritten());
+
+    while (true) {
+        const msg = try conn.readMessage();
+        switch (msg.msg_type) {
+            .command_complete, .row_description, .data_row, .empty_query, .notice, .parameter_status, .notification => {},
+            .ready_for_query => {
+                var decoder = Decoder.init(msg.payload);
+                const tx_status = try decoder.parseReadyForQuery();
+                conn.ready = true;
+                conn.in_transaction = tx_status == .in_transaction;
+                return;
+            },
+            .error_response => {
+                _ = drainUntilReady(conn) catch {};
+                return error.SimpleQueryFailed;
+            },
+            else => {},
+        }
+    }
+}
+
+fn querySingleInt(conn: *Connection, sql: []const u8) !usize {
+    var encoder = Encoder.init(std.heap.page_allocator);
+    defer encoder.deinit();
+    try encoder.encodeQuery(sql);
+    try conn.send(encoder.getWritten());
+
+    var value: ?usize = null;
+    while (true) {
+        const msg = try conn.readMessage();
+        switch (msg.msg_type) {
+            .row_description, .command_complete, .empty_query, .notice, .parameter_status, .notification => {},
+            .data_row => {
+                if (value == null) value = try parseFirstDataRowUInt(msg.payload);
+            },
+            .ready_for_query => {
+                var decoder = Decoder.init(msg.payload);
+                const tx_status = try decoder.parseReadyForQuery();
+                conn.ready = true;
+                conn.in_transaction = tx_status == .in_transaction;
+                return value orelse error.ExpectedScalarResult;
+            },
+            .error_response => {
+                _ = drainUntilReady(conn) catch {};
+                return error.SimpleQueryFailed;
+            },
+            else => {},
+        }
+    }
+}
+
+fn parseFirstDataRowUInt(payload: []const u8) !usize {
+    if (payload.len < 2) return error.InvalidDataRow;
+    const column_count = std.mem.readInt(u16, payload[0..2], .big);
+    if (column_count == 0) return error.InvalidDataRow;
+
+    var pos: usize = 2;
+    if (pos + 4 > payload.len) return error.InvalidDataRow;
+    const raw_len = std.mem.readInt(i32, payload[pos..][0..4], .big);
+    pos += 4;
+    if (raw_len < 0) return error.InvalidDataRow;
+
+    const len: usize = @intCast(raw_len);
+    if (pos + len > payload.len) return error.InvalidDataRow;
+    return std.fmt.parseInt(usize, payload[pos .. pos + len], 10);
+}
+
+fn buildManyParamColumns() [MANY_PARAMS_PARAM_COUNT][]const u8 {
+    var columns: [MANY_PARAMS_PARAM_COUNT][]const u8 = undefined;
+    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        columns[idx] = if (idx + 1 < 10)
+            std.fmt.comptimePrint("p0{d}", .{idx + 1})
+        else
+            std.fmt.comptimePrint("p{d}", .{idx + 1});
+    }
+    return columns;
+}
+
+fn buildManyParamClauses() [MANY_PARAMS_PARAM_COUNT]WhereClause {
+    var clauses: [MANY_PARAMS_PARAM_COUNT]WhereClause = undefined;
+    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        clauses[idx] = .{
+            .condition = .{
+                .column = MANY_PARAM_COLUMNS[idx],
+                .op = .eq,
+                .value = .{ .param = idx + 1 },
+            },
+        };
+    }
+    return clauses;
+}
+
+fn buildManyParamsCreateSql() []const u8 {
+    comptime var sql: []const u8 = "CREATE TABLE IF NOT EXISTS qail_bench_many_params (slot INTEGER PRIMARY KEY, total BIGINT NOT NULL";
+    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        sql = sql ++ ", " ++ MANY_PARAM_COLUMNS[idx] ++ " INTEGER NOT NULL";
+    }
+    sql = sql ++ ")";
+    return sql;
+}
+
+fn buildManyParamsIndexSql() []const u8 {
+    comptime var sql: []const u8 = "CREATE UNIQUE INDEX IF NOT EXISTS qail_bench_many_params_lookup_idx ON qail_bench_many_params (";
+    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        if (idx > 0) sql = sql ++ ", ";
+        sql = sql ++ MANY_PARAM_COLUMNS[idx];
+    }
+    sql = sql ++ ")";
+    return sql;
+}
+
+fn buildManyParamsInsertSql(allocator: std.mem.Allocator, start_slot: usize, end_slot: usize) ![]u8 {
+    var sql = std.ArrayList(u8){};
+    defer sql.deinit(allocator);
+    const writer = sql.writer(allocator);
+
+    try writer.writeAll("INSERT INTO qail_bench_many_params (slot, total");
+    for (MANY_PARAM_COLUMNS) |column| {
+        try writer.writeAll(", ");
+        try writer.writeAll(column);
+    }
+    try writer.writeAll(") SELECT gs, ");
+    try writer.print("(gs * {d})::bigint", .{MANY_PARAMS_SUM_COEFF});
+    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        try writer.print(", gs * {d}", .{idx + 1});
+    }
+    try writer.print(" FROM generate_series({d}, {d}) AS gs ON CONFLICT (slot) DO NOTHING", .{ start_slot, end_slot });
+    return sql.toOwnedSlice(allocator);
+}
+
 fn runSingleMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult {
     var conn = try Connection.connect(std.heap.page_allocator, HOST, PORT);
     defer conn.close();
     try conn.startup(USER, DATABASE, null);
-    try prepareNamedStatement(&conn, STMT_NAME, spec.sql, spec.param_types);
+    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd);
 
     var encoder = Encoder.init(std.heap.page_allocator);
     defer encoder.deinit();
@@ -313,7 +623,7 @@ fn runPipelineMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResul
     var conn = try Connection.connect(std.heap.page_allocator, HOST, PORT);
     defer conn.close();
     try conn.startup(USER, DATABASE, null);
-    try prepareNamedStatement(&conn, STMT_NAME, spec.sql, spec.param_types);
+    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd);
 
     var encoder = Encoder.init(std.heap.page_allocator);
     defer encoder.deinit();
@@ -383,10 +693,7 @@ fn runPool10Mode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult 
     waitForCounter(&sync.done_count, POOL_SIZE);
     const end = try time.now();
 
-    for (threads) |thread| {
-        thread.join();
-    }
-
+    for (threads) |thread| thread.join();
     for (results) |result| {
         if (result.err) |err| return err;
     }
@@ -413,7 +720,7 @@ fn poolWorkerMain(ctx: *PoolWorkerCtx) void {
 
     if (local_err == null) {
         const conn = pooled.get();
-        prepareNamedStatement(conn, STMT_NAME, ctx.spec.sql, ctx.spec.param_types) catch |err| {
+        prepareNamedAstStatement(conn, STMT_NAME, ctx.spec.cmd) catch |err| {
             local_err = err;
         };
         if (local_err == null) {
@@ -464,12 +771,11 @@ fn waitForCounter(counter: *std.atomic.Value(usize), expected: usize) void {
     }
 }
 
-fn prepareNamedStatement(conn: *Connection, stmt_name: []const u8, sql: []const u8, param_types: []const u32) !void {
-    var encoder = Encoder.init(std.heap.page_allocator);
+fn prepareNamedAstStatement(conn: *Connection, stmt_name: []const u8, cmd: *const QailCmd) !void {
+    var encoder = AstEncoder.init(std.heap.page_allocator);
     defer encoder.deinit();
 
-    try encoder.encodeParse(stmt_name, sql, param_types);
-    try encoder.appendSync();
+    try encoder.encodePrepare(stmt_name, cmd);
     try conn.send(encoder.getWritten());
 
     var saw_parse_complete = false;
@@ -597,10 +903,50 @@ fn makeBenchmarkResult(stats: BatchStats, elapsed_ns: u64) BenchmarkResult {
 
 fn consumeDataRow(result_mode: ResultMode, payload: []const u8, stats: *BatchStats) !void {
     switch (result_mode) {
-        .complete_only => {},
-        .scalar_int => try consumeScalarDataRow(payload, stats),
+        .point_rows => try consumePointDataRow(payload, stats),
         .wide_rows => try consumeWideDataRow(payload, stats),
+        .scalar_int => try consumeScalarDataRow(payload, stats),
+        .aggregate_scalars => try consumeAggregateDataRow(payload, stats),
     }
+}
+
+fn consumePointDataRow(payload: []const u8, stats: *BatchStats) !void {
+    if (payload.len < 2) return error.InvalidDataRow;
+
+    const column_count = std.mem.readInt(u16, payload[0..2], .big);
+    var pos: usize = 2;
+    var row_hash: u64 = FNV_OFFSET;
+
+    for (0..column_count) |idx| {
+        if (pos + 4 > payload.len) return error.InvalidDataRow;
+        const raw_len = std.mem.readInt(i32, payload[pos..][0..4], .big);
+        pos += 4;
+
+        if (raw_len < 0) {
+            row_hash = mixHash(row_hash, "NULL");
+            row_hash +%= idx;
+            continue;
+        }
+
+        const len: usize = @intCast(raw_len);
+        if (pos + len > payload.len) return error.InvalidDataRow;
+
+        const value = payload[pos .. pos + len];
+        pos += len;
+        stats.bytes += value.len;
+
+        switch (idx) {
+            0 => {
+                const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+                row_hash +%= @as(u64, @intCast(parsed));
+            },
+            else => row_hash = mixHash(row_hash, value),
+        }
+    }
+
+    if (pos != payload.len) return error.InvalidDataRow;
+    stats.rows += 1;
+    stats.checksum +%= row_hash;
 }
 
 fn consumeScalarDataRow(payload: []const u8, stats: *BatchStats) !void {
@@ -643,12 +989,42 @@ fn consumeScalarDataRow(payload: []const u8, stats: *BatchStats) !void {
     }
 }
 
+fn consumeAggregateDataRow(payload: []const u8, stats: *BatchStats) !void {
+    if (payload.len < 2) return error.InvalidDataRow;
+
+    const column_count = std.mem.readInt(u16, payload[0..2], .big);
+    var pos: usize = 2;
+    var row_hash: u64 = FNV_OFFSET;
+
+    for (0..column_count) |_| {
+        if (pos + 4 > payload.len) return error.InvalidDataRow;
+        const raw_len = std.mem.readInt(i32, payload[pos..][0..4], .big);
+        pos += 4;
+
+        if (raw_len < 0) continue;
+
+        const len: usize = @intCast(raw_len);
+        if (pos + len > payload.len) return error.InvalidDataRow;
+
+        const value = payload[pos .. pos + len];
+        pos += len;
+        stats.bytes += value.len;
+
+        const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+        row_hash +%= @as(u64, @intCast(parsed));
+    }
+
+    if (pos != payload.len) return error.InvalidDataRow;
+    stats.rows += 1;
+    stats.checksum +%= row_hash;
+}
+
 fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
     if (payload.len < 2) return error.InvalidDataRow;
 
     const column_count = std.mem.readInt(u16, payload[0..2], .big);
     var pos: usize = 2;
-    var row_hash: u64 = 0xcbf29ce484222325;
+    var row_hash: u64 = FNV_OFFSET;
 
     for (0..column_count) |idx| {
         if (pos + 4 > payload.len) return error.InvalidDataRow;
@@ -686,6 +1062,7 @@ fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
         }
     }
 
+    if (pos != payload.len) return error.InvalidDataRow;
     stats.rows += 1;
     stats.checksum +%= row_hash;
 }
@@ -694,26 +1071,7 @@ fn mixHash(seed: u64, bytes: []const u8) u64 {
     var hash = seed;
     for (bytes) |byte| {
         hash ^= byte;
-        hash *%= 1099511628211;
+        hash *%= FNV_PRIME;
     }
     return hash;
-}
-
-fn buildManyParamsSql() []const u8 {
-    comptime var sql: []const u8 = "SELECT ";
-    inline for (1..MANY_PARAMS_PARAM_COUNT + 1) |idx| {
-        sql = sql ++ std.fmt.comptimePrint("${d}::int", .{idx});
-        if (idx != MANY_PARAMS_PARAM_COUNT) {
-            sql = sql ++ " + ";
-        } else {
-            sql = sql ++ " AS total";
-        }
-    }
-    return sql;
-}
-
-fn buildManyParamsOids() [MANY_PARAMS_PARAM_COUNT]u32 {
-    var types: [MANY_PARAMS_PARAM_COUNT]u32 = undefined;
-    for (&types) |*slot| slot.* = INT4_OID;
-    return types;
 }

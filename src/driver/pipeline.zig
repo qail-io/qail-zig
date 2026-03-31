@@ -7,6 +7,7 @@ const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
+const raw_policy = @import("raw_policy.zig");
 const row_mod = @import("row.zig");
 
 const QailCmd = ast.QailCmd;
@@ -127,6 +128,7 @@ pub const Pipeline = struct {
     /// Returns only the count of completed queries (fast path).
     pub fn pipelineAstFast(self: *Pipeline, cmds: []const *const QailCmd) !usize {
         if (cmds.len == 0) return 0;
+        try raw_policy.rejectPublicRuntimeCmds(cmds);
 
         var ast_encoder = AstEncoder.init(self.allocator);
         defer ast_encoder.deinit();
@@ -151,6 +153,7 @@ pub const Pipeline = struct {
         cmds: []const *const QailCmd,
     ) ![][]PgRow {
         if (cmds.len == 0) return &.{};
+        try raw_policy.rejectPublicRuntimeCmds(cmds);
 
         var ast_encoder = AstEncoder.init(self.allocator);
         defer ast_encoder.deinit();

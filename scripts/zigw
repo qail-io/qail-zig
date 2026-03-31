@@ -118,6 +118,7 @@ run_direct_test() {
 
 run_check_raw() {
   "$repo_root/scripts/check_no_direct_raw.sh"
+  "$repo_root/scripts/check_no_public_raw_runtime.sh"
   "$repo_root/scripts/check_execute_raw_allowlist.sh"
   "$repo_root/scripts/check_raw_cmd_allowlist.sh"
 }
