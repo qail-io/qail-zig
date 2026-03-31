@@ -5,6 +5,7 @@
 pub const stream = @import("stream.zig");
 pub const config = @import("config.zig");
 pub const buffer = @import("buffer.zig");
+pub const channel_binding = @import("channel_binding.zig");
 
 // Re-export main types
 pub const StreamReader = stream.StreamReader;

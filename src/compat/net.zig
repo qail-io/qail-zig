@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const tls = std.crypto.tls;
+const tls_client = @import("tls_client.zig");
 
 pub const Address = std.net.Address;
 pub const Server = std.net.Server;
@@ -152,9 +152,9 @@ pub fn streamWriter(stream: Stream, buffer: []u8) StreamWriter {
 pub fn initTlsClient(
     reader: *StreamReader,
     writer: *StreamWriter,
-    options: tls.Client.Options,
-) !tls.Client {
-    return tls.Client.init(reader.interface(), &writer.interface, options);
+    options: tls_client.Options,
+) !tls_client.Client {
+    return tls_client.Client.init(reader.interface(), &writer.interface, options);
 }
 
 fn setBlocking(fd: std.posix.fd_t, blocking: bool) !void {

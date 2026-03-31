@@ -1,19 +1,20 @@
 //! PostgreSQL TLS/SSL Connection
 //!
-//! Full TLS 1.3 implementation using std.crypto.tls.Client.
+//! Full TLS 1.3 implementation using a local fork of std.crypto.tls.Client
+//! so the handshake can retain the server leaf cert for SCRAM+ channel binding.
 //!
 //! PostgreSQL SSL Handshake Flow:
 //! 1. TCP connect
 //! 2. Send SSLRequest message (8 bytes)
 //! 3. Server responds 'S' (SSL accepted) or 'N' (not supported)
-//! 4. If 'S', TLS handshake via std.crypto.tls.Client
+//! 4. If 'S', TLS handshake via local TLS client wrapper
 //! 5. Continue with StartupMessage over TLS
 
 const std = @import("std");
-const tls = std.crypto.tls;
 const net = @import("../compat/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const tls_mod = @import("tls/mod.zig");
+const tls_client = @import("../compat/tls_client.zig");
 
 const Encoder = protocol.Encoder;
 const StartupParam = Encoder.StartupParam;
@@ -32,7 +33,7 @@ pub const SSL_REQUEST_CODE: u32 = 80877103;
 
 /// TLS-secured PostgreSQL connection
 ///
-/// Provides encrypted communication using std.crypto.tls.Client (TLS 1.3).
+/// Provides encrypted communication using the local TLS client wrapper (TLS 1.3).
 /// Falls back to plain connection if server doesn't support SSL.
 pub const TlsConnection = struct {
     allocator: std.mem.Allocator,
@@ -40,7 +41,7 @@ pub const TlsConnection = struct {
 
     // TLS components
     tls_buffers: TlsBuffers,
-    tls_client: ?tls.Client = null,
+    tls_client: ?tls_client.Client = null,
     stream_reader: ?net.StreamReader = null,
     stream_writer: ?net.StreamWriter = null,
     tls_server_end_point_binding: ?[]u8 = null,
@@ -122,7 +123,7 @@ pub const TlsConnection = struct {
         return response[0] == 'S';
     }
 
-    /// Initialize TLS handshake using std.crypto.tls.Client
+    /// Initialize TLS handshake using the local TLS client wrapper.
     fn initTls(self: *TlsConnection, config: TlsConfig, host: []const u8) !void {
         self.stream_reader = net.streamReader(self.tcp_stream, self.tls_buffers.readBuffer());
         self.stream_writer = net.streamWriter(self.tcp_stream, self.tls_buffers.writeBuffer());
@@ -136,16 +137,39 @@ pub const TlsConnection = struct {
             self.tls_buffers.readBuffer(),
             self.tls_buffers.writeBuffer(),
         );
+        const tls_client_options: tls_client.Options = .{
+            .host = switch (tls_options.host) {
+                .no_verification => .no_verification,
+                .explicit => |name| .{ .explicit = name },
+            },
+            .ca = switch (tls_options.ca) {
+                .no_verification => .no_verification,
+                .self_signed => .self_signed,
+                .bundle => |bundle| .{ .bundle = bundle },
+            },
+            .ssl_key_log = null,
+            .allow_truncation_attacks = tls_options.allow_truncation_attacks,
+            .write_buffer = tls_options.write_buffer,
+            .read_buffer = tls_options.read_buffer,
+            .channel_binding_allocator = self.allocator,
+            .alert = tls_options.alert,
+        };
 
         // Initialize TLS client (performs handshake)
-        self.tls_client = try net.initTlsClient(&self.stream_reader.?, &self.stream_writer.?, tls_options);
+        self.tls_client = try net.initTlsClient(&self.stream_reader.?, &self.stream_writer.?, tls_client_options);
         self.ssl_enabled = true;
 
-        if (config.tls_server_end_point_cert_der) |cert_der| {
-            self.tls_server_end_point_binding = try tls_mod.config.deriveTlsServerEndPointBindingFromCertDer(
-                self.allocator,
-                cert_der,
-            );
+        if (self.tls_client) |client| {
+            self.tls_server_end_point_binding = client.tls_server_end_point_binding;
+        }
+
+        if (self.tls_server_end_point_binding == null) {
+            if (config.tls_server_end_point_cert_der) |cert_der| {
+                self.tls_server_end_point_binding = try tls_mod.config.deriveTlsServerEndPointBindingFromCertDer(
+                    self.allocator,
+                    cert_der,
+                );
+            }
         }
     }
 
@@ -167,7 +191,8 @@ pub const TlsConnection = struct {
         return self.ssl_accepted;
     }
 
-    /// Derived SCRAM `tls-server-end-point` bytes, when configured.
+    /// Derived SCRAM `tls-server-end-point` bytes from the TLS handshake leaf
+    /// cert when available, otherwise from configured cert DER fallback.
     pub fn tlsServerEndPointBinding(self: *const TlsConnection) ?[]const u8 {
         return self.tls_server_end_point_binding;
     }
