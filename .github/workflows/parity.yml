@@ -14,6 +14,11 @@ jobs:
       - name: Checkout qail-zig
         uses: actions/checkout@v4
 
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.1
+
       - name: Checkout qail.rs reference
         uses: actions/checkout@v4
         with:
@@ -23,6 +28,12 @@ jobs:
 
       - name: Run AST/encoder parity checks
         run: ./scripts/check_parity.sh ./qail.rs
+
+      - name: Cross-target compile guards
+        run: |
+          zig test src/lib.zig -target x86_64-linux -fno-emit-bin --test-no-exec
+          zig test src/lib.zig -target aarch64-macos.15.0 -fno-emit-bin --test-no-exec
+          zig test src/lib.zig -target x86_64-windows -fno-emit-bin --test-no-exec
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

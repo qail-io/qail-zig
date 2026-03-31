@@ -409,3 +409,115 @@ fn readExactRaw(stream: net.Stream, buffer: []u8) !void {
         filled += n;
     }
 }
+
+const FrameCaptureCtx = struct {
+    server: *net.Server,
+    payload: [64]u8 = undefined,
+    payload_len: usize = 0,
+    frame_len: u32 = 0,
+    ok: bool = false,
+};
+
+fn captureFrameThread(ctx: *FrameCaptureCtx) void {
+    defer ctx.server.deinit();
+
+    var conn = ctx.server.accept() catch return;
+    defer conn.stream.close();
+
+    var len_buf: [4]u8 = undefined;
+    readExactRaw(conn.stream, &len_buf) catch return;
+    ctx.frame_len = std.mem.readInt(u32, &len_buf, .big);
+    if (ctx.frame_len > ctx.payload.len) return;
+    ctx.payload_len = ctx.frame_len;
+    readExactRaw(conn.stream, ctx.payload[0..ctx.payload_len]) catch return;
+    ctx.ok = true;
+}
+
+const HandshakeServerCtx = struct {
+    server: *net.Server,
+    length: u32,
+    payload: []const u8,
+};
+
+fn sendHandshakeFrameThread(ctx: *HandshakeServerCtx) void {
+    defer ctx.server.deinit();
+
+    var conn = ctx.server.accept() catch return;
+    defer conn.stream.close();
+
+    var len_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_buf, ctx.length, .big);
+    net.writeAllStream(conn.stream, &len_buf) catch return;
+    if (ctx.payload.len != 0) {
+        net.writeAllStream(conn.stream, ctx.payload) catch return;
+    }
+}
+
+test "gssenc writeFrame prefixes length and payload" {
+    var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var ctx = FrameCaptureCtx{ .server = &server };
+    var thread = try std.Thread.spawn(.{}, captureFrameThread, .{&ctx});
+
+    var stream = try net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port);
+    defer stream.close();
+
+    try writeFrame(stream, "hello");
+
+    thread.join();
+    try std.testing.expect(ctx.ok);
+    try std.testing.expectEqual(@as(u32, 5), ctx.frame_len);
+    try std.testing.expectEqualStrings("hello", ctx.payload[0..ctx.payload_len]);
+}
+
+test "gssenc readHandshakeFrame reads length-prefixed payload" {
+    var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var ctx = HandshakeServerCtx{ .server = &server, .length = 4, .payload = "tokn" };
+    var thread = try std.Thread.spawn(.{}, sendHandshakeFrameThread, .{&ctx});
+    defer thread.join();
+
+    var stream = try net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port);
+    defer stream.close();
+
+    const token = try readHandshakeFrame(std.testing.allocator, stream);
+    defer std.testing.allocator.free(token);
+
+    try std.testing.expectEqualStrings("tokn", token);
+}
+
+test "gssenc readHandshakeFrame rejects invalid zero length" {
+    var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var ctx = HandshakeServerCtx{ .server = &server, .length = 0, .payload = "" };
+    var thread = try std.Thread.spawn(.{}, sendHandshakeFrameThread, .{&ctx});
+    defer thread.join();
+
+    var stream = try net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port);
+    defer stream.close();
+
+    try std.testing.expectError(
+        error.InvalidGssEncHandshakeTokenLength,
+        readHandshakeFrame(std.testing.allocator, stream),
+    );
+}
+
+test "gssenc readHandshakeFrame rejects oversized token length" {
+    var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
+    const port = server.listen_address.getPort();
+
+    var ctx = HandshakeServerCtx{ .server = &server, .length = PQ_GSS_AUTH_BUFFER + 1, .payload = "" };
+    var thread = try std.Thread.spawn(.{}, sendHandshakeFrameThread, .{&ctx});
+    defer thread.join();
+
+    var stream = try net.tcpConnectToHost(std.testing.allocator, "127.0.0.1", port);
+    defer stream.close();
+
+    try std.testing.expectError(
+        error.InvalidGssEncHandshakeTokenLength,
+        readHandshakeFrame(std.testing.allocator, stream),
+    );
+}
