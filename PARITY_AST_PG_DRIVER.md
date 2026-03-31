@@ -52,6 +52,7 @@ Estimated gap: mostly maturity/polish, not missing core PG-driver features
 1. Keep the remaining trusted/internal raw escape hatches quarantined
 - Public driver execution is already fail-closed for `.raw` and nested raw procedural escapes.
 - Remaining raw surfaces are legacy/internal compatibility fields and trusted helper paths, not the default runtime contract.
+- Raw nested-query compatibility assignment is now confined to `src/ast/trusted_nested_query.zig`, and repo checks gate both assignment and field access spread.
 
 2. Finish enterprise auth polish
 - Keep the local TLS client fork isolated and covered so handshake-native `tls-server-end-point` extraction survives Zig stdlib churn.

@@ -230,7 +230,7 @@ test "raw policy rejects subquery expressions in public ast commands" {
 }
 
 test "raw policy rejects raw cte source sql in public ast commands" {
-    const ctes = [_]ast.CTEDef{.{ .name = "danger", .base_sql = "SELECT 1" }};
+    const ctes = [_]ast.CTEDef{ast.trusted_nested_query.cteFromSql("danger", "SELECT 1")};
     const cmd = QailCmd.get("users").withCtes(&ctes);
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
@@ -250,8 +250,7 @@ test "raw policy rejects raw ddl fragments in public ast commands" {
 }
 
 test "raw policy rejects raw source query sql in public ast commands" {
-    var cmd = QailCmd.createMaterializedView("mv_users");
-    cmd.source_query_sql = "SELECT * FROM users";
+    const cmd = ast.trusted_nested_query.createMaterializedViewFromSql("mv_users", "SELECT * FROM users");
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 

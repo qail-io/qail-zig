@@ -9,6 +9,7 @@ pub const values = @import("values.zig");
 pub const operators = @import("operators.zig");
 pub const cages = @import("cages.zig");
 pub const policy = @import("policy.zig");
+pub const trusted_nested_query = @import("trusted_nested_query.zig");
 pub const builders = @import("builders/mod.zig");
 
 // Re-export main types

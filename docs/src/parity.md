@@ -47,6 +47,7 @@ The main remaining policy difference is narrower now:
 - `qail.rs` removed raw runtime SQL APIs from the normal execution path entirely.
 - `qail-zig` now rejects `.raw` and nested procedural/raw escape hatches on the public driver path by default, but still keeps some trusted/internal compatibility fields in the AST.
 - Typed RLS helpers and typed policy parsing are now present on the Zig side, including normalization of common wrapped `current_setting(...)` forms emitted by `pg_dump`.
+- The remaining raw nested-query compatibility fields are now quarantined behind a dedicated trusted helper module plus repo allowlist checks, rather than ad hoc direct assignment.
 
 ## PG Driver Focus
 
