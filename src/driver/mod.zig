@@ -27,6 +27,7 @@ pub const connect_url = @import("connect_url.zig");
 pub const notification = @import("notification.zig");
 pub const replication = @import("replication.zig");
 pub const kerberos_preflight = @import("kerberos_preflight.zig");
+pub const kerberos_provider = @import("kerberos_provider.zig");
 
 // Re-export main types
 pub const Connection = connection.Connection;
@@ -80,6 +81,8 @@ pub const LinuxKrb5ProviderConfig = kerberos_preflight.LinuxKrb5ProviderConfig;
 pub const LinuxKrb5PreflightReport = kerberos_preflight.LinuxKrb5PreflightReport;
 pub const linuxKrb5Preflight = kerberos_preflight.linuxKrb5Preflight;
 pub const linuxKrb5PreflightWithEnvMap = kerberos_preflight.linuxKrb5PreflightWithEnvMap;
+pub const LinuxKrb5Provider = kerberos_provider.LinuxKrb5Provider;
+pub const linuxKrb5TokenProvider = kerberos_provider.linuxKrb5TokenProvider;
 pub const RlsContext = rls.RlsContext;
 pub const SuperAdminToken = rls.SuperAdminToken;
 pub const sanitizeGucValue = rls.sanitizeGucValue;

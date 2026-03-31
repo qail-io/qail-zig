@@ -1,0 +1,431 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const auth_options = @import("auth_options.zig");
+const kerberos_preflight = @import("kerberos_preflight.zig");
+
+pub const LinuxKrb5ProviderConfig = kerberos_preflight.LinuxKrb5ProviderConfig;
+
+pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
+    const OmUint32 = u32;
+
+    const GssOidDesc = extern struct {
+        length: OmUint32,
+        elements: ?*anyopaque,
+    };
+
+    const GssBufferDesc = extern struct {
+        length: usize,
+        value: ?*anyopaque,
+    };
+
+    const GssOid = ?*GssOidDesc;
+    const GssName = ?*anyopaque;
+    const GssContext = ?*anyopaque;
+    const GssCredential = ?*anyopaque;
+    const GssChannelBindings = ?*anyopaque;
+
+    const GSS_S_COMPLETE: OmUint32 = 0;
+    const GSS_S_CONTINUE_NEEDED: OmUint32 = 1;
+    const GSS_C_GSS_CODE: i32 = 1;
+    const GSS_C_MECH_CODE: i32 = 2;
+    const GSS_C_MUTUAL_FLAG: OmUint32 = 0x0000_0002;
+    const GSS_C_SEQUENCE_FLAG: OmUint32 = 0x0000_0008;
+    const GSS_SESSION_TTL_MS: i64 = 120_000;
+    const GSS_MAX_SESSIONS: usize = 256;
+
+    const Api = struct {
+        lib: std.DynLib,
+        hostbased_service_name: *GssOid,
+        gss_import_name: *const fn (
+            minor_status: *OmUint32,
+            input_name_buffer: *const GssBufferDesc,
+            input_name_type: GssOid,
+            output_name: *GssName,
+        ) callconv(.c) OmUint32,
+        gss_release_name: *const fn (
+            minor_status: *OmUint32,
+            input_name: *GssName,
+        ) callconv(.c) OmUint32,
+        gss_init_sec_context: *const fn (
+            minor_status: *OmUint32,
+            initiator_cred_handle: GssCredential,
+            context_handle: *GssContext,
+            target_name: GssName,
+            mech_type: GssOid,
+            req_flags: OmUint32,
+            time_req: OmUint32,
+            input_chan_bindings: GssChannelBindings,
+            input_token: ?*const GssBufferDesc,
+            actual_mech_type: ?*GssOid,
+            output_token: *GssBufferDesc,
+            ret_flags: ?*OmUint32,
+            time_rec: ?*OmUint32,
+        ) callconv(.c) OmUint32,
+        gss_delete_sec_context: *const fn (
+            minor_status: *OmUint32,
+            context_handle: *GssContext,
+            output_token: ?*GssBufferDesc,
+        ) callconv(.c) OmUint32,
+        gss_release_buffer: *const fn (
+            minor_status: *OmUint32,
+            buffer: *GssBufferDesc,
+        ) callconv(.c) OmUint32,
+        gss_display_status: *const fn (
+            minor_status: *OmUint32,
+            status_value: OmUint32,
+            status_type: i32,
+            mech_type: GssOid,
+            message_context: *OmUint32,
+            status_string: *GssBufferDesc,
+        ) callconv(.c) OmUint32,
+
+        fn load() !Api {
+            for ([_][]const u8{
+                "libgssapi_krb5.so.2",
+                "libgssapi_krb5.so",
+                "libgssapi.so.3",
+                "libgssapi.so",
+            }) |candidate| {
+                var lib = std.DynLib.open(candidate) catch continue;
+                errdefer lib.close();
+
+                const hostbased_service_name = lib.lookup(*GssOid, "GSS_C_NT_HOSTBASED_SERVICE") orelse continue;
+                const gss_import_name = lib.lookup(*const fn (*OmUint32, *const GssBufferDesc, GssOid, *GssName) callconv(.c) OmUint32, "gss_import_name") orelse continue;
+                const gss_release_name = lib.lookup(*const fn (*OmUint32, *GssName) callconv(.c) OmUint32, "gss_release_name") orelse continue;
+                const gss_init_sec_context = lib.lookup(*const fn (*OmUint32, GssCredential, *GssContext, GssName, GssOid, OmUint32, OmUint32, GssChannelBindings, ?*const GssBufferDesc, ?*GssOid, *GssBufferDesc, ?*OmUint32, ?*OmUint32) callconv(.c) OmUint32, "gss_init_sec_context") orelse continue;
+                const gss_delete_sec_context = lib.lookup(*const fn (*OmUint32, *GssContext, ?*GssBufferDesc) callconv(.c) OmUint32, "gss_delete_sec_context") orelse continue;
+                const gss_release_buffer = lib.lookup(*const fn (*OmUint32, *GssBufferDesc) callconv(.c) OmUint32, "gss_release_buffer") orelse continue;
+                const gss_display_status = lib.lookup(*const fn (*OmUint32, OmUint32, i32, GssOid, *OmUint32, *GssBufferDesc) callconv(.c) OmUint32, "gss_display_status") orelse continue;
+
+                return .{
+                    .lib = lib,
+                    .hostbased_service_name = hostbased_service_name,
+                    .gss_import_name = gss_import_name,
+                    .gss_release_name = gss_release_name,
+                    .gss_init_sec_context = gss_init_sec_context,
+                    .gss_delete_sec_context = gss_delete_sec_context,
+                    .gss_release_buffer = gss_release_buffer,
+                    .gss_display_status = gss_display_status,
+                };
+            }
+
+            return error.GssApiLibraryUnavailable;
+        }
+
+        fn deinit(self: *Api) void {
+            self.lib.close();
+        }
+    };
+
+    const StepResult = struct {
+        token: []u8,
+        complete: bool,
+    };
+
+    const LinuxKrb5Session = struct {
+        api: *const Api,
+        context: GssContext = null,
+        target_name: GssName = null,
+        mechanism: auth_options.GssMechanism,
+
+        fn init(api: *const Api, target: []const u8, mechanism: auth_options.GssMechanism) !LinuxKrb5Session {
+            switch (mechanism) {
+                .kerberos_v5, .gss => {},
+                .sspi => return error.UnsupportedGssMechanism,
+            }
+
+            const name_type = api.hostbased_service_name.* orelse return error.GssHostbasedServiceNameUnavailable;
+
+            var minor: OmUint32 = 0;
+            var output_name: GssName = null;
+            var input = GssBufferDesc{
+                .length = target.len,
+                .value = if (target.len == 0) null else @ptrCast(@constCast(target.ptr)),
+            };
+
+            const major = api.gss_import_name(&minor, &input, name_type, &output_name);
+            if (isGssError(major)) {
+                logGssError(api, "gss_import_name failed", major, minor);
+                return error.GssImportNameFailed;
+            }
+
+            return .{
+                .api = api,
+                .context = null,
+                .target_name = output_name,
+                .mechanism = mechanism,
+            };
+        }
+
+        fn deinit(self: *LinuxKrb5Session) void {
+            var minor: OmUint32 = 0;
+
+            if (self.context != null) {
+                _ = self.api.gss_delete_sec_context(&minor, &self.context, null);
+                self.context = null;
+            }
+
+            if (self.target_name != null) {
+                _ = self.api.gss_release_name(&minor, &self.target_name);
+                self.target_name = null;
+            }
+        }
+
+        fn step(self: *LinuxKrb5Session, allocator: std.mem.Allocator, input_token: ?[]const u8) !StepResult {
+            var minor: OmUint32 = 0;
+            var output = GssBufferDesc{ .length = 0, .value = null };
+            var input = GssBufferDesc{ .length = 0, .value = null };
+            const input_ptr: ?*const GssBufferDesc = if (input_token) |bytes| blk: {
+                input.length = bytes.len;
+                input.value = if (bytes.len == 0) null else @ptrCast(@constCast(bytes.ptr));
+                break :blk &input;
+            } else null;
+
+            const major = self.api.gss_init_sec_context(
+                &minor,
+                null,
+                &self.context,
+                self.target_name,
+                null,
+                GSS_C_MUTUAL_FLAG | GSS_C_SEQUENCE_FLAG,
+                0,
+                null,
+                input_ptr,
+                null,
+                &output,
+                null,
+                null,
+            );
+            const token = try takeGssBuffer(self.api, allocator, &output);
+            errdefer allocator.free(token);
+
+            if (isGssError(major)) {
+                logGssError(self.api, "gss_init_sec_context failed", major, minor);
+                return error.GssInitSecContextFailed;
+            }
+
+            const complete = major == GSS_S_COMPLETE;
+            const continue_needed = (major & GSS_S_CONTINUE_NEEDED) != 0;
+            if (!complete and !continue_needed) return error.GssUnexpectedStatus;
+
+            return .{ .token = token, .complete = complete };
+        }
+    };
+
+    const TrackedSession = struct {
+        session: LinuxKrb5Session,
+        last_seen_ms: i64,
+    };
+
+    allocator: std.mem.Allocator,
+    api: Api,
+    target_name: []u8,
+    mutex: std.Thread.Mutex = .{},
+    sessions: std.AutoHashMap(u64, TrackedSession),
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator, config: LinuxKrb5ProviderConfig) !Self {
+        var report = try kerberos_preflight.linuxKrb5Preflight(allocator, config);
+        errdefer report.deinit();
+
+        var api = try Api.load();
+        errdefer api.deinit();
+
+        const target_name = report.target_name;
+        report.target_name = &.{};
+        report.deinit();
+
+        return .{
+            .allocator = allocator,
+            .api = api,
+            .target_name = target_name,
+            .sessions = std.AutoHashMap(u64, TrackedSession).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        var it = self.sessions.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.session.deinit();
+        }
+        self.sessions.deinit();
+        self.allocator.free(self.target_name);
+        self.api.deinit();
+    }
+
+    pub fn authOptions(self: *Self, base: auth_options.AuthOptions) auth_options.AuthOptions {
+        var out = base;
+        out.allow_kerberos_v5 = true;
+        out.allow_gssapi = true;
+        out.gss_token_provider_ex = callback;
+        out.gss_context = self;
+        return out;
+    }
+
+    pub fn callback(ctx: ?*anyopaque, request: auth_options.GssTokenRequest, allocator: std.mem.Allocator) anyerror![]const u8 {
+        const self: *Self = @ptrCast(@alignCast(ctx orelse return error.GssTokenProviderRequired));
+        return self.handleRequest(request, allocator);
+    }
+
+    fn handleRequest(self: *Self, request: auth_options.GssTokenRequest, allocator: std.mem.Allocator) ![]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.pruneStaleSessions();
+
+        if (request.server_token == null) {
+            if (self.sessions.count() >= GSS_MAX_SESSIONS) return error.GssSessionLimitReached;
+            if (self.sessions.fetchRemove(request.session_id)) |removed| {
+                var tracked = removed.value;
+                tracked.session.deinit();
+            }
+
+            var session = try LinuxKrb5Session.init(&self.api, self.target_name, request.mechanism);
+            errdefer session.deinit();
+
+            const step = try session.step(allocator, null);
+            errdefer allocator.free(step.token);
+
+            if (!step.complete) {
+                try self.sessions.put(request.session_id, .{
+                    .session = session,
+                    .last_seen_ms = std.time.milliTimestamp(),
+                });
+            }
+
+            return step.token;
+        }
+
+        var tracked = self.sessions.fetchRemove(request.session_id) orelse return error.GssSessionNotFound;
+        errdefer tracked.value.session.deinit();
+
+        if (tracked.value.session.mechanism != request.mechanism) return error.GssSessionMechanismMismatch;
+
+        const step = try tracked.value.session.step(allocator, request.server_token);
+        errdefer allocator.free(step.token);
+
+        if (!step.complete) {
+            try self.sessions.put(request.session_id, .{
+                .session = tracked.value.session,
+                .last_seen_ms = std.time.milliTimestamp(),
+            });
+        } else {
+            tracked.value.session.deinit();
+        }
+
+        return step.token;
+    }
+
+    fn pruneStaleSessions(self: *Self) void {
+        const cutoff = std.time.milliTimestamp() - GSS_SESSION_TTL_MS;
+        var stale_keys: [GSS_MAX_SESSIONS]u64 = undefined;
+        var stale_count: usize = 0;
+
+        var it = self.sessions.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.last_seen_ms <= cutoff and stale_count < stale_keys.len) {
+                stale_keys[stale_count] = entry.key_ptr.*;
+                stale_count += 1;
+            }
+        }
+
+        for (stale_keys[0..stale_count]) |key| {
+            if (self.sessions.fetchRemove(key)) |removed| {
+                var tracked = removed.value;
+                tracked.session.deinit();
+            }
+        }
+    }
+} else struct {
+    pub fn init(_: std.mem.Allocator, _: LinuxKrb5ProviderConfig) !@This() {
+        return error.UnsupportedLinuxKrb5ProviderPlatform;
+    }
+
+    pub fn deinit(_: *@This()) void {}
+
+    pub fn authOptions(_: *@This(), base: auth_options.AuthOptions) auth_options.AuthOptions {
+        return base;
+    }
+};
+
+pub fn linuxKrb5TokenProvider(
+    allocator: std.mem.Allocator,
+    config: LinuxKrb5ProviderConfig,
+) !LinuxKrb5Provider {
+    return LinuxKrb5Provider.init(allocator, config);
+}
+
+fn isGssError(major: u32) bool {
+    return (major & 0xFF00_0000) != 0;
+}
+
+fn takeGssBuffer(api: anytype, allocator: std.mem.Allocator, buffer: anytype) ![]u8 {
+    const result = if (buffer.length == 0 or buffer.value == null)
+        try allocator.dupe(u8, &.{})
+    else blk: {
+        const bytes: [*]const u8 = @ptrCast(buffer.value.?);
+        break :blk try allocator.dupe(u8, bytes[0..buffer.length]);
+    };
+
+    var minor: u32 = 0;
+    _ = api.gss_release_buffer(&minor, buffer);
+    return result;
+}
+
+fn logGssError(api: anytype, prefix: []const u8, major: u32, minor: u32) void {
+    std.log.err("{s}: major={d} ({s}) minor={d} ({s})", .{
+        prefix,
+        major,
+        statusMessages(api, major, 1),
+        minor,
+        statusMessages(api, minor, 2),
+    });
+}
+
+fn statusMessages(api: anytype, status: u32, status_type: i32) []const u8 {
+    if (builtin.os.tag != .linux) return "unsupported";
+
+    var buffer: [512]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    const writer = fbs.writer();
+    var message_context: u32 = 0;
+    var first = true;
+
+    while (true) {
+        var minor: u32 = 0;
+        var msg_buf = if (builtin.os.tag == .linux) @TypeOf(api).GssBufferDesc{ .length = 0, .value = null } else unreachable;
+        const major = api.gss_display_status(
+            &minor,
+            status,
+            status_type,
+            null,
+            &message_context,
+            &msg_buf,
+        );
+
+        if (msg_buf.length != 0 and msg_buf.value != null) {
+            if (!first) writer.writeAll("; ") catch break;
+            const bytes: [*]const u8 = @ptrCast(msg_buf.value.?);
+            writer.writeAll(bytes[0..msg_buf.length]) catch break;
+            first = false;
+        }
+
+        var release_minor: u32 = 0;
+        _ = api.gss_release_buffer(&release_minor, &msg_buf);
+
+        if (isGssError(major) or message_context == 0) break;
+    }
+
+    if (fbs.pos == 0) return "code";
+    return fbs.getWritten();
+}
+
+test "linux krb5 token provider is unsupported on non-linux targets" {
+    if (builtin.os.tag == .linux) return error.SkipZigTest;
+
+    try std.testing.expectError(
+        error.UnsupportedLinuxKrb5ProviderPlatform,
+        linuxKrb5TokenProvider(std.testing.allocator, .{ .host = "db.internal" }),
+    );
+}

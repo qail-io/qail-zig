@@ -49,7 +49,7 @@ The main remaining policy difference is narrower now:
 - `qail-zig` now rejects `.raw` and nested procedural/raw escape hatches on the public driver path by default.
 - On TLS connections, `qail-zig` now treats connection-derived `tls-server-end-point` bytes as authoritative instead of allowing caller-supplied binding overrides.
 - `qail-zig` now also matches libpq-style `gssencmode` preface semantics and resolves hostnames across plain, TLS, async, and GSSENC-preface connect paths instead of assuming IPv4 literals.
-- `qail-zig` now ships Linux Kerberos environment preflight diagnostics (`linuxKrb5Preflight`) so enterprise-auth setup failures can be surfaced before any token callback is invoked.
+- `qail-zig` now ships Linux Kerberos environment preflight diagnostics (`linuxKrb5Preflight`) and a built-in Linux Kerberos provider (`linuxKrb5TokenProvider`) via runtime GSSAPI loading on Linux.
 - `qail-zig` now also exposes a session-aware `GssTokenProviderEx` callback shape, which removes the old API limitation that prevented Rust-style stateful GSS provider implementations.
 - Typed RLS helpers and typed policy parsing are now present on the Zig side, including normalization of common wrapped `current_setting(...)` forms emitted by `pg_dump`.
 - The old raw nested-query and raw policy-SQL string fields have been removed from the Zig AST shape entirely; trusted compatibility now flows through internal helper modules and raw AST variants that the public runtime gate already rejects.
@@ -57,7 +57,6 @@ The main remaining policy difference is narrower now:
 The main remaining enterprise-auth gap is narrower now:
 
 - accepted `GSSENCRequest` still fails closed because the encrypted GSS session stream is not implemented yet
-- Zig still depends on caller-supplied GSS token providers instead of shipping the built-in Linux Kerberos provider/session stack that exists in `qail.rs`
 
 ## PG Driver Focus
 
