@@ -397,8 +397,14 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
         for (cte.columns) |c| {
             if (checkIdent("cte.column", c)) |err| return err;
         }
+        if (cte.source_table) |table| {
+            if (checkIdent("cte.source_table", table)) |err| return err;
+        }
         if (cte.base_sql.len != 0) return rawError("cte.base_sql");
         if (cte.base_query) |query| {
+            if (validateCmd(query)) |err| return err;
+        }
+        if (cte.recursive_query) |query| {
             if (validateCmd(query)) |err| return err;
         }
     }

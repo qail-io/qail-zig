@@ -20,6 +20,7 @@ pub const Expr = ast.Expr;
 pub const Operator = ast.Operator;
 pub const Value = ast.Value;
 pub const OwnedExpr = ast.OwnedExpr;
+pub const OwnedPolicyDef = ast.OwnedPolicyDef;
 
 pub const PgDriver = driver.PgDriver;
 pub const PgRow = driver.PgRow;

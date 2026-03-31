@@ -1,8 +1,11 @@
 const std = @import("std");
+const cmd_mod = @import("cmd.zig");
 const expr_mod = @import("expr.zig");
 const values = @import("values.zig");
 const binary_ops = @import("builders/binary.zig");
 
+const QailCmd = cmd_mod.QailCmd;
+const PolicyDef = cmd_mod.PolicyDef;
 const Expr = expr_mod.Expr;
 const Value = values.Value;
 const Allocator = std.mem.Allocator;
@@ -182,6 +185,134 @@ pub const OwnedExpr = struct {
     }
 };
 
+fn replaceOwnedExpr(slot: *?OwnedExpr, policy_slot: *?Expr, next: OwnedExpr) void {
+    if (slot.*) |*existing| existing.deinit();
+    slot.* = next;
+    policy_slot.* = slot.*.?.value();
+}
+
+/// Allocator-owned policy builder that keeps typed predicate trees alive
+/// for as long as the policy is in use.
+pub const OwnedPolicyDef = struct {
+    allocator: Allocator,
+    policy: PolicyDef,
+    using_owned: ?OwnedExpr = null,
+    with_check_owned: ?OwnedExpr = null,
+
+    pub fn create(allocator: Allocator, name: []const u8, table: []const u8) !OwnedPolicyDef {
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+
+        const owned_table = try allocator.dupe(u8, table);
+        errdefer allocator.free(owned_table);
+
+        return .{
+            .allocator = allocator,
+            .policy = PolicyDef.create(owned_name, owned_table),
+        };
+    }
+
+    pub fn deinit(self: *OwnedPolicyDef) void {
+        self.allocator.free(self.policy.name);
+        self.allocator.free(self.policy.table);
+        if (self.policy.role) |role| self.allocator.free(role);
+        if (self.using_owned) |*owned| owned.deinit();
+        if (self.with_check_owned) |*owned| owned.deinit();
+        self.* = undefined;
+    }
+
+    pub fn value(self: *const OwnedPolicyDef) PolicyDef {
+        return self.policy;
+    }
+
+    pub fn cmd(self: *const OwnedPolicyDef) QailCmd {
+        return QailCmd.createPolicy(self.policy);
+    }
+
+    pub fn forAll(self: *OwnedPolicyDef) *OwnedPolicyDef {
+        self.policy.target = .all;
+        return self;
+    }
+
+    pub fn forSelect(self: *OwnedPolicyDef) *OwnedPolicyDef {
+        self.policy.target = .select;
+        return self;
+    }
+
+    pub fn forInsert(self: *OwnedPolicyDef) *OwnedPolicyDef {
+        self.policy.target = .insert;
+        return self;
+    }
+
+    pub fn forUpdate(self: *OwnedPolicyDef) *OwnedPolicyDef {
+        self.policy.target = .update;
+        return self;
+    }
+
+    pub fn forDelete(self: *OwnedPolicyDef) *OwnedPolicyDef {
+        self.policy.target = .delete;
+        return self;
+    }
+
+    pub fn restrictive(self: *OwnedPolicyDef) *OwnedPolicyDef {
+        self.policy.permissiveness = .restrictive;
+        return self;
+    }
+
+    pub fn toRole(self: *OwnedPolicyDef, role_name: []const u8) !*OwnedPolicyDef {
+        const owned_role = try self.allocator.dupe(u8, role_name);
+        errdefer self.allocator.free(owned_role);
+
+        if (self.policy.role) |old_role| self.allocator.free(old_role);
+        self.policy.role = owned_role;
+        return self;
+    }
+
+    pub fn usingExpr(self: *OwnedPolicyDef, predicate: Expr) !*OwnedPolicyDef {
+        const next = try OwnedExpr.init(self.allocator, predicate);
+        replaceOwnedExpr(&self.using_owned, &self.policy.using_expr, next);
+        return self;
+    }
+
+    pub fn withCheckExpr(self: *OwnedPolicyDef, predicate: Expr) !*OwnedPolicyDef {
+        const next = try OwnedExpr.init(self.allocator, predicate);
+        replaceOwnedExpr(&self.with_check_owned, &self.policy.with_check_expr, next);
+        return self;
+    }
+
+    pub fn usingOwned(self: *OwnedPolicyDef, predicate: *const OwnedExpr) !*OwnedPolicyDef {
+        return self.usingExpr(predicate.value());
+    }
+
+    pub fn withCheckOwned(self: *OwnedPolicyDef, predicate: *const OwnedExpr) !*OwnedPolicyDef {
+        return self.withCheckExpr(predicate.value());
+    }
+
+    pub fn usingTenantCheck(self: *OwnedPolicyDef, column: []const u8, session_var: []const u8, cast_type: []const u8) !*OwnedPolicyDef {
+        const next = try tenantCheck(self.allocator, column, session_var, cast_type);
+        replaceOwnedExpr(&self.using_owned, &self.policy.using_expr, next);
+        return self;
+    }
+
+    pub fn withCheckTenantCheck(self: *OwnedPolicyDef, column: []const u8, session_var: []const u8, cast_type: []const u8) !*OwnedPolicyDef {
+        const next = try tenantCheck(self.allocator, column, session_var, cast_type);
+        replaceOwnedExpr(&self.with_check_owned, &self.policy.with_check_expr, next);
+        return self;
+    }
+
+    pub fn usingSessionBoolCheck(self: *OwnedPolicyDef, session_var: []const u8) !*OwnedPolicyDef {
+        const next = try sessionBoolCheck(self.allocator, session_var);
+        replaceOwnedExpr(&self.using_owned, &self.policy.using_expr, next);
+        return self;
+    }
+
+    pub fn withCheckSessionBoolCheck(self: *OwnedPolicyDef, session_var: []const u8) !*OwnedPolicyDef {
+        const next = try sessionBoolCheck(self.allocator, session_var);
+        replaceOwnedExpr(&self.with_check_owned, &self.policy.with_check_expr, next);
+        return self;
+    }
+};
+
 pub fn tenantCheck(allocator: Allocator, column: []const u8, session_var: []const u8, cast_type: []const u8) !OwnedExpr {
     const session_arg = Expr.str(session_var);
     const args = [_]Expr{session_arg};
@@ -269,4 +400,39 @@ test "policy helpers combine owned expressions with or" {
     const expr = combined.value();
     try std.testing.expect(expr == .binary);
     try std.testing.expectEqual(expr_mod.BinaryOp.@"or", expr.binary.op);
+}
+
+test "owned policy definition keeps tenant predicates alive" {
+    var policy = try OwnedPolicyDef.create(std.testing.allocator, "orders_tenant_isolation", "orders");
+    defer policy.deinit();
+
+    _ = try policy
+        .restrictive()
+        .toRole("app_user");
+    _ = try policy.usingTenantCheck("tenant_id", "app.current_tenant_id", "uuid");
+    _ = try policy.withCheckTenantCheck("tenant_id", "app.current_tenant_id", "uuid");
+
+    const value = policy.value();
+    try std.testing.expectEqualStrings("orders_tenant_isolation", value.name);
+    try std.testing.expectEqualStrings("orders", value.table);
+    try std.testing.expectEqual(cmd_mod.PolicyPermissiveness.restrictive, value.permissiveness);
+    try std.testing.expectEqualStrings("app_user", value.role.?);
+    try std.testing.expect(value.using_expr != null);
+    try std.testing.expect(value.with_check_expr != null);
+    try std.testing.expect(value.using_expr.?.binary.right.* == .cast);
+    try std.testing.expect(value.with_check_expr.?.binary.right.* == .cast);
+}
+
+test "owned policy command exposes typed create policy cmd" {
+    var policy = try OwnedPolicyDef.create(std.testing.allocator, "admin_bypass", "secrets");
+    defer policy.deinit();
+
+    _ = try policy.forSelect().usingSessionBoolCheck("app.is_super_admin");
+    const cmd = policy.cmd();
+
+    try std.testing.expectEqual(cmd_mod.CmdKind.create_policy, cmd.kind);
+    try std.testing.expectEqualStrings("secrets", cmd.table);
+    try std.testing.expect(cmd.policy_def != null);
+    try std.testing.expect(cmd.policy_def.?.using_expr != null);
+    try std.testing.expect(cmd.policy_def.?.using_expr.?.binary.left.* == .cast);
 }

@@ -13,6 +13,7 @@ const render = @import("postgres/render.zig");
 const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");
+    pub const policy = @import("../ast/policy.zig");
     pub const values = @import("../ast/values.zig");
     pub const operators = @import("../ast/operators.zig");
     pub const QailCmd = cmd.QailCmd;
@@ -499,6 +500,26 @@ test "transpile typed policy predicates" {
 
     try std.testing.expectEqualStrings(
         "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = 42) WITH CHECK (tenant_id = 42)",
+        sql,
+    );
+}
+
+test "transpile owned policy definition helpers" {
+    var policy = try ast.policy.OwnedPolicyDef.create(std.testing.allocator, "orders_tenant_isolation", "orders");
+    defer policy.deinit();
+
+    _ = try policy
+        .restrictive()
+        .toRole("app_user");
+    _ = try policy.usingTenantCheck("tenant_id", "app.current_tenant_id", "uuid");
+    _ = try policy.withCheckTenantCheck("tenant_id", "app.current_tenant_id", "uuid");
+
+    const cmd = policy.cmd();
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = current_setting('app.current_tenant_id')::uuid) WITH CHECK (tenant_id = current_setting('app.current_tenant_id')::uuid)",
         sql,
     );
 }

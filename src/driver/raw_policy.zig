@@ -170,6 +170,9 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
         if (cte.base_query) |query| {
             if (cmdHasTrustedOnlyEscapeHatch(query)) return true;
         }
+        if (cte.recursive_query) |query| {
+            if (cmdHasTrustedOnlyEscapeHatch(query)) return true;
+        }
     }
     for (cmd.set_ops) |set_op| {
         if (set_op.query_sql.len != 0) return true;
@@ -262,6 +265,16 @@ test "raw policy allows typed cte queries in public ast commands" {
     const source = QailCmd.get("orders").select(&.{Expr.col("user_id")});
     const ctes = [_]ast.CTEDef{ast.CTEDef.fromQuery("active_orders", &source)};
     const cmd = QailCmd.get("active_orders").withCtes(&ctes);
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
+test "raw policy allows typed recursive cte queries in public ast commands" {
+    const base = QailCmd.get("users").select(&.{Expr.col("id")});
+    const recursive = QailCmd.get("active_users").select(&.{Expr.col("id")});
+    const ctes = [_]ast.CTEDef{
+        ast.CTEDef.fromQuery("active_users", &base).recursiveUnionAll(&recursive).fromSourceTable("users"),
+    };
+    const cmd = QailCmd.get("active_users").withCtes(&ctes);
     try rejectPublicRuntimeCmd(&cmd);
 }
 

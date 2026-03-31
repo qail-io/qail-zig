@@ -187,6 +187,8 @@ pub const CTEDef = struct {
     recursive: bool = false,
     columns: []const []const u8 = &.{},
     base_query: ?*const QailCmd = null,
+    recursive_query: ?*const QailCmd = null,
+    source_table: ?[]const u8 = null,
     // Trusted/internal raw SQL fallback for legacy callers.
     base_sql: []const u8 = "",
 
@@ -203,6 +205,19 @@ pub const CTEDef = struct {
             .columns = columns,
             .base_query = query,
         };
+    }
+
+    pub fn recursiveUnionAll(self: CTEDef, query: *const QailCmd) CTEDef {
+        var cte = self;
+        cte.recursive = true;
+        cte.recursive_query = query;
+        return cte;
+    }
+
+    pub fn fromSourceTable(self: CTEDef, table: []const u8) CTEDef {
+        var cte = self;
+        cte.source_table = table;
+        return cte;
     }
 };
 

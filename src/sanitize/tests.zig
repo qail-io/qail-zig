@@ -47,7 +47,7 @@ test "sanitize: long identifier rejected" {
 
 test "sanitize: typed source query passes" {
     const source = QailCmd.get("users").select(&.{Expr.col("id")});
-    const cmd = QailCmd.createView("user_ids").withSourceQuery(&source);
+    const cmd = QailCmd.createViewFromQuery("user_ids", &source);
     try std.testing.expect(validateCmd(&cmd) == null);
 }
 
@@ -55,6 +55,16 @@ test "sanitize: typed cte query passes" {
     const source = QailCmd.get("orders").select(&.{Expr.col("user_id")});
     const ctes = [_]ast.CTEDef{ast.CTEDef.fromQuery("active_orders", &source)};
     const cmd = QailCmd.get("active_orders").withCtes(&ctes);
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: typed recursive cte query passes" {
+    const base = QailCmd.get("users").select(&.{Expr.col("id")});
+    const recursive = QailCmd.get("active_users").select(&.{Expr.col("id")});
+    const ctes = [_]ast.CTEDef{
+        ast.CTEDef.fromQuery("active_users", &base).recursiveUnionAll(&recursive).fromSourceTable("users"),
+    };
+    const cmd = QailCmd.get("active_users").withCtes(&ctes);
     try std.testing.expect(validateCmd(&cmd) == null);
 }
 

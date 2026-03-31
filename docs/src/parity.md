@@ -4,7 +4,7 @@ qail-zig tracks qail.rs as the reference implementation for PostgreSQL driver be
 
 ## Current Snapshot
 
-As of `2026-03-28`, the narrow AST/codegen parity checks against a local `qail.rs` checkout are green:
+As of `2026-03-31`, the narrow AST/codegen parity checks against a local `qail.rs` checkout are green:
 
 - `./scripts/check_codegen_sync.sh ../qail.rs` -> `codegen sync check passed`
 - `./scripts/check_parity.sh ../qail.rs` -> `AST actions: rust=75 zig=76`, `Encoder actions: rust=57 zig=76`, `parity check passed`
@@ -25,6 +25,8 @@ That means the Rust-driven AST porting/codegen path is working for its current s
 - RLS helper APIs
 - startup/auth policy controls
 - protocol hardening suites
+- typed policy parsing and diff normalization for common `pg_dump` wrappers
+- typed recursive CTE AST support and typed source-query constructors for views/materialized views
 
 ## Current Reality
 
@@ -40,11 +42,11 @@ Parity is not complete across the entire qail.rs ecosystem. The largest gaps rem
 
 ## Important Policy Delta
 
-There is still one meaningful runtime policy difference between the repos:
+The main remaining policy difference is narrower now:
 
-- `qail.rs` removed raw runtime SQL APIs from the normal execution path.
-- `qail-zig` still carries `.raw` in the AST for trusted/local use.
-- Current mitigation: `validateAst` rejects `.raw` and other procedural escape hatches for untrusted or deserialized AST ingress.
+- `qail.rs` removed raw runtime SQL APIs from the normal execution path entirely.
+- `qail-zig` now rejects `.raw` and nested procedural/raw escape hatches on the public driver path by default, but still keeps some trusted/internal compatibility fields in the AST.
+- Typed RLS helpers and typed policy parsing are now present on the Zig side, including normalization of common wrapped `current_setting(...)` forms emitted by `pg_dump`.
 
 ## PG Driver Focus
 

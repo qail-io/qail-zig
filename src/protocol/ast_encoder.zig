@@ -1018,6 +1018,12 @@ fn writeCtePrefix(writer: anytype, cmd: *const QailCmd) !void {
         } else {
             return error.MissingCteQuery;
         }
+
+        if (cte.recursive and cte.recursive_query != null) {
+            try writer.writeAll(" UNION ALL ");
+            try writeNestedQueryableCmd(writer, cte.recursive_query.?);
+        }
+
         try writer.writeAll(")");
     }
 
@@ -1669,7 +1675,7 @@ test "ast encoder create view uses typed source query" {
 
     const source_cols = [_]Expr{ Expr.col("id"), Expr.col("email") };
     const source = QailCmd.get("users").select(&source_cols);
-    const cmd = QailCmd.createView("user_emails").withSourceQuery(&source);
+    const cmd = QailCmd.createViewFromQuery("user_emails", &source);
 
     var sql_buf: [512]u8 = undefined;
     var writer = io.FixedBufferWriter.init(&sql_buf);
@@ -1677,6 +1683,24 @@ test "ast encoder create view uses typed source query" {
 
     try std.testing.expectEqualStrings(
         "CREATE VIEW user_emails AS SELECT id, email FROM users",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder create materialized view uses typed source query constructor" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const source_cols = [_]Expr{Expr.col("id")};
+    const source = QailCmd.get("users").select(&source_cols);
+    const cmd = QailCmd.createMaterializedViewFromQuery("mv_user_ids", &source);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "CREATE MATERIALIZED VIEW mv_user_ids AS SELECT id FROM users",
         writer.getWritten(),
     );
 }
@@ -1697,6 +1721,30 @@ test "ast encoder cte uses typed base query" {
 
     try std.testing.expectEqualStrings(
         "WITH active_orders AS (SELECT user_id FROM orders) SELECT user_id FROM active_orders",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder recursive cte uses typed recursive query" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const base_cols = [_]Expr{Expr.col("id")};
+    const recursive_cols = [_]Expr{Expr.col("id")};
+    const outer_cols = [_]Expr{Expr.col("id")};
+    const base = QailCmd.get("users").select(&base_cols);
+    const recursive = QailCmd.get("active_users").select(&recursive_cols);
+    const ctes = [_]ast.cmd.CTEDef{
+        ast.cmd.CTEDef.fromQuery("active_users", &base).recursiveUnionAll(&recursive),
+    };
+    const cmd = QailCmd.get("active_users").select(&outer_cols).withCtes(&ctes);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "WITH RECURSIVE active_users AS (SELECT id FROM users UNION ALL SELECT id FROM active_users) SELECT id FROM active_users",
         writer.getWritten(),
     );
 }

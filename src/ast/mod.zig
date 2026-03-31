@@ -48,6 +48,7 @@ pub const TriggerDef = expr.TriggerDef;
 pub const Cage = cages.Cage;
 pub const CageKind = cages.CageKind;
 pub const OwnedExpr = policy.OwnedExpr;
+pub const OwnedPolicyDef = policy.OwnedPolicyDef;
 
 test {
     @import("std").testing.refAllDecls(@This());

@@ -2,6 +2,7 @@
 //
 // Port of Rust qail-core/src/ast/cmd.rs
 
+const std = @import("std");
 const expr = @import("expr.zig");
 const operators = @import("operators.zig");
 const values = @import("values.zig");
@@ -245,6 +246,11 @@ pub const QailCmd = struct {
     /// CREATE VIEW
     pub fn createView(name: []const u8) QailCmd {
         return .{ .kind = .create_view, .table = name };
+    }
+
+    /// CREATE VIEW name AS <typed query>
+    pub fn createViewFromQuery(name: []const u8, query: *const QailCmd) QailCmd {
+        return createView(name).withSourceQuery(query);
     }
 
     /// DROP VIEW
@@ -682,6 +688,11 @@ pub const QailCmd = struct {
         return .{ .kind = .create_materialized_view, .table = name };
     }
 
+    /// CREATE MATERIALIZED VIEW name AS <typed query>
+    pub fn createMaterializedViewFromQuery(name: []const u8, query: *const QailCmd) QailCmd {
+        return createMaterializedView(name).withSourceQuery(query);
+    }
+
     /// REFRESH MATERIALIZED VIEW
     pub fn refreshMaterializedView(name: []const u8) QailCmd {
         return .{ .kind = .refresh_materialized_view, .table = name };
@@ -709,3 +720,30 @@ pub const QailCmd = struct {
         return .{ .kind = .copy_out, .table = table };
     }
 };
+
+test "typed create view constructor wires source query" {
+    const source_cols = [_]Expr{Expr.col("id")};
+    const source = QailCmd.get("users").select(&source_cols);
+    const cmd = QailCmd.createViewFromQuery("user_ids", &source);
+
+    try std.testing.expectEqual(CmdKind.create_view, cmd.kind);
+    try std.testing.expectEqualStrings("user_ids", cmd.table);
+    try std.testing.expect(cmd.source_query != null);
+    try std.testing.expect(cmd.source_query.? == &source);
+}
+
+test "typed create materialized view constructor wires source query" {
+    const source_cols = [_]Expr{Expr.col("id")};
+    const source = QailCmd.get("users").select(&source_cols);
+    const cmd = QailCmd.createMaterializedViewFromQuery("mv_user_ids", &source);
+
+    try std.testing.expectEqual(CmdKind.create_materialized_view, cmd.kind);
+    try std.testing.expectEqualStrings("mv_user_ids", cmd.table);
+    try std.testing.expect(cmd.source_query != null);
+    try std.testing.expect(cmd.source_query.? == &source);
+}
+
+test "cte shape includes recursive query fields" {
+    try std.testing.expect(@hasField(CTEDef, "recursive_query"));
+    try std.testing.expect(@hasField(CTEDef, "source_table"));
+}
