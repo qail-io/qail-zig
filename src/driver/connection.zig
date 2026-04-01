@@ -6,6 +6,7 @@ const std = @import("std");
 const net = @import("../compat/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const io_backend_mod = @import("io_backend.zig");
+const message_limits = @import("message_limits.zig");
 
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
@@ -77,7 +78,7 @@ pub const Connection = struct {
         const length = std.mem.readInt(u32, self.read_buffer[self.read_pos + 1 ..][0..4], .big);
 
         // Read full payload
-        const payload_len = length - 4;
+        const payload_len = try message_limits.validateLengthField(length, self.read_buffer.len - 1);
         try self.ensureRead(5 + payload_len);
 
         const payload = self.read_buffer[self.read_pos + 5 .. self.read_pos + 5 + payload_len];
@@ -87,6 +88,7 @@ pub const Connection = struct {
     }
 
     fn ensureRead(self: *Connection, needed: usize) !void {
+        if (needed > self.read_buffer.len) return error.MessageTooLarge;
         while (self.read_len - self.read_pos < needed) {
             // Compact buffer if needed
             if (self.read_pos > 0) {
@@ -306,7 +308,8 @@ pub const Connection = struct {
                     std.debug.print("Server error: {s}\n", .{err_info.message orelse "unknown"});
                     return error.ServerError;
                 },
-                else => {},
+                .notice => {},
+                else => return error.UnexpectedStartupMessageType,
             }
         }
     }

@@ -19,7 +19,7 @@ pub fn encodeCopyRow(allocator: std.mem.Allocator, row: []const ?[]const u8) ![]
 }
 
 pub fn sendCopyData(conn: anytype, data: []const u8) !void {
-    if (data.len > std.math.maxInt(u32) - 4) return error.CopyDataTooLarge;
+    if (data.len > std.math.maxInt(i32) - 4) return error.CopyDataTooLarge;
     const len: u32 = @intCast(data.len + 4);
     var header: [5]u8 = undefined;
     header[0] = 'd';
@@ -90,4 +90,22 @@ test "quoteQualifiedIdentifierAlloc quotes qualified identifiers" {
 
 test "quoteQualifiedIdentifierAlloc rejects invalid identifier" {
     try std.testing.expectError(error.InvalidIdentifier, quoteQualifiedIdentifierAlloc(std.testing.allocator, "users;drop"));
+}
+
+test "sendCopyData rejects payload above i32 wire limit" {
+    const MockConn = struct {
+        send_count: usize = 0,
+
+        pub fn send(self: *@This(), bytes: []const u8) !void {
+            _ = bytes;
+            self.send_count += 1;
+        }
+    };
+
+    var conn = MockConn{};
+    const too_large_len = @as(usize, std.math.maxInt(i32)) - 3;
+    const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.CopyDataTooLarge, sendCopyData(&conn, payload));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_count);
 }

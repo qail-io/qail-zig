@@ -306,7 +306,7 @@ pub fn buildStandbyStatusUpdatePayload(
 }
 
 pub fn sendCopyData(conn: anytype, data: []const u8) !void {
-    if (data.len > std.math.maxInt(u32) - 4) return error.CopyDataTooLarge;
+    if (data.len > std.math.maxInt(i32) - 4) return error.CopyDataTooLarge;
     const len: u32 = @intCast(data.len + 4);
     var header: [5]u8 = undefined;
     header[0] = 'd';
@@ -409,7 +409,7 @@ test "sendCopyData rejects oversized payload" {
     };
 
     var conn = MockConn{};
-    const too_large_len = @as(usize, std.math.maxInt(u32)) - 3;
+    const too_large_len = @as(usize, std.math.maxInt(i32)) - 3;
     const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
 
     try std.testing.expectError(error.CopyDataTooLarge, sendCopyData(&conn, payload));

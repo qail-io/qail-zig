@@ -89,12 +89,18 @@ pub const Decoder = struct {
         self.pos += len;
     }
 
+    fn peekDataRowColumnCount(self: *const Decoder) !usize {
+        if (self.pos + 2 > self.data.len) return error.EndOfStream;
+        return @intCast(std.mem.readInt(u16, self.data[self.pos..][0..2], .big));
+    }
+
     // ==================== Message Parsing ====================
 
     /// Read message header (type + length), returns (msg_type, payload_length)
     pub fn readHeader(self: *Decoder) !struct { msg_type: BackendMessage, length: u32 } {
         const msg_type_byte = try self.readByte();
         const length = try self.readU32();
+        if (length < 4) return error.InvalidMessageLength;
         return .{
             .msg_type = @enumFromInt(msg_type_byte),
             .length = length,
@@ -104,7 +110,31 @@ pub const Decoder = struct {
     /// Parse AuthenticationOk/etc message
     pub fn parseAuthentication(self: *Decoder) !AuthType {
         const auth_type = try self.readU32();
-        return @enumFromInt(auth_type);
+        const parsed: AuthType = @enumFromInt(auth_type);
+
+        switch (parsed) {
+            // Fixed-size auth variants: only 4-byte auth code is valid.
+            .ok,
+            .kerberos_v5,
+            .cleartext_password,
+            .scm_credential,
+            .gss,
+            .sspi,
+            => if (self.remaining() != 0) return error.InvalidAuthenticationPayload,
+
+            // MD5 variant: 4-byte auth code + 4-byte salt.
+            .md5_password => if (self.remaining() != 4) return error.InvalidAuthenticationPayload,
+
+            // Variable-size variants parsed by dedicated helpers.
+            .sasl,
+            .sasl_continue,
+            .sasl_final,
+            .gss_continue,
+            => {},
+            else => {},
+        }
+
+        return parsed;
     }
 
     /// Parse MD5 salt from AuthenticationMD5Password payload.
@@ -152,6 +182,7 @@ pub const Decoder = struct {
     pub fn parseParameterStatus(self: *Decoder) !struct { name: []const u8, value: []const u8 } {
         const name = try self.readCString();
         const value = try self.readCString();
+        if (self.remaining() != 0) return error.InvalidParameterStatusPayload;
         return .{ .name = name, .value = value };
     }
 
@@ -159,6 +190,7 @@ pub const Decoder = struct {
     pub fn parseBackendKeyData(self: *Decoder) !struct { process_id: u32, secret_key: u32 } {
         const process_id = try self.readU32();
         const secret_key = try self.readU32();
+        if (self.remaining() != 0) return error.InvalidBackendKeyDataPayload;
         return .{ .process_id = process_id, .secret_key = secret_key };
     }
 
@@ -182,6 +214,8 @@ pub const Decoder = struct {
     /// Payload format: u8(overall_format) + i16(column_count) + i16[column_count](column_formats)
     pub fn parseCopyResponse(self: *Decoder, allocator: std.mem.Allocator) !struct { format: u8, column_formats: []u8 } {
         const format = try self.readByte();
+        if (format != 0 and format != 1) return error.InvalidCopyResponse;
+
         const raw_count = try self.readI16();
         if (raw_count < 0) return error.InvalidCopyResponse;
 
@@ -204,13 +238,25 @@ pub const Decoder = struct {
 
     /// Parse ReadyForQuery message
     pub fn parseReadyForQuery(self: *Decoder) !TransactionStatus {
+        if (self.remaining() != 1) return error.InvalidReadyForQueryPayload;
         const status = try self.readByte();
-        return @enumFromInt(status);
+        return switch (status) {
+            'I' => .idle,
+            'T' => .in_transaction,
+            'E' => .failed,
+            else => error.InvalidReadyForQueryStatus,
+        };
     }
 
     /// Parse RowDescription message
     pub fn parseRowDescription(self: *Decoder, allocator: std.mem.Allocator) ![]FieldDescription {
-        const field_count = try self.readU16();
+        const raw_field_count = try self.readI16();
+        if (raw_field_count < 0) return error.InvalidRowDescriptionPayload;
+        const field_count: usize = @intCast(raw_field_count);
+
+        const min_field_bytes = std.math.mul(usize, field_count, 19) catch return error.InvalidRowDescriptionPayload;
+        if (self.remaining() < min_field_bytes) return error.InvalidRowDescriptionPayload;
+
         var fields = try allocator.alloc(FieldDescription, field_count);
         errdefer allocator.free(fields);
 
@@ -222,10 +268,15 @@ pub const Decoder = struct {
                 .type_oid = try self.readU32(),
                 .type_len = try self.readI16(),
                 .type_modifier = try self.readI32(),
-                .format_code = try self.readU16(),
+                .format_code = blk: {
+                    const format_code = try self.readU16();
+                    if (format_code != 0 and format_code != 1) return error.InvalidRowDescriptionPayload;
+                    break :blk format_code;
+                },
             };
         }
 
+        if (self.remaining() != 0) return error.InvalidRowDescriptionPayload;
         return fields;
     }
 
@@ -234,20 +285,37 @@ pub const Decoder = struct {
     /// Returned byte slices alias the decoder input buffer and are only valid
     /// until the underlying message buffer is reused.
     pub fn parseDataRow(self: *Decoder, allocator: std.mem.Allocator) ![]?[]const u8 {
-        const col_count = try self.readU16();
-        var columns = try allocator.alloc(?[]const u8, col_count);
+        const col_count = try self.peekDataRowColumnCount();
+        const columns = try allocator.alloc(?[]const u8, col_count);
         errdefer allocator.free(columns);
 
+        _ = try self.parseDataRowInto(columns);
+        return columns;
+    }
+
+    /// Parse DataRow payload into caller-provided column slice.
+    ///
+    /// Returned slice aliases the provided `columns` storage and each non-null
+    /// value aliases the decoder input payload.
+    pub fn parseDataRowInto(self: *Decoder, columns: []?[]const u8) ![]?[]const u8 {
+        const raw_count = try self.readU16();
+        const col_count: usize = @intCast(raw_count);
+        if (columns.len < col_count) return error.ColumnBufferTooSmall;
+
+        const out = columns[0..col_count];
         for (0..col_count) |i| {
             const len = try self.readI32();
-            if (len < 0) {
-                columns[i] = null; // NULL value
+            if (len == -1) {
+                out[i] = null; // NULL value
+            } else if (len < -1) {
+                return error.InvalidDataRowPayload;
             } else {
-                columns[i] = try self.readBytes(@intCast(len));
+                out[i] = try self.readBytes(@intCast(len));
             }
         }
 
-        return columns;
+        if (self.remaining() != 0) return error.InvalidDataRowPayload;
+        return out;
     }
 
     /// Parse DataRow message and deep-copy all non-null column bytes.
@@ -267,8 +335,10 @@ pub const Decoder = struct {
 
         for (0..col_count) |i| {
             const len = try self.readI32();
-            if (len < 0) {
+            if (len == -1) {
                 columns[i] = null;
+            } else if (len < -1) {
+                return error.InvalidDataRowPayload;
             } else {
                 const borrowed = try self.readBytes(@intCast(len));
                 columns[i] = try allocator.dupe(u8, borrowed);
@@ -276,12 +346,15 @@ pub const Decoder = struct {
             copied += 1;
         }
 
+        if (self.remaining() != 0) return error.InvalidDataRowPayload;
         return columns;
     }
 
     /// Parse CommandComplete message
     pub fn parseCommandComplete(self: *Decoder) ![]const u8 {
-        return try self.readCString();
+        const tag = try self.readCString();
+        if (self.remaining() != 0) return error.InvalidCommandCompletePayload;
+        return tag;
     }
 
     /// Parse ErrorResponse message
@@ -305,6 +378,7 @@ pub const Decoder = struct {
             }
         }
 
+        if (self.remaining() != 0) return error.InvalidErrorResponsePayload;
         return info;
     }
 };
@@ -320,6 +394,12 @@ test "decode simple message header" {
     try std.testing.expectEqual(@as(u32, 5), header.length);
 }
 
+test "decode simple message header rejects invalid length field" {
+    const data = [_]u8{ 'Z', 0, 0, 0, 3 };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(error.InvalidMessageLength, decoder.readHeader());
+}
+
 test "decode ready for query" {
     const data = [_]u8{'I'}; // Idle
     var decoder = Decoder.init(&data);
@@ -328,12 +408,35 @@ test "decode ready for query" {
     try std.testing.expectEqual(TransactionStatus.idle, status);
 }
 
+test "decode ready for query rejects invalid status byte" {
+    const data = [_]u8{'X'};
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidReadyForQueryStatus, decoder.parseReadyForQuery());
+}
+
+test "decode ready for query rejects trailing bytes" {
+    const data = [_]u8{ 'I', 0 };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidReadyForQueryPayload, decoder.parseReadyForQuery());
+}
+
 test "decode authentication ok" {
     const data = [_]u8{ 0, 0, 0, 0 }; // AuthOk = 0
     var decoder = Decoder.init(&data);
 
     const auth_type = try decoder.parseAuthentication();
     try std.testing.expectEqual(AuthType.ok, auth_type);
+}
+
+test "decode authentication ok rejects trailing bytes" {
+    const data = [_]u8{
+        0, 0, 0, 0,
+        1,
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(error.InvalidAuthenticationPayload, decoder.parseAuthentication());
 }
 
 test "decode authentication md5 salt" {
@@ -345,6 +448,14 @@ test "decode authentication md5 salt" {
 
     const salt = try decoder.parseAuthenticationMd5Salt();
     try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78 }, &salt);
+}
+
+test "decode authentication md5 rejects missing salt bytes" {
+    const data = [_]u8{
+        0, 0, 0, 5,
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(error.InvalidAuthenticationPayload, decoder.parseAuthentication());
 }
 
 test "decode authentication sasl mechanisms" {
@@ -398,6 +509,28 @@ test "decode notification response" {
     try std.testing.expectEqualStrings("hello", notification.payload);
 }
 
+test "decode parameter status rejects trailing bytes" {
+    const data = [_]u8{
+        'a', 0,
+        'b', 0,
+        'x',
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidParameterStatusPayload, decoder.parseParameterStatus());
+}
+
+test "decode backend key data rejects trailing bytes" {
+    const data = [_]u8{
+        0,  0, 0, 1,
+        0,  0, 0, 2,
+        99,
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidBackendKeyDataPayload, decoder.parseBackendKeyData());
+}
+
 test "decode copy response" {
     const data = [_]u8{
         0, // overall format
@@ -412,6 +545,127 @@ test "decode copy response" {
 
     try std.testing.expectEqual(@as(u8, 0), copy.format);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1 }, copy.column_formats);
+}
+
+test "decode copy response rejects invalid overall format" {
+    const data = [_]u8{
+        2, // invalid overall format
+        0,
+        0,
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(error.InvalidCopyResponse, decoder.parseCopyResponse(std.testing.allocator));
+}
+
+test "decode row description rejects negative field count" {
+    const data = [_]u8{
+        255, 255, // -1 fields
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(error.InvalidRowDescriptionPayload, decoder.parseRowDescription(std.testing.allocator));
+}
+
+test "decode row description rejects invalid format code" {
+    const data = [_]u8{
+        0, 1, // field count = 1
+        'i', 'd', 0, // field name
+        0, 0, 0, 1, // table oid
+        0, 1, // column index
+        0, 0, 0, 23, // type oid
+        0, 4, // type len
+        255, 255, 255, 255, // type modifier
+        0, 2, // invalid format code
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(error.InvalidRowDescriptionPayload, decoder.parseRowDescription(std.testing.allocator));
+}
+
+test "decode data row into caller buffer" {
+    const payload = [_]u8{
+        0, 2, // column count
+        0, 0, 0, 1, 'a', // col0 = "a"
+        255, 255, 255, 255, // col1 = NULL
+    };
+    var decoder = Decoder.init(&payload);
+    var scratch = [_]?[]const u8{ null, null };
+    const cols = try decoder.parseDataRowInto(&scratch);
+
+    try std.testing.expectEqual(@as(usize, 2), cols.len);
+    try std.testing.expectEqualStrings("a", cols[0].?);
+    try std.testing.expect(cols[1] == null);
+}
+
+test "decode data row into caller buffer rejects undersized storage" {
+    const payload = [_]u8{
+        0, 2, // column count
+        255, 255, 255, 255, // col0 = NULL
+        255, 255, 255, 255, // col1 = NULL
+    };
+    var decoder = Decoder.init(&payload);
+    var scratch = [_]?[]const u8{null};
+    try std.testing.expectError(error.ColumnBufferTooSmall, decoder.parseDataRowInto(&scratch));
+}
+
+test "decode data row into caller buffer rejects invalid negative length" {
+    const payload = [_]u8{
+        0, 1, // column count
+        255, 255, 255, 254, // -2 (invalid)
+    };
+    var decoder = Decoder.init(&payload);
+    var scratch = [_]?[]const u8{null};
+    try std.testing.expectError(error.InvalidDataRowPayload, decoder.parseDataRowInto(&scratch));
+}
+
+test "decode data row into caller buffer rejects trailing bytes" {
+    const payload = [_]u8{
+        0, 1, // column count
+        0,   0, 0, 1, // len=1
+        'a',
+        'x', // trailing
+    };
+    var decoder = Decoder.init(&payload);
+    var scratch = [_]?[]const u8{null};
+    try std.testing.expectError(error.InvalidDataRowPayload, decoder.parseDataRowInto(&scratch));
+}
+
+test "decode data row owned rejects invalid negative length" {
+    const payload = [_]u8{
+        0, 1, // column count
+        255, 255, 255, 254, // -2 (invalid)
+    };
+    var decoder = Decoder.init(&payload);
+    try std.testing.expectError(error.InvalidDataRowPayload, decoder.parseDataRowOwned(std.testing.allocator));
+}
+
+test "decode data row owned rejects trailing bytes" {
+    const payload = [_]u8{
+        0, 1, // column count
+        0,   0, 0, 1, // len=1
+        'a',
+        'x', // trailing
+    };
+    var decoder = Decoder.init(&payload);
+    try std.testing.expectError(error.InvalidDataRowPayload, decoder.parseDataRowOwned(std.testing.allocator));
+}
+
+test "decode command complete rejects trailing bytes" {
+    const data = [_]u8{
+        'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0,
+        'x',
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidCommandCompletePayload, decoder.parseCommandComplete());
+}
+
+test "decode error response rejects trailing bytes" {
+    const data = [_]u8{
+        'M', 'e', 'r', 'r', 0,
+        0,   'x',
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidErrorResponsePayload, decoder.parseErrorResponse());
 }
 
 test "decode c string" {

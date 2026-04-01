@@ -9,6 +9,7 @@ const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
 const raw_policy = @import("raw_policy.zig");
 const row_mod = @import("row.zig");
+const extended_flow_mod = @import("extended_flow.zig");
 
 const QailCmd = ast.QailCmd;
 const AstEncoder = protocol.AstEncoder;
@@ -16,6 +17,17 @@ const Encoder = protocol.Encoder;
 const BackendMessage = protocol.BackendMessage;
 const Connection = conn_mod.Connection;
 const PgRow = row_mod.PgRow;
+const Decoder = protocol.Decoder;
+const ExtendedFlowConfig = extended_flow_mod.ExtendedFlowConfig;
+const ExtendedFlowTracker = extended_flow_mod.ExtendedFlowTracker;
+
+const MISSING_PREPARED_STMT_SQLSTATE = "26000";
+const CACHED_PLAN_REPLANNED_SQLSTATE = "0A000";
+const PREPARED_STMT_ALREADY_EXISTS_SQLSTATE = "42P05";
+const CACHED_PLAN_REPLANNED_MSG = "cached plan must be replanned";
+const PREPARED_STMT_MSG = "prepared statement";
+const ALREADY_EXISTS_MSG = "already exists";
+const max_wire_message_len: usize = std.math.maxInt(i32);
 
 /// Prepared statement handle for fast repeated execution.
 /// Create with `prepare()`, use with `pipelinePreparedFast()`.
@@ -106,7 +118,11 @@ pub const Pipeline = struct {
         try self.conn.send(self.encoder.getWritten());
 
         // Wait for ParseComplete + ReadyForQuery
-        try self.readUntilReady();
+        self.readUntilReady() catch |err| switch (err) {
+            // Statement name already exists server-side; treat as reusable.
+            error.PreparedStatementAlreadyExists => {},
+            else => return err,
+        };
 
         // Count parameters (simple $ counting)
         var param_count: usize = 0;
@@ -144,7 +160,7 @@ pub const Pipeline = struct {
         try self.conn.send(ast_encoder.getWritten());
 
         // Count completions
-        return try self.countCompletions(cmds.len);
+        return try self.countCompletions(cmds.len, ExtendedFlowConfig.parseBindExecute(true));
     }
 
     /// Execute multiple QailCmd ASTs and return all results.
@@ -169,7 +185,7 @@ pub const Pipeline = struct {
         try self.conn.send(ast_encoder.getWritten());
 
         // Collect results
-        return try self.collectResults(cmds.len);
+        return try self.collectResults(cmds.len, ExtendedFlowConfig.parseBindExecute(true));
     }
 
     // ==================== Prepared Statement Pipelining ====================
@@ -207,7 +223,7 @@ pub const Pipeline = struct {
         try self.conn.send(buffer.items);
 
         // Count completions
-        return try self.countCompletions(params_batch.len);
+        return try self.countCompletions(params_batch.len, ExtendedFlowConfig.parseBindExecute(false));
     }
 
     /// Execute a prepared statement multiple times and return all results.
@@ -236,7 +252,7 @@ pub const Pipeline = struct {
         try self.conn.send(buffer.items);
 
         // Collect results
-        return try self.collectResults(params_batch.len);
+        return try self.collectResults(params_batch.len, ExtendedFlowConfig.parseBindExecute(false));
     }
 
     // ==================== Optimized Pipelining Methods ====================
@@ -253,7 +269,7 @@ pub const Pipeline = struct {
         try self.conn.send(wire_bytes);
 
         // Count completions
-        return try self.countCompletions(expected_queries);
+        return try self.countCompletionsRaw(expected_queries);
     }
 
     /// Zero-copy prepared statement pipeline.
@@ -297,16 +313,18 @@ pub const Pipeline = struct {
         try self.conn.send(buffer.items);
 
         // Collect 2-column results
-        return try self.collectUltraResults(params_batch.len);
+        return try self.collectUltraResults(params_batch.len, ExtendedFlowConfig.parseBindExecute(false));
     }
 
     /// Internal: collect 2-column result pairs
-    fn collectUltraResults(self: *Pipeline, expected: usize) ![][2]?[]const u8 {
+    fn collectUltraResults(self: *Pipeline, expected: usize, flow_cfg: ExtendedFlowConfig) ![][2]?[]const u8 {
         var results: std.ArrayList([2]?[]const u8) = .{};
         errdefer results.deinit(self.allocator);
+        var flow = ExtendedFlowTracker.init(flow_cfg);
 
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
 
             switch (msg.msg_type) {
                 .data_row => {
@@ -328,10 +346,15 @@ pub const Pipeline = struct {
                     }
                 },
                 .error_response => {
-                    self.drainUntilReadyAfterError();
+                    _ = self.drainUntilReadyAfterError() catch {};
+                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                        self.clearCache();
+                        return error.PreparedStatementRetryable;
+                    }
                     return error.QueryError;
                 },
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
     }
@@ -339,15 +362,26 @@ pub const Pipeline = struct {
     // ==================== Direct Buffer Encoding (for batching) ====================
 
     fn encodeBind(self: *Pipeline, buffer: *std.ArrayList(u8), portal: []const u8, stmt_name: []const u8, params: []const ?[]const u8) !void {
-        var params_size: u32 = 0;
+        if (params.len > std.math.maxInt(i16)) return error.TooManyParameters;
+
+        var params_size: usize = 0;
         for (params) |param| {
-            params_size += 4;
+            try addLenChecked(&params_size, 4);
             if (param) |p| {
-                params_size += @intCast(p.len);
+                _ = try toWireI32Len(p.len);
+                try addLenChecked(&params_size, p.len);
             }
         }
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + @as(u32, @intCast(stmt_name.len)) + 1 + 2 + 2 + params_size + 2;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        try addCStringLenChecked(&msg_len_usize, stmt_name);
+        try addLenChecked(&msg_len_usize, 2);
+        try addLenChecked(&msg_len_usize, 2);
+        try addLenChecked(&msg_len_usize, params_size);
+        try addLenChecked(&msg_len_usize, 2);
+        const msg_len = try toWireLen(msg_len_usize);
 
         try buffer.append(self.allocator, @intFromEnum(protocol.wire.FrontendMessage.bind));
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, msg_len)));
@@ -360,7 +394,7 @@ pub const Pipeline = struct {
 
         for (params) |param| {
             if (param) |p| {
-                try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(i32, @as(i32, @intCast(p.len)))));
+                try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(i32, try toWireI32Len(p.len))));
                 try buffer.appendSlice(self.allocator, p);
             } else {
                 try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(i32, -1)));
@@ -371,7 +405,11 @@ pub const Pipeline = struct {
     }
 
     fn encodeExecute(self: *Pipeline, buffer: *std.ArrayList(u8), portal: []const u8, max_rows: u32) !void {
-        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + 4;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        try addLenChecked(&msg_len_usize, 4);
+        const msg_len = try toWireLen(msg_len_usize);
         try buffer.append(self.allocator, @intFromEnum(protocol.wire.FrontendMessage.execute));
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, msg_len)));
         try buffer.appendSlice(self.allocator, portal);
@@ -384,14 +422,35 @@ pub const Pipeline = struct {
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 4)));
     }
 
+    fn addLenChecked(total: *usize, add: usize) !void {
+        total.* = std.math.add(usize, total.*, add) catch return error.MessageTooLarge;
+    }
+
+    fn addCStringLenChecked(total: *usize, s: []const u8) !void {
+        try addLenChecked(total, s.len);
+        try addLenChecked(total, 1);
+    }
+
+    fn toWireLen(total: usize) !u32 {
+        if (total > max_wire_message_len) return error.MessageTooLarge;
+        return @intCast(total);
+    }
+
+    fn toWireI32Len(total: usize) !i32 {
+        if (total > max_wire_message_len) return error.MessageTooLarge;
+        return @intCast(total);
+    }
+
     // ==================== Internal Helpers ====================
 
     /// Count query completions without parsing results
-    fn countCompletions(self: *Pipeline, expected: usize) !usize {
+    fn countCompletions(self: *Pipeline, expected: usize, flow_cfg: ExtendedFlowConfig) !usize {
         var completed: usize = 0;
+        var flow = ExtendedFlowTracker.init(flow_cfg);
 
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
 
             switch (msg.msg_type) {
                 .bind_complete, .parse_complete => {},
@@ -403,16 +462,50 @@ pub const Pipeline = struct {
                     if (completed >= expected) return completed;
                 },
                 .error_response => {
-                    self.drainUntilReadyAfterError();
+                    _ = self.drainUntilReadyAfterError() catch {};
+                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                        self.clearCache();
+                        return error.PreparedStatementRetryable;
+                    }
                     return error.QueryError;
                 },
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
+            }
+        }
+    }
+
+    /// Count completions for raw wire bytes without strict flow assumptions.
+    fn countCompletionsRaw(self: *Pipeline, expected: usize) !usize {
+        var completed: usize = 0;
+
+        while (true) {
+            const msg = try self.conn.readMessage();
+            switch (msg.msg_type) {
+                .bind_complete, .parse_complete => {},
+                .row_description => {},
+                .data_row => {},
+                .command_complete => completed += 1,
+                .no_data => completed += 1,
+                .ready_for_query => {
+                    if (completed >= expected) return completed;
+                },
+                .error_response => {
+                    _ = self.drainUntilReadyAfterError() catch {};
+                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                        self.clearCache();
+                        return error.PreparedStatementRetryable;
+                    }
+                    return error.QueryError;
+                },
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
     }
 
     /// Collect full results from pipeline
-    fn collectResults(self: *Pipeline, expected: usize) ![][]PgRow {
+    fn collectResults(self: *Pipeline, expected: usize, flow_cfg: ExtendedFlowConfig) ![][]PgRow {
         var all_results: std.ArrayList([]PgRow) = .{};
         errdefer {
             for (all_results.items) |rows| {
@@ -434,9 +527,11 @@ pub const Pipeline = struct {
 
         var field_names_template: []const []const u8 = &.{};
         errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+        var flow = ExtendedFlowTracker.init(flow_cfg);
 
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
 
             switch (msg.msg_type) {
                 .bind_complete, .parse_complete => {},
@@ -487,33 +582,118 @@ pub const Pipeline = struct {
                     }
                 },
                 .error_response => {
-                    self.drainUntilReadyAfterError();
+                    _ = self.drainUntilReadyAfterError() catch {};
+                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                        self.clearCache();
+                        return error.PreparedStatementRetryable;
+                    }
                     return error.QueryError;
                 },
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
     }
 
     /// Read messages until ReadyForQuery
     fn readUntilReady(self: *Pipeline) !void {
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseOnly(true));
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
                 .ready_for_query => return,
-                .error_response => return error.ServerError,
-                else => {},
+                .error_response => {
+                    const already_exists = isPreparedStatementAlreadyExistsPayload(msg.payload);
+                    const retryable = isPreparedStatementRetryablePayload(msg.payload);
+                    _ = self.drainUntilReadyAfterError() catch {};
+
+                    if (already_exists) return error.PreparedStatementAlreadyExists;
+                    if (retryable) {
+                        self.clearCache();
+                        return error.PreparedStatementRetryable;
+                    }
+                    return error.ServerError;
+                },
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
     }
 
-    fn drainUntilReadyAfterError(self: *Pipeline) void {
+    fn drainUntilReadyAfterError(self: *Pipeline) !void {
         while (true) {
-            const msg = self.conn.readMessage() catch return;
+            const msg = try self.conn.readMessage();
+            if (!isPipelineDrainAllowedMessage(msg.msg_type)) return error.UnexpectedBackendMessageType;
             if (msg.msg_type == .ready_for_query) return;
         }
     }
+
+    fn validateExtendedFlow(
+        self: *Pipeline,
+        flow: *ExtendedFlowTracker,
+        msg_type: BackendMessage,
+        error_pending: bool,
+    ) !void {
+        flow.validate(msg_type, error_pending) catch |err| {
+            _ = self.drainUntilReadyAfterError() catch {};
+            return err;
+        };
+    }
 };
+
+fn isPipelineSessionNoise(msg_type: BackendMessage) bool {
+    return msg_type == .notice or msg_type == .parameter_status;
+}
+
+fn isPipelineDrainAllowedMessage(msg_type: BackendMessage) bool {
+    return msg_type == .ready_for_query or msg_type == .error_response or isPipelineSessionNoise(msg_type);
+}
+
+fn isPreparedStatementRetryablePayload(payload: []const u8) bool {
+    var decoder = Decoder.init(payload);
+    const err = decoder.parseErrorResponse() catch return false;
+
+    if (err.code) |sqlstate| {
+        if (std.ascii.eqlIgnoreCase(sqlstate, MISSING_PREPARED_STMT_SQLSTATE)) return true;
+        if (std.ascii.eqlIgnoreCase(sqlstate, CACHED_PLAN_REPLANNED_SQLSTATE)) {
+            if (err.message) |msg| return containsAsciiIgnoreCase(msg, CACHED_PLAN_REPLANNED_MSG);
+            return false;
+        }
+    }
+
+    if (err.message) |msg| return containsAsciiIgnoreCase(msg, CACHED_PLAN_REPLANNED_MSG);
+    return false;
+}
+
+fn isPreparedStatementAlreadyExistsPayload(payload: []const u8) bool {
+    var decoder = Decoder.init(payload);
+    const err = decoder.parseErrorResponse() catch return false;
+
+    if (err.code) |sqlstate| {
+        if (!std.ascii.eqlIgnoreCase(sqlstate, PREPARED_STMT_ALREADY_EXISTS_SQLSTATE)) return false;
+    } else {
+        return false;
+    }
+
+    const msg = err.message orelse return false;
+    return containsAsciiIgnoreCase(msg, PREPARED_STMT_MSG) and containsAsciiIgnoreCase(msg, ALREADY_EXISTS_MSG);
+}
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (haystack.len < needle.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
+        }
+        if (j == needle.len) return true;
+    }
+    return false;
+}
 
 // ==================== Tests ====================
 
@@ -523,4 +703,100 @@ test "PreparedStatement struct" {
 
 test "Pipeline struct" {
     _ = Pipeline;
+}
+
+test "pipeline hardening: retryable prepared statement payload detection" {
+    const payload = [_]u8{
+        'S', 'E', 'R', 'R', 'O', 'R', 0,
+        'C', '2', '6', '0', '0', '0', 0,
+        'M', 'p', 'r', 'e', 'p', 'a', 'r',
+        'e', 'd', ' ', 's', 't', 'a', 't',
+        'e', 'm', 'e', 'n', 't', ' ', '"',
+        's', '1', '"', ' ', 'd', 'o', 'e',
+        's', ' ', 'n', 'o', 't', ' ', 'e',
+        'x', 'i', 's', 't', 0,   0,
+    };
+    try std.testing.expect(isPreparedStatementRetryablePayload(&payload));
+}
+
+test "pipeline hardening: already-exists prepared statement payload detection" {
+    const payload = [_]u8{
+        'S', 'E', 'R', 'R', 'O', 'R', 0,
+        'C', '4', '2', 'P', '0', '5', 0,
+        'M', 'p', 'r', 'e', 'p', 'a', 'r',
+        'e', 'd', ' ', 's', 't', 'a', 't',
+        'e', 'm', 'e', 'n', 't', ' ', '"',
+        's', '1', '"', ' ', 'a', 'l', 'r',
+        'e', 'a', 'd', 'y', ' ', 'e', 'x',
+        'i', 's', 't', 's', 0,   0,
+    };
+    try std.testing.expect(isPreparedStatementAlreadyExistsPayload(&payload));
+    try std.testing.expect(!isPreparedStatementRetryablePayload(&payload));
+}
+
+test "pipeline hardening: drain allowlist rejects unexpected message types" {
+    try std.testing.expect(isPipelineDrainAllowedMessage(.ready_for_query));
+    try std.testing.expect(isPipelineDrainAllowedMessage(.error_response));
+    try std.testing.expect(isPipelineDrainAllowedMessage(.notice));
+    try std.testing.expect(isPipelineDrainAllowedMessage(.parameter_status));
+    try std.testing.expect(!isPipelineDrainAllowedMessage(.data_row));
+    try std.testing.expect(!isPipelineDrainAllowedMessage(.command_complete));
+    try std.testing.expect(!isPipelineDrainAllowedMessage(.notification));
+}
+
+test "pipeline hardening: direct bind rejects too many parameters" {
+    var pipeline = Pipeline{
+        .conn = @ptrFromInt(@alignOf(Connection)),
+        .encoder = Encoder.init(std.testing.allocator),
+        .allocator = std.testing.allocator,
+        .stmt_cache = std.StringHashMap(PreparedStatement).init(std.testing.allocator),
+    };
+    defer pipeline.deinit();
+
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(std.testing.allocator);
+
+    const too_many_count = @as(usize, std.math.maxInt(i16)) + 1;
+    const params = try std.testing.allocator.alloc(?[]const u8, too_many_count);
+    defer std.testing.allocator.free(params);
+    for (params) |*p| p.* = null;
+
+    try std.testing.expectError(error.TooManyParameters, pipeline.encodeBind(&buffer, "", "stmt", params));
+}
+
+test "pipeline hardening: direct bind rejects oversized parameter payload" {
+    var pipeline = Pipeline{
+        .conn = @ptrFromInt(@alignOf(Connection)),
+        .encoder = Encoder.init(std.testing.allocator),
+        .allocator = std.testing.allocator,
+        .stmt_cache = std.StringHashMap(PreparedStatement).init(std.testing.allocator),
+    };
+    defer pipeline.deinit();
+
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(std.testing.allocator);
+
+    const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const huge_param = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+    const params = [_]?[]const u8{huge_param};
+
+    try std.testing.expectError(error.MessageTooLarge, pipeline.encodeBind(&buffer, "", "stmt", &params));
+}
+
+test "pipeline hardening: direct execute rejects oversized portal name" {
+    var pipeline = Pipeline{
+        .conn = @ptrFromInt(@alignOf(Connection)),
+        .encoder = Encoder.init(std.testing.allocator),
+        .allocator = std.testing.allocator,
+        .stmt_cache = std.StringHashMap(PreparedStatement).init(std.testing.allocator),
+    };
+    defer pipeline.deinit();
+
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(std.testing.allocator);
+
+    const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const huge_portal = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.MessageTooLarge, pipeline.encodeExecute(&buffer, huge_portal, 0));
 }

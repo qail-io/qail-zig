@@ -24,12 +24,14 @@ pub const OwnedPolicyDef = ast.OwnedPolicyDef;
 
 pub const PgDriver = driver.PgDriver;
 pub const PgRow = driver.PgRow;
+pub const PgBytesRow = driver.PgBytesRow;
 pub const TlsConnection = driver.TlsConnection;
 pub const GssEncConnection = driver.GssEncConnection;
 pub const TlsConfig = driver.TlsConfig;
 pub const VerifyMode = driver.VerifyMode;
 pub const ExplainEstimate = driver.ExplainEstimate;
 pub const CopyChunkHandler = driver.CopyChunkHandler;
+pub const BytesRowHandler = driver.BytesRowHandler;
 pub const Notification = driver.Notification;
 pub const PgDriverBuilder = driver.PgDriverBuilder;
 pub const ConnectOptions = driver.ConnectOptions;

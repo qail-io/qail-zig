@@ -19,6 +19,7 @@ pub const PG_EPOCH_OFFSET_USEC: i64 = PG_EPOCH_OFFSET_SEC * 1_000_000;
 
 /// Days in each month (non-leap year)
 const DAYS_IN_MONTH = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+const USEC_PER_DAY: i64 = 86_400_000_000;
 
 // ==================== Timestamp ====================
 
@@ -155,7 +156,7 @@ pub const Time = struct {
 
     /// Get hours component (0-23)
     pub fn hour(self: Time) u8 {
-        return @intCast(@divTrunc(@mod(self.usec, 86_400_000_000), 3_600_000_000));
+        return @intCast(@divTrunc(@mod(self.usec, USEC_PER_DAY), 3_600_000_000));
     }
 
     /// Get minutes component (0-59)
@@ -177,6 +178,7 @@ pub const Time = struct {
     pub fn fromBinary(bytes: []const u8) ?Time {
         if (bytes.len != 8) return null;
         const usec = std.mem.readInt(i64, bytes[0..8], .big);
+        if (usec < 0 or usec >= USEC_PER_DAY) return null;
         return Time.fromUsec(usec);
     }
 
@@ -290,6 +292,16 @@ test "Time components" {
     try std.testing.expectEqual(@as(u8, 30), time.minute());
     try std.testing.expectEqual(@as(u8, 45), time.second());
     try std.testing.expectEqual(@as(u32, 123456), time.microsecond());
+}
+
+test "Time fromBinary rejects out-of-range values" {
+    var neg_buf: [8]u8 = undefined;
+    std.mem.writeInt(i64, &neg_buf, -1, .big);
+    try std.testing.expect(Time.fromBinary(&neg_buf) == null);
+
+    var day_buf: [8]u8 = undefined;
+    std.mem.writeInt(i64, &day_buf, USEC_PER_DAY, .big);
+    try std.testing.expect(Time.fromBinary(&day_buf) == null);
 }
 
 test "Interval binary parsing" {

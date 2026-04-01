@@ -10,6 +10,7 @@
 //! - recvDataUltra: Ultra-fast 2-column optimized path
 
 const std = @import("std");
+const message_limits = @import("message_limits.zig");
 
 /// I/O buffer configuration
 pub const IoConfig = struct {
@@ -108,10 +109,7 @@ pub const IoBuffer = struct {
     /// Caller must call consumeMessage() after processing.
     pub fn peekMsgType(self: *const IoBuffer) ?u8 {
         const buf = self.readable();
-        if (buf.len < 5) return null;
-
-        const msg_len = std.mem.readInt(u32, buf[1..5], .big);
-        if (buf.len < msg_len + 1) return null;
+        _ = parseHeader(buf) orelse return null;
 
         return buf[0];
     }
@@ -119,30 +117,25 @@ pub const IoBuffer = struct {
     /// Get message length (excluding type byte)
     pub fn peekMsgLen(self: *const IoBuffer) ?u32 {
         const buf = self.readable();
-        if (buf.len < 5) return null;
-        return std.mem.readInt(u32, buf[1..5], .big);
+        const parsed = parseHeader(buf) orelse return null;
+        return @intCast(parsed.msg_len_field);
     }
 
     /// Get message payload (excluding type byte and length)
     pub fn peekMsgPayload(self: *const IoBuffer) ?[]const u8 {
         const buf = self.readable();
-        if (buf.len < 5) return null;
-
-        const msg_len = std.mem.readInt(u32, buf[1..5], .big);
-        if (buf.len < msg_len + 1) return null;
+        const parsed = parseHeader(buf) orelse return null;
 
         // Payload starts after type (1) + length (4) = 5 bytes
-        // Payload length is msg_len - 4 (length includes itself)
-        return buf[5 .. msg_len + 1];
+        // Payload length is msg_len_field - 4 (length includes itself)
+        return buf[5..parsed.total_len];
     }
 
     /// Consume a complete message
     pub fn consumeMessage(self: *IoBuffer) void {
         const buf = self.readable();
-        if (buf.len >= 5) {
-            const msg_len = std.mem.readInt(u32, buf[1..5], .big);
-            self.consume(msg_len + 1);
-        }
+        const parsed = parseHeader(buf) orelse return;
+        self.consume(parsed.total_len);
     }
 
     /// FAST DataRow parsing - returns columns as slices into buffer
@@ -155,29 +148,37 @@ pub const IoBuffer = struct {
         if (payload.len < 2) return null;
 
         const column_count = std.mem.readInt(u16, payload[0..2], .big);
+        const min_lengths_bytes = std.math.mul(usize, column_count, 4) catch return null;
+        const min_payload_len = std.math.add(usize, 2, min_lengths_bytes) catch return null;
+        if (payload.len < min_payload_len) return null;
+
         var columns = try allocator.alloc(?[]const u8, column_count);
-        errdefer allocator.free(columns);
+        var valid = false;
+        defer if (!valid) allocator.free(columns);
+        @memset(columns, null);
 
         var pos: usize = 2;
         for (0..column_count) |i| {
-            if (pos + 4 > payload.len) break;
+            if (pos + 4 > payload.len) return null;
 
             const col_len = std.mem.readInt(i32, payload[pos..][0..4], .big);
             pos += 4;
 
             if (col_len == -1) {
                 columns[i] = null;
+            } else if (col_len < -1) {
+                return null;
             } else {
                 const ulen: usize = @intCast(col_len);
-                if (pos + ulen <= payload.len) {
-                    columns[i] = payload[pos .. pos + ulen];
-                    pos += ulen;
-                } else {
-                    columns[i] = null;
-                }
+                const next_pos = std.math.add(usize, pos, ulen) catch return null;
+                if (next_pos > payload.len) return null;
+                columns[i] = payload[pos..next_pos];
+                pos = next_pos;
             }
         }
 
+        if (pos != payload.len) return null;
+        valid = true;
         return columns;
     }
 
@@ -190,7 +191,9 @@ pub const IoBuffer = struct {
 
         if (payload.len < 2) return null;
 
-        // Skip column count (assume 2)
+        const column_count = std.mem.readInt(u16, payload[0..2], .big);
+        if (column_count != 2) return null;
+
         var pos: usize = 2;
 
         // Column 0
@@ -200,10 +203,14 @@ pub const IoBuffer = struct {
 
         const col0: ?[]const u8 = if (len0 == -1)
             null
+        else if (len0 < -1)
+            return null
         else blk: {
             const ulen: usize = @intCast(len0);
-            const slice = payload[pos .. pos + ulen];
-            pos += ulen;
+            const next_pos = std.math.add(usize, pos, ulen) catch return null;
+            if (next_pos > payload.len) return null;
+            const slice = payload[pos..next_pos];
+            pos = next_pos;
             break :blk slice;
         };
 
@@ -214,12 +221,18 @@ pub const IoBuffer = struct {
 
         const col1: ?[]const u8 = if (len1 == -1)
             null
+        else if (len1 < -1)
+            return null
         else blk: {
             const ulen: usize = @intCast(len1);
-            const slice = payload[pos .. pos + ulen];
+            const next_pos = std.math.add(usize, pos, ulen) catch return null;
+            if (next_pos > payload.len) return null;
+            const slice = payload[pos..next_pos];
+            pos = next_pos;
             break :blk slice;
         };
 
+        if (pos != payload.len) return null;
         return .{ .col0 = col0, .col1 = col1 };
     }
 };
@@ -289,6 +302,102 @@ test "IoBuffer message peek" {
     try std.testing.expectEqual(@as(?u8, 'D'), buf.peekMsgType());
 }
 
+test "IoBuffer rejects invalid message length field below minimum" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 1024);
+    defer buf.deinit();
+
+    buf.data[0] = 'D';
+    std.mem.writeInt(u32, buf.data[1..5], 3, .big);
+    buf.commit(5);
+
+    try std.testing.expectEqual(@as(?u8, null), buf.peekMsgType());
+    try std.testing.expectEqual(@as(?u32, null), buf.peekMsgLen());
+    try std.testing.expectEqual(@as(?[]const u8, null), buf.peekMsgPayload());
+
+    const before_len = buf.len();
+    buf.consumeMessage();
+    try std.testing.expectEqual(before_len, buf.len());
+}
+
+test "IoBuffer rejects oversized message length field" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 1024);
+    defer buf.deinit();
+
+    buf.data[0] = 'D';
+    std.mem.writeInt(
+        u32,
+        buf.data[1..5],
+        @intCast(message_limits.max_backend_message_len_field + 1),
+        .big,
+    );
+    buf.commit(5);
+
+    try std.testing.expectEqual(@as(?u8, null), buf.peekMsgType());
+    try std.testing.expectEqual(@as(?u32, null), buf.peekMsgLen());
+    try std.testing.expectEqual(@as(?[]const u8, null), buf.peekMsgPayload());
+}
+
+test "IoBuffer parseDataRowFast rejects truncated payload" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 1024);
+    defer buf.deinit();
+
+    const payload = [_]u8{
+        0, 2, // 2 columns
+        0, 0, 0, 4, // col0 len=4
+        'a', 'b', // truncated col0 bytes (only 2)
+    };
+    const msg_len: u32 = @intCast(payload.len + 4);
+
+    buf.data[0] = 'D';
+    std.mem.writeInt(u32, buf.data[1..5], msg_len, .big);
+    @memcpy(buf.data[5 .. 5 + payload.len], &payload);
+    buf.commit(5 + payload.len);
+
+    try std.testing.expectEqual(@as(?[]?[]const u8, null), try buf.parseDataRowFast(allocator));
+}
+
+test "IoBuffer parseDataRowFast rejects invalid negative column length" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 1024);
+    defer buf.deinit();
+
+    const payload = [_]u8{
+        0, 1, // 1 column
+        255, 255, 255, 254, // col len = -2 (invalid)
+    };
+    const msg_len: u32 = @intCast(payload.len + 4);
+
+    buf.data[0] = 'D';
+    std.mem.writeInt(u32, buf.data[1..5], msg_len, .big);
+    @memcpy(buf.data[5 .. 5 + payload.len], &payload);
+    buf.commit(5 + payload.len);
+
+    try std.testing.expectEqual(@as(?[]?[]const u8, null), try buf.parseDataRowFast(allocator));
+}
+
+test "IoBuffer parseDataRowUltra rejects truncated payload" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 1024);
+    defer buf.deinit();
+
+    const payload = [_]u8{
+        0, 2, // 2 columns
+        0, 0, 0, 4, // col0 len=4
+        'a', 'b', // truncated col0 bytes (only 2)
+    };
+    const msg_len: u32 = @intCast(payload.len + 4);
+
+    buf.data[0] = 'D';
+    std.mem.writeInt(u32, buf.data[1..5], msg_len, .big);
+    @memcpy(buf.data[5 .. 5 + payload.len], &payload);
+    buf.commit(5 + payload.len);
+
+    try std.testing.expect(buf.parseDataRowUltra() == null);
+}
+
 test "WriteBuffer operations" {
     const allocator = std.testing.allocator;
     var wb = WriteBuffer.init(allocator);
@@ -302,4 +411,26 @@ test "WriteBuffer operations" {
 
     wb.clear();
     try std.testing.expect(!wb.hasData());
+}
+const ParsedHeader = struct {
+    msg_len_field: usize,
+    total_len: usize,
+};
+
+fn parseHeader(buf: []const u8) ?ParsedHeader {
+    if (buf.len < 5) return null;
+
+    const msg_len_u32 = std.mem.readInt(u32, buf[1..5], .big);
+    _ = message_limits.validateLengthField(
+        msg_len_u32,
+        message_limits.max_backend_message_len_field,
+    ) catch return null;
+    const msg_len_field: usize = @intCast(msg_len_u32);
+    const total_len = std.math.add(usize, msg_len_field, 1) catch return null;
+    if (buf.len < total_len) return null;
+
+    return .{
+        .msg_len_field = msg_len_field,
+        .total_len = total_len,
+    };
 }
