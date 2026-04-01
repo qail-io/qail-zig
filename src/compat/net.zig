@@ -31,21 +31,28 @@ pub fn tcpConnectToHostWithTimeout(
 
     if (list.addrs.len == 0) return error.UnknownHostName;
 
+    var last_err: ?anyerror = null;
     for (list.addrs) |address| {
-        return tcpConnectToAddressWithTimeout(address, timeout_ms) catch |err| switch (err) {
-            error.ConnectionRefused => continue,
-            else => return err,
+        const stream = tcpConnectToAddressWithTimeout(address, timeout_ms) catch |err| {
+            last_err = err;
+            continue;
         };
+        return stream;
     }
 
-    return error.ConnectionRefused;
+    return last_err orelse error.ConnectionRefused;
 }
 
 pub fn tcpConnectToAddressWithTimeout(address: Address, timeout_ms: i32) !Stream {
     const posix = std.posix;
+    const family = switch (address.any.family) {
+        posix.AF.INET => posix.AF.INET,
+        posix.AF.INET6 => posix.AF.INET6,
+        else => return error.AddressFamilyNotSupported,
+    };
 
-    // Create socket (initially blocking)
-    const fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    // Create socket (initially blocking) using the target address family.
+    const fd = try posix.socket(family, posix.SOCK.STREAM, 0);
     errdefer posix.close(fd);
 
     // Set non-blocking
@@ -213,9 +220,14 @@ fn localhostAcceptThread(server: *Server) void {
 test "tcp connect to host with timeout resolves localhost" {
     var server = try Address.listen(try Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
     const port = server.listen_address.getPort();
+    const nudge_addr = try Address.parseIp4("127.0.0.1", port);
 
     var thread = try std.Thread.spawn(.{}, localhostAcceptThread, .{&server});
-    defer thread.join();
+    defer {
+        const nudge_stream = tcpConnectToAddress(nudge_addr) catch null;
+        if (nudge_stream) |stream| stream.close();
+        thread.join();
+    }
 
     var stream = try tcpConnectToHostWithTimeout(std.testing.allocator, "localhost", port, 1000);
     stream.close();

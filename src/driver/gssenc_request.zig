@@ -158,10 +158,15 @@ test "gssenc request rejects invalid response byte" {
 test "gssenc request resolves localhost hostname" {
     var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
     const port = server.listen_address.getPort();
+    const nudge_addr = try net.Address.parseIp4("127.0.0.1", port);
 
     var ctx = ServerCtx{ .server = &server, .mode = .accept };
     var thread = try std.Thread.spawn(.{}, serverThread, .{&ctx});
-    defer thread.join();
+    defer {
+        const nudge_stream = net.tcpConnectToAddress(nudge_addr) catch null;
+        if (nudge_stream) |stream| stream.close();
+        thread.join();
+    }
 
     try std.testing.expectEqual(GssEncNegotiationResult.accepted, try tryGssEncRequest("localhost", port, 1000));
 }

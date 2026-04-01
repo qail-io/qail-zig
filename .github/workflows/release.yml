@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -21,6 +22,7 @@ jobs:
             target: x86_64-windows
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +36,8 @@ jobs:
         run: zig build -Doptimize=ReleaseFast
 
       - name: Run Tests
-        run: zig build test
+        timeout-minutes: 20
+        run: zig build test --summary all
 
       - name: Package Artifacts
         shell: bash

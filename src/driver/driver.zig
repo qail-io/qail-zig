@@ -1881,10 +1881,15 @@ fn sendReadyForQuery(stream: net.Stream, status: u8) !void {
 test "connect with options handles accepted gssenc by platform" {
     var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
     const port = server.listen_address.getPort();
+    const nudge_addr = try net.Address.parseIp4("127.0.0.1", port);
 
     var ctx = GssEncServerCtx{ .server = &server, .mode = .accepted };
     var thread = try std.Thread.spawn(.{}, gssEncServerThread, .{&ctx});
-    defer thread.join();
+    defer {
+        const nudge_stream = net.tcpConnectToAddress(nudge_addr) catch null;
+        if (nudge_stream) |stream| stream.close();
+        thread.join();
+    }
 
     if (builtin.os.tag == .linux) {
         try std.testing.expectError(
@@ -1896,7 +1901,10 @@ test "connect with options handles accepted gssenc by platform" {
                 "user",
                 "db",
                 null,
-                .{ .gss_enc_mode = .prefer },
+                .{
+                    .gss_enc_mode = .prefer,
+                    .timeout_ms = 1000,
+                },
             ),
         );
     } else {
@@ -1909,7 +1917,10 @@ test "connect with options handles accepted gssenc by platform" {
                 "user",
                 "db",
                 null,
-                .{ .gss_enc_mode = .prefer },
+                .{
+                    .gss_enc_mode = .prefer,
+                    .timeout_ms = 1000,
+                },
             ),
         );
     }
@@ -1918,10 +1929,15 @@ test "connect with options handles accepted gssenc by platform" {
 test "connect with options require fails when gssenc is rejected" {
     var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
     const port = server.listen_address.getPort();
+    const nudge_addr = try net.Address.parseIp4("127.0.0.1", port);
 
     var ctx = GssEncServerCtx{ .server = &server, .mode = .rejected };
     var thread = try std.Thread.spawn(.{}, gssEncServerThread, .{&ctx});
-    defer thread.join();
+    defer {
+        const nudge_stream = net.tcpConnectToAddress(nudge_addr) catch null;
+        if (nudge_stream) |stream| stream.close();
+        thread.join();
+    }
 
     try std.testing.expectError(
         error.GssEncRequiredButRejected,
@@ -1932,7 +1948,10 @@ test "connect with options require fails when gssenc is rejected" {
             "user",
             "db",
             null,
-            .{ .gss_enc_mode = .require },
+            .{
+                .gss_enc_mode = .require,
+                .timeout_ms = 1000,
+            },
         ),
     );
 }
@@ -1940,10 +1959,17 @@ test "connect with options require fails when gssenc is rejected" {
 test "connect with options prefer falls through after gssenc rejection over localhost" {
     var server = try net.Address.listen(try net.Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
     const port = server.listen_address.getPort();
+    const nudge_addr = try net.Address.parseIp4("127.0.0.1", port);
 
     var ctx = GssEncServerCtx{ .server = &server, .mode = .rejected_then_plain_auth_ok };
     var thread = try std.Thread.spawn(.{}, gssEncServerThread, .{&ctx});
-    defer thread.join();
+    defer {
+        const nudge_stream = net.tcpConnectToAddress(nudge_addr) catch null;
+        if (nudge_stream) |stream| stream.close();
+        const nudge_stream_2 = net.tcpConnectToAddress(nudge_addr) catch null;
+        if (nudge_stream_2) |stream| stream.close();
+        thread.join();
+    }
 
     var driver = try PgDriver.connectWithOptions(
         std.testing.allocator,
@@ -1952,7 +1978,10 @@ test "connect with options prefer falls through after gssenc rejection over loca
         "user",
         "db",
         null,
-        .{ .gss_enc_mode = .prefer },
+        .{
+            .gss_enc_mode = .prefer,
+            .timeout_ms = 1000,
+        },
     );
     defer driver.deinit();
 
