@@ -4,6 +4,14 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+## v0.7.2 — 2026-04-01
+
+### Fixed
+
+- Restored the AST parity guard by updating `scripts/check_parity.sh` to read `CmdKind` from `src/ast/cmd/types.zig`, which matches the current AST layout.
+- Fixed non-Linux `GSSENC` transport stubs so release builds compile on macOS and Windows after the new transport variant was added.
+- Re-ran the parity workflow on `main`; the post-fix `Parity Guards` run for commit `e41f4dc4aa85ac1620f020756295189d4ca019f3` completed successfully.
+
 ## v0.7.1 — 2026-04-01
 
 ### Added
