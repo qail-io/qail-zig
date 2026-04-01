@@ -25,6 +25,8 @@ jobs:
         run: ./scripts/ci/setup_gssenc_lab.sh
 
       - name: Run Linux Kerberos/GSSENC smoke test
+        env:
+          QAIL_GSS_DEBUG: "1"
         run: zig build gssenc-smoke -Doptimize=ReleaseSafe
 
       - name: Dump Kerberos and PostgreSQL diagnostics

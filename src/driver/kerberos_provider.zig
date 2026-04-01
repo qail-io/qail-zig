@@ -98,24 +98,33 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
         ) callconv(.c) OmUint32,
 
         pub fn load() !Api {
+            const debug = gssDebugEnabled();
+
             for ([_][]const u8{
                 "libgssapi_krb5.so.2",
                 "libgssapi_krb5.so",
                 "libgssapi.so.3",
                 "libgssapi.so",
             }) |candidate| {
-                var lib = std.DynLib.open(candidate) catch continue;
+                var lib = std.DynLib.open(candidate) catch |err| {
+                    if (debug) std.log.warn("gssapi: failed to open candidate {s}: {}", .{ candidate, err });
+                    continue;
+                };
                 errdefer lib.close();
 
-                const hostbased_service_name = resolveHostbasedServiceName(&lib) orelse continue;
-                const gss_import_name = lib.lookup(*const fn (*OmUint32, *const GssBufferDesc, GssOid, *GssName) callconv(.c) OmUint32, "gss_import_name") orelse continue;
-                const gss_release_name = lib.lookup(*const fn (*OmUint32, *GssName) callconv(.c) OmUint32, "gss_release_name") orelse continue;
-                const gss_init_sec_context = lib.lookup(*const fn (*OmUint32, GssCredential, *GssContext, GssName, GssOid, OmUint32, OmUint32, GssChannelBindings, ?*const GssBufferDesc, ?*GssOid, *GssBufferDesc, ?*OmUint32, ?*OmUint32) callconv(.c) OmUint32, "gss_init_sec_context") orelse continue;
-                const gss_delete_sec_context = lib.lookup(*const fn (*OmUint32, *GssContext, ?*GssBufferDesc) callconv(.c) OmUint32, "gss_delete_sec_context") orelse continue;
-                const gss_release_buffer = lib.lookup(*const fn (*OmUint32, *GssBufferDesc) callconv(.c) OmUint32, "gss_release_buffer") orelse continue;
-                const gss_display_status = lib.lookup(*const fn (*OmUint32, OmUint32, i32, GssOid, *OmUint32, *GssBufferDesc) callconv(.c) OmUint32, "gss_display_status") orelse continue;
-                const gss_wrap = lib.lookup(*const fn (*OmUint32, GssContext, i32, OmUint32, *const GssBufferDesc, *i32, *GssBufferDesc) callconv(.c) OmUint32, "gss_wrap") orelse continue;
-                const gss_unwrap = lib.lookup(*const fn (*OmUint32, GssContext, *const GssBufferDesc, *GssBufferDesc, *i32, *OmUint32) callconv(.c) OmUint32, "gss_unwrap") orelse continue;
+                if (debug) std.log.warn("gssapi: opened candidate {s}", .{candidate});
+
+                const hostbased_service_name = resolveHostbasedServiceName(&lib, candidate, debug) orelse continue;
+                const gss_import_name = lookupRequired(*const fn (*OmUint32, *const GssBufferDesc, GssOid, *GssName) callconv(.c) OmUint32, &lib, candidate, "gss_import_name", debug) orelse continue;
+                const gss_release_name = lookupRequired(*const fn (*OmUint32, *GssName) callconv(.c) OmUint32, &lib, candidate, "gss_release_name", debug) orelse continue;
+                const gss_init_sec_context = lookupRequired(*const fn (*OmUint32, GssCredential, *GssContext, GssName, GssOid, OmUint32, OmUint32, GssChannelBindings, ?*const GssBufferDesc, ?*GssOid, *GssBufferDesc, ?*OmUint32, ?*OmUint32) callconv(.c) OmUint32, &lib, candidate, "gss_init_sec_context", debug) orelse continue;
+                const gss_delete_sec_context = lookupRequired(*const fn (*OmUint32, *GssContext, ?*GssBufferDesc) callconv(.c) OmUint32, &lib, candidate, "gss_delete_sec_context", debug) orelse continue;
+                const gss_release_buffer = lookupRequired(*const fn (*OmUint32, *GssBufferDesc) callconv(.c) OmUint32, &lib, candidate, "gss_release_buffer", debug) orelse continue;
+                const gss_display_status = lookupRequired(*const fn (*OmUint32, OmUint32, i32, GssOid, *OmUint32, *GssBufferDesc) callconv(.c) OmUint32, &lib, candidate, "gss_display_status", debug) orelse continue;
+                const gss_wrap = lookupRequired(*const fn (*OmUint32, GssContext, i32, OmUint32, *const GssBufferDesc, *i32, *GssBufferDesc) callconv(.c) OmUint32, &lib, candidate, "gss_wrap", debug) orelse continue;
+                const gss_unwrap = lookupRequired(*const fn (*OmUint32, GssContext, *const GssBufferDesc, *GssBufferDesc, *i32, *OmUint32) callconv(.c) OmUint32, &lib, candidate, "gss_unwrap", debug) orelse continue;
+
+                if (debug) std.log.warn("gssapi: candidate {s} satisfied all required symbols", .{candidate});
 
                 return .{
                     .lib = lib,
@@ -134,20 +143,52 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             return error.GssApiLibraryUnavailable;
         }
 
-        fn resolveHostbasedServiceName(lib: *std.DynLib) ?GssOid {
+        fn resolveHostbasedServiceName(lib: *std.DynLib, candidate: []const u8, debug: bool) ?GssOid {
             if (lib.lookup(*GssOid, "GSS_C_NT_HOSTBASED_SERVICE")) |oid_ptr| {
+                if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via GSS_C_NT_HOSTBASED_SERVICE", .{candidate});
                 return oid_ptr.*;
             }
             if (lib.lookup(*GssOid, "__GSS_C_NT_HOSTBASED_SERVICE")) |oid_ptr| {
+                if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via __GSS_C_NT_HOSTBASED_SERVICE", .{candidate});
                 return oid_ptr.*;
             }
             if (lib.lookup(*GssOidDesc, "__gss_c_nt_hostbased_service_oid_desc")) |oid_desc| {
+                if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via __gss_c_nt_hostbased_service_oid_desc", .{candidate});
                 return oid_desc;
             }
             if (lib.lookup(*GssOidDesc, "gss_nt_service_name")) |oid_desc| {
+                if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via gss_nt_service_name", .{candidate});
                 return oid_desc;
             }
+            if (debug) std.log.warn("gssapi: candidate {s} missing hostbased service OID symbol", .{candidate});
             return null;
+        }
+
+        fn lookupRequired(
+            comptime T: type,
+            lib: *std.DynLib,
+            candidate: []const u8,
+            symbol: [:0]const u8,
+            debug: bool,
+        ) ?T {
+            const value = lib.lookup(T, symbol) orelse {
+                if (debug) std.log.warn("gssapi: candidate {s} missing symbol {s}", .{ candidate, symbol });
+                return null;
+            };
+            return value;
+        }
+
+        fn gssDebugEnabled() bool {
+            const value = std.process.getEnvVarOwned(std.heap.page_allocator, "QAIL_GSS_DEBUG") catch |err| switch (err) {
+                error.EnvironmentVariableNotFound => return false,
+                else => return false,
+            };
+            defer std.heap.page_allocator.free(value);
+
+            if (value.len == 0) return false;
+            if (std.mem.eql(u8, value, "0")) return false;
+            if (std.ascii.eqlIgnoreCase(value, "false")) return false;
+            return true;
         }
 
         pub fn deinit(self: *Api) void {
