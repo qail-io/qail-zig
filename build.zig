@@ -257,6 +257,9 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    // The Linux Kerberos provider relies on dlopen/dlsym for GSSAPI, so the
+    // smoke binary must link libc to exercise the real runtime path.
+    gssenc_smoke.root_module.link_libc = true;
 
     const run_gssenc_smoke = b.addRunArtifact(gssenc_smoke);
     if (b.args) |args| {
