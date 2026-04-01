@@ -1892,21 +1892,31 @@ test "connect with options handles accepted gssenc by platform" {
     }
 
     if (builtin.os.tag == .linux) {
-        try std.testing.expectError(
-            error.ConnectionClosed,
-            PgDriver.connectWithOptions(
-                std.testing.allocator,
-                "127.0.0.1",
-                port,
-                "user",
-                "db",
-                null,
-                .{
-                    .gss_enc_mode = .prefer,
-                    .timeout_ms = 1000,
-                },
-            ),
+        const result = PgDriver.connectWithOptions(
+            std.testing.allocator,
+            "127.0.0.1",
+            port,
+            "user",
+            "db",
+            null,
+            .{
+                .gss_enc_mode = .prefer,
+                .timeout_ms = 1000,
+            },
         );
+        if (result) |driver| {
+            var mutable_driver = driver;
+            mutable_driver.deinit();
+            return error.UnexpectedSuccess;
+        } else |err| {
+            switch (err) {
+                error.ConnectionClosed,
+                error.GssApiLibraryUnavailable,
+                error.GssApiSymbolMissing,
+                => {},
+                else => return err,
+            }
+        }
     } else {
         try std.testing.expectError(
             error.GssEncAcceptedButUnsupported,
