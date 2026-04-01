@@ -100,12 +100,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
         pub fn load() !Api {
             const debug = gssDebugEnabled();
 
-            for ([_][]const u8{
-                "libgssapi_krb5.so.2",
-                "libgssapi_krb5.so",
-                "libgssapi.so.3",
-                "libgssapi.so",
-            }) |candidate| {
+            for (linuxGssApiCandidates()) |candidate| {
                 var lib = std.DynLib.open(candidate) catch |err| {
                     if (debug) std.log.warn("gssapi: failed to open candidate {s}: {}", .{ candidate, err });
                     continue;
@@ -141,6 +136,41 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             }
 
             return error.GssApiLibraryUnavailable;
+        }
+
+        fn linuxGssApiCandidates() []const []const u8 {
+            return switch (builtin.cpu.arch) {
+                .x86_64 => &.{
+                    "/lib/x86_64-linux-gnu/libgssapi_krb5.so.2",
+                    "/usr/lib/x86_64-linux-gnu/libgssapi_krb5.so.2",
+                    "/lib64/libgssapi_krb5.so.2",
+                    "/usr/lib64/libgssapi_krb5.so.2",
+                    "libgssapi_krb5.so.2",
+                    "libgssapi_krb5.so",
+                    "libgssapi.so.3",
+                    "libgssapi.so",
+                },
+                .aarch64 => &.{
+                    "/lib/aarch64-linux-gnu/libgssapi_krb5.so.2",
+                    "/usr/lib/aarch64-linux-gnu/libgssapi_krb5.so.2",
+                    "/lib64/libgssapi_krb5.so.2",
+                    "/usr/lib64/libgssapi_krb5.so.2",
+                    "libgssapi_krb5.so.2",
+                    "libgssapi_krb5.so",
+                    "libgssapi.so.3",
+                    "libgssapi.so",
+                },
+                else => &.{
+                    "/lib/libgssapi_krb5.so.2",
+                    "/usr/lib/libgssapi_krb5.so.2",
+                    "/lib64/libgssapi_krb5.so.2",
+                    "/usr/lib64/libgssapi_krb5.so.2",
+                    "libgssapi_krb5.so.2",
+                    "libgssapi_krb5.so",
+                    "libgssapi.so.3",
+                    "libgssapi.so",
+                },
+            };
         }
 
         fn resolveHostbasedServiceName(lib: *std.DynLib, candidate: []const u8, debug: bool) ?GssOid {
