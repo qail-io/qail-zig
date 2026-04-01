@@ -27,11 +27,13 @@ start_service() {
 echo "::group::Install Kerberos and PostgreSQL packages"
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  libgssapi-krb5-2 \
   krb5-kdc \
   krb5-admin-server \
   krb5-user \
   postgresql \
   postgresql-client
+ldconfig -p | grep gssapi || true
 echo "::endgroup::"
 
 if ! grep -q "[[:space:]]${HOST_ALIAS}\$" /etc/hosts; then
