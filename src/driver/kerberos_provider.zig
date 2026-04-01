@@ -36,7 +36,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
 
     pub const Api = struct {
         lib: std.DynLib,
-        hostbased_service_name: *GssOid,
+        hostbased_service_name: GssOid,
         gss_import_name: *const fn (
             minor_status: *OmUint32,
             input_name_buffer: *const GssBufferDesc,
@@ -107,7 +107,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
                 var lib = std.DynLib.open(candidate) catch continue;
                 errdefer lib.close();
 
-                const hostbased_service_name = lib.lookup(*GssOid, "GSS_C_NT_HOSTBASED_SERVICE") orelse continue;
+                const hostbased_service_name = resolveHostbasedServiceName(&lib) orelse continue;
                 const gss_import_name = lib.lookup(*const fn (*OmUint32, *const GssBufferDesc, GssOid, *GssName) callconv(.c) OmUint32, "gss_import_name") orelse continue;
                 const gss_release_name = lib.lookup(*const fn (*OmUint32, *GssName) callconv(.c) OmUint32, "gss_release_name") orelse continue;
                 const gss_init_sec_context = lib.lookup(*const fn (*OmUint32, GssCredential, *GssContext, GssName, GssOid, OmUint32, OmUint32, GssChannelBindings, ?*const GssBufferDesc, ?*GssOid, *GssBufferDesc, ?*OmUint32, ?*OmUint32) callconv(.c) OmUint32, "gss_init_sec_context") orelse continue;
@@ -134,6 +134,22 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             return error.GssApiLibraryUnavailable;
         }
 
+        fn resolveHostbasedServiceName(lib: *std.DynLib) ?GssOid {
+            if (lib.lookup(*GssOid, "GSS_C_NT_HOSTBASED_SERVICE")) |oid_ptr| {
+                return oid_ptr.*;
+            }
+            if (lib.lookup(*GssOid, "__GSS_C_NT_HOSTBASED_SERVICE")) |oid_ptr| {
+                return oid_ptr.*;
+            }
+            if (lib.lookup(*GssOidDesc, "__gss_c_nt_hostbased_service_oid_desc")) |oid_desc| {
+                return oid_desc;
+            }
+            if (lib.lookup(*GssOidDesc, "gss_nt_service_name")) |oid_desc| {
+                return oid_desc;
+            }
+            return null;
+        }
+
         pub fn deinit(self: *Api) void {
             self.lib.close();
         }
@@ -157,7 +173,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
                 .sspi => return error.UnsupportedGssMechanism,
             }
 
-            const name_type = api.hostbased_service_name.* orelse return error.GssHostbasedServiceNameUnavailable;
+            const name_type = api.hostbased_service_name orelse return error.GssHostbasedServiceNameUnavailable;
 
             var minor: OmUint32 = 0;
             var output_name: GssName = null;
