@@ -45,14 +45,13 @@ pub fn tcpConnectToHostWithTimeout(
 
 pub fn tcpConnectToAddressWithTimeout(address: Address, timeout_ms: i32) !Stream {
     const posix = std.posix;
-    const family = switch (address.any.family) {
-        posix.AF.INET => posix.AF.INET,
-        posix.AF.INET6 => posix.AF.INET6,
-        else => return error.AddressFamilyNotSupported,
-    };
+    const family = address.any.family;
+    const af_inet: @TypeOf(family) = @intCast(posix.AF.INET);
+    const af_inet6: @TypeOf(family) = @intCast(posix.AF.INET6);
+    if (family != af_inet and family != af_inet6) return error.AddressFamilyNotSupported;
 
     // Create socket (initially blocking) using the target address family.
-    const fd = try posix.socket(family, posix.SOCK.STREAM, 0);
+    const fd = try posix.socket(@intCast(family), posix.SOCK.STREAM, 0);
     errdefer posix.close(fd);
 
     // Set non-blocking
