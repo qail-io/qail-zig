@@ -1,8 +1,8 @@
 # QAIL Zig Documentation
 
-> **Pure Zig PostgreSQL wire-protocol driver with AST-native query building and PostgreSQL-path parity tracking against qail.rs.**
+> **Zig-first PostgreSQL wire-protocol driver with AST-native query building, PostgreSQL-path parity tracking against qail.rs, and optional Linux Kerberos/GSSENC integration via the platform GSSAPI stack.**
 
-QAIL Zig is the active pure-Zig implementation of the QAIL PostgreSQL stack. It shares the same AST direction as qail.rs, but keeps the runtime, protocol path, and tooling in Zig. Full qail.rs ecosystem parity is still incomplete outside the PostgreSQL-focused track.
+QAIL Zig is the active Zig implementation of the QAIL PostgreSQL stack. It shares the same AST direction as qail.rs, but keeps the runtime, protocol path, and tooling in Zig. The core driver path is Zig-native; Linux Kerberos/GSSENC support is an optional runtime integration with system libc/GSSAPI rather than a self-contained Zig Kerberos stack. Full qail.rs ecosystem parity is still incomplete outside the PostgreSQL-focused track.
 
 ## Latest Updates (March 2026)
 
@@ -28,7 +28,7 @@ QAIL Zig is the active pure-Zig implementation of the QAIL PostgreSQL stack. It 
 ## Implementation Positioning
 
 - **qail.rs** is still the production reference and widest implementation.
-- **qail-zig** is the serious pure-Zig track, with active parity work and dedicated benchmarks.
+- **qail-zig** is the serious Zig track, with active parity work and dedicated benchmarks.
 - **Security boundary:** on the AST flow, the goal remains no application SQL string interpolation surface.
 
 ## Docs Map

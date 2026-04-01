@@ -1,26 +1,26 @@
 # QAIL Zig
 
-**Pure Zig PostgreSQL driver with AST-native query building, codegen, and CLI.**
+**Zig-first PostgreSQL driver with AST-native query building, codegen, CLI, and optional Linux Kerberos/GSSENC integration.**
 
 [![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.7.0)
+[![Version](https://img.shields.io/badge/version-0.7.3-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.7.3)
 
 > **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
-> **Scope:** ~22K lines of pure Zig code across 120 files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, builders, and benchmarks.
+> **Scope:** ~22K lines of Zig across 120 tracked `.zig` files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, builders, and benchmarks, plus optional Linux GSSAPI/libc integration for Kerberos/GSSENC.
 >
-> **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated pure-Zig driver implementation.
+> **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated Zig driver implementation, with enterprise-auth on Linux using the platform GSSAPI stack rather than a self-contained Zig Kerberos implementation.
 
-> Pure Zig, zero FFI, zero GC. Current published driver matrix against `pg.zig`: qail-zig leads the `single` and `pool10` slices across `point`, `wide_rows`, `large_rows`, `many_params`, and `aggregate`.
+> Core driver/runtime path is Zig-native and zero-GC. The Linux Kerberos/GSSENC path uses optional runtime GSSAPI loading and libc-backed dynamic linking. Current published driver matrix against `pg.zig`: qail-zig leads the `single` and `pool10` slices across `point`, `wide_rows`, `large_rows`, `many_params`, and `aggregate`.
 
 - Docs: `dev.qail.io/zig/docs`
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 
 ## Highlights
 
-- **~22K lines of pure Zig** — 120 tracked `.zig` files, no C, no FFI, no dependencies
+- **~22K lines of Zig** — 120 tracked `.zig` files, Zig-first core runtime, optional Linux libc/GSSAPI integration only for Kerberos/GSSENC
 - **AST-Native Queries** — Type-safe query building, not string concatenation
 - **Codegen Parity** — 26 enums + 9 structs auto-generated from [qail.rs](https://github.com/qail-io/qail) AST
 - **Full PostgreSQL Driver** — Connection pooling, pipelining, TLS, COPY

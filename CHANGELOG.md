@@ -4,6 +4,19 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+## v0.7.3 — 2026-04-01
+
+### Fixed
+
+- Linux Kerberos/GSS smoke validation now uses the correct runtime path in CI: the smoke binary links libc so Zig uses the platform `dlopen`/`dlsym` path for GSSAPI lookup instead of the narrower ELF-only loader.
+- Linux GSSAPI loading now falls back to the RFC host-based service OID bytes when Ubuntu's MIT Kerberos library does not export the hostbased-service OID symbol names expected by the earlier loader.
+- The dedicated `Enterprise Auth Smoke` workflow now completes successfully on `ubuntu-24.04`, validating one real AST-native roundtrip over `gssencmode=require`.
+
+### Changed
+
+- README and docs wording now describe qail-zig accurately as a Zig-first PostgreSQL driver with optional Linux libc/GSSAPI integration for Kerberos/GSSENC, instead of claiming a blanket pure-Zig/no-FFI implementation on every path.
+- Package/docs version references are aligned on `v0.7.3`.
+
 ## v0.7.2 — 2026-04-01
 
 ### Fixed
