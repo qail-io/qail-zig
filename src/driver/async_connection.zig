@@ -8,6 +8,7 @@ const posix = std.posix;
 const builtin = @import("builtin");
 const net = @import("../compat/net.zig");
 const protocol = @import("../protocol/mod.zig");
+const message_limits = @import("message_limits.zig");
 
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
@@ -101,7 +102,7 @@ pub const AsyncConnection = struct {
         const length = std.mem.readInt(u32, self.read_buffer[self.read_pos + 1 ..][0..4], .big);
 
         // Read full payload
-        const payload_len = length - 4;
+        const payload_len = try message_limits.validateLengthField(length, self.read_buffer.len - 1);
         try self.ensureReadWithTimeout(5 + payload_len, timeout_ms);
 
         const payload = self.read_buffer[self.read_pos + 5 .. self.read_pos + 5 + payload_len];
@@ -111,6 +112,7 @@ pub const AsyncConnection = struct {
     }
 
     fn ensureReadWithTimeout(self: *AsyncConnection, needed: usize, timeout_ms: i32) !void {
+        if (needed > self.read_buffer.len) return error.MessageTooLarge;
         while (self.read_len - self.read_pos < needed) {
             // Compact buffer if needed
             if (self.read_pos > 0) {
@@ -325,7 +327,8 @@ pub const AsyncConnection = struct {
                     std.debug.print("Server error: {s}\n", .{err_info.message orelse "unknown"});
                     return error.ServerError;
                 },
-                else => {},
+                .notice => {},
+                else => return error.UnexpectedStartupMessageType,
             }
         }
     }

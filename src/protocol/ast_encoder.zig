@@ -27,6 +27,7 @@ const ColumnDef = @TypeOf(@as(Expr, undefined).column_def);
 const WindowExpr = @TypeOf(@as(Expr, undefined).window);
 const FrontendMessage = wire.FrontendMessage;
 const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
+const max_wire_message_len: usize = std.math.maxInt(i32);
 
 /// AST-to-Wire encoder
 /// Directly encodes QailCmd AST to PostgreSQL Extended Query Protocol bytes
@@ -88,6 +89,25 @@ pub const AstEncoder = struct {
         try self.buffer.append(self.allocator, 0);
     }
 
+    fn addLenChecked(total: *usize, add: usize) !void {
+        total.* = std.math.add(usize, total.*, add) catch return error.MessageTooLarge;
+    }
+
+    fn addCStringLenChecked(total: *usize, s: []const u8) !void {
+        try addLenChecked(total, s.len);
+        try addLenChecked(total, 1);
+    }
+
+    fn toWireLen(total: usize) !u32 {
+        if (total > max_wire_message_len) return error.MessageTooLarge;
+        return @intCast(total);
+    }
+
+    fn toWireI32Len(total: usize) !i32 {
+        if (total > max_wire_message_len) return error.MessageTooLarge;
+        return @intCast(total);
+    }
+
     // ==================== AST-Native Encoding ====================
 
     /// Encode a complete query pipeline from AST
@@ -135,35 +155,44 @@ pub const AstEncoder = struct {
 
     /// Encode Parse message with AST-generated query structure
     fn encodeParse(self: *AstEncoder, stmt_name: []const u8, cmd: *const QailCmd) !void {
-        // For now, we generate SQL from AST
-        // TODO: In future, encode directly to binary protocol where possible
-
-        // Calculate SQL from AST
-        var sql_buf: [4096]u8 = undefined;
-        var writer = io.FixedBufferWriter.init(&sql_buf);
-        try self.writeAstToSql(writer.writer(), cmd);
-        const sql = writer.getWritten();
-
-        const msg_len: u32 = 4 + @as(u32, @intCast(stmt_name.len)) + 1 + @as(u32, @intCast(sql.len)) + 1 + 2;
-
         try self.writeByte(@intFromEnum(FrontendMessage.parse));
-        try self.writeU32(msg_len);
+        const len_pos = self.buffer.items.len;
+        try self.writeU32(0); // patched after SQL is written
         try self.writeCString(stmt_name);
-        try self.writeCString(sql);
+
+        // Render SQL directly into the protocol buffer to avoid an extra copy
+        // through a temporary stack buffer.
+        try self.writeAstToSql(self.buffer.writer(self.allocator), cmd);
+        try self.writeByte(0); // SQL cstring terminator
         try self.writeU16(0); // No parameter types
+
+        const msg_len_usize = std.math.sub(usize, self.buffer.items.len, len_pos) catch return error.MessageTooLarge;
+        const msg_len = try toWireLen(msg_len_usize);
+        std.mem.writeInt(u32, self.buffer.items[len_pos..][0..4], msg_len, .big);
     }
 
     /// Encode Bind message
     fn encodeBind(self: *AstEncoder, portal: []const u8, stmt_name: []const u8, params: []const ?[]const u8) !void {
-        var params_size: u32 = 0;
+        if (params.len > std.math.maxInt(i16)) return error.TooManyParameters;
+
+        var params_size: usize = 0;
         for (params) |param| {
-            params_size += 4;
+            try addLenChecked(&params_size, 4);
             if (param) |p| {
-                params_size += @intCast(p.len);
+                _ = try toWireI32Len(p.len);
+                try addLenChecked(&params_size, p.len);
             }
         }
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + @as(u32, @intCast(stmt_name.len)) + 1 + 2 + 2 + params_size + 2;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        try addCStringLenChecked(&msg_len_usize, stmt_name);
+        try addLenChecked(&msg_len_usize, 2);
+        try addLenChecked(&msg_len_usize, 2);
+        try addLenChecked(&msg_len_usize, params_size);
+        try addLenChecked(&msg_len_usize, 2);
+        const msg_len = try toWireLen(msg_len_usize);
 
         try self.writeByte(@intFromEnum(FrontendMessage.bind));
         try self.writeU32(msg_len);
@@ -174,7 +203,7 @@ pub const AstEncoder = struct {
 
         for (params) |param| {
             if (param) |p| {
-                try self.writeI32(@intCast(p.len));
+                try self.writeI32(try toWireI32Len(p.len));
                 try self.writeBytes(p);
             } else {
                 try self.writeI32(-1);
@@ -186,7 +215,11 @@ pub const AstEncoder = struct {
 
     /// Encode Describe message
     fn encodeDescribe(self: *AstEncoder, portal: []const u8) !void {
-        const msg_len: u32 = 4 + 1 + @as(u32, @intCast(portal.len)) + 1;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addLenChecked(&msg_len_usize, 1);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        const msg_len = try toWireLen(msg_len_usize);
         try self.writeByte(@intFromEnum(FrontendMessage.describe));
         try self.writeU32(msg_len);
         try self.writeByte('P');
@@ -195,7 +228,11 @@ pub const AstEncoder = struct {
 
     /// Encode Execute message
     fn encodeExecute(self: *AstEncoder, portal: []const u8, max_rows: u32) !void {
-        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + 4;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        try addLenChecked(&msg_len_usize, 4);
+        const msg_len = try toWireLen(msg_len_usize);
         try self.writeByte(@intFromEnum(FrontendMessage.execute));
         try self.writeU32(msg_len);
         try self.writeCString(portal);
@@ -221,7 +258,12 @@ pub const AstEncoder = struct {
     pub fn encodePrepareNamed(self: *AstEncoder, stmt_name: []const u8, sql: []const u8) !void {
         self.buffer.clearRetainingCapacity();
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(stmt_name.len)) + 1 + @as(u32, @intCast(sql.len)) + 1 + 2;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, stmt_name);
+        try addCStringLenChecked(&msg_len_usize, sql);
+        try addLenChecked(&msg_len_usize, 2);
+        const msg_len = try toWireLen(msg_len_usize);
 
         try self.writeByte(@intFromEnum(FrontendMessage.parse));
         try self.writeU32(msg_len);
@@ -230,6 +272,15 @@ pub const AstEncoder = struct {
         try self.writeU16(0); // No parameter types
 
         try self.encodeSync();
+    }
+
+    /// Render AST as SQL bytes using the same encoder path as Parse.
+    pub fn toSqlOwned(self: *AstEncoder, allocator: std.mem.Allocator, cmd: *const QailCmd) ![]u8 {
+        var writer = io.AllocatingWriter.init(allocator);
+        defer writer.deinit();
+
+        try self.writeAstToSql(writer.writer(), cmd);
+        return try writer.toOwnedSlice();
     }
 
     /// Execute a named prepared statement with parameters (Bind + Describe + Execute + Sync)
@@ -1964,4 +2015,25 @@ test "ast encoder rejects non-postgres command without raw sql" {
     };
 
     try std.testing.expectError(error.UnsupportedCommandForPostgres, encoder.encodeQuery(&cmd));
+}
+
+test "ast encoder prepare named rejects oversized sql payload" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const huge_sql = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.MessageTooLarge, encoder.encodePrepareNamed("stmt", huge_sql));
+}
+
+test "ast encoder execute named rejects oversized parameter payload" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const huge_param = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+    const params = [_]?[]const u8{huge_param};
+
+    try std.testing.expectError(error.MessageTooLarge, encoder.executeNamedStatement("stmt", &params));
 }

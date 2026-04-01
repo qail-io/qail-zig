@@ -21,12 +21,12 @@ const connect_url_mod = @import("connect_url.zig");
 const explain_estimate_mod = @import("explain_estimate.zig");
 const notification_mod = @import("notification.zig");
 const replication_mod = @import("replication.zig");
+const extended_flow_mod = @import("extended_flow.zig");
 const raw_policy_mod = @import("raw_policy.zig");
 const raw_cmd_mod = @import("raw_cmd.zig");
 const raw_sql_mod = @import("raw_sql.zig");
 const gssenc_request_mod = @import("gssenc_request.zig");
 const gssenc_mod = @import("gssenc.zig");
-const transpiler = @import("../transpiler/postgres.zig");
 
 const QailCmd = ast.QailCmd;
 const Expr = ast.Expr;
@@ -44,6 +44,8 @@ const GssEncConnection = gssenc_mod.GssEncConnection;
 const CancelKey = cancel_mod.CancelKey;
 const PgRow = row_mod.PgRow;
 const StatementCache = query_mod.StatementCache;
+const ExtendedFlowConfig = extended_flow_mod.ExtendedFlowConfig;
+const ExtendedFlowTracker = extended_flow_mod.ExtendedFlowTracker;
 const MessageResult = struct {
     msg_type: BackendMessage,
     payload: []const u8,
@@ -91,6 +93,15 @@ pub const ExplainEstimate = explain_estimate_mod.ExplainEstimate;
 pub const CopyChunkHandler = *const fn (
     ctx: ?*anyopaque,
     chunk: []const u8,
+) anyerror!void;
+
+/// Callback for zero-copy row streaming.
+///
+/// Row/column slices alias the current backend message buffer and are only
+/// valid for the callback duration.
+pub const BytesRowHandler = *const fn (
+    ctx: ?*anyopaque,
+    row: *const row_mod.PgBytesRow,
 ) anyerror!void;
 
 pub const TlsMode = connect_url_mod.TlsMode;
@@ -336,6 +347,13 @@ pub const PgDriver = struct {
 
     /// Default max cached statements (matches Rust's default)
     const DEFAULT_CACHE_SIZE: usize = 256;
+    const MISSING_PREPARED_STMT_SQLSTATE = "26000";
+    const CACHED_PLAN_REPLANNED_SQLSTATE = "0A000";
+    const PREPARED_STMT_ALREADY_EXISTS_SQLSTATE = "42P05";
+    const CACHED_PLAN_REPLANNED_MSG = "cached plan must be replanned";
+    const PREPARED_STMT_MSG = "prepared statement";
+    const ALREADY_EXISTS_MSG = "already exists";
+
     pub fn init(conn: Connection, allocator: std.mem.Allocator) PgDriver {
         return initTransport(.{ .plain = conn }, allocator);
     }
@@ -762,7 +780,167 @@ pub const PgDriver = struct {
     /// Execute a QAIL AST command and fetch all rows
     pub fn fetchAll(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
         try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.fetchAllCached(cmd);
+    }
+
+    /// Execute a QAIL AST command and fetch all rows without using statement cache.
+    pub fn fetchAllUncached(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         return try self.fetchAllTrusted(cmd);
+    }
+
+    /// Stream rows to callback without per-cell copies.
+    ///
+    /// Row/column slices are borrowed and valid only for callback duration.
+    pub fn scanBytes(self: *PgDriver, cmd: *const QailCmd, ctx: ?*anyopaque, on_row: BytesRowHandler) !usize {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.scanBytesCached(cmd, &.{}, ctx, on_row);
+    }
+
+    /// Stream rows with bind parameters to callback without per-cell copies.
+    ///
+    /// Row/column slices are borrowed and valid only for callback duration.
+    pub fn scanBytesParams(
+        self: *PgDriver,
+        cmd: *const QailCmd,
+        params: []const ?[]const u8,
+        ctx: ?*anyopaque,
+        on_row: BytesRowHandler,
+    ) !usize {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.scanBytesCached(cmd, params, ctx, on_row);
+    }
+
+    fn scanBytesCached(
+        self: *PgDriver,
+        cmd: *const QailCmd,
+        params: []const ?[]const u8,
+        ctx: ?*anyopaque,
+        on_row: BytesRowHandler,
+    ) !usize {
+        var retried = false;
+        while (true) {
+            const stmt_name = self.getOrPrepare(cmd) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    error.PreparedStatementAlreadyExists => {
+                        if (retried) return err;
+                        retried = true;
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+
+            const row_count = self.scanPreparedBytes(stmt_name, params, ctx, on_row) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+            return row_count;
+        }
+    }
+
+    fn scanPreparedBytes(
+        self: *PgDriver,
+        stmt_name: []const u8,
+        params: []const ?[]const u8,
+        ctx: ?*anyopaque,
+        on_row: BytesRowHandler,
+    ) !usize {
+        try self.encoder.executeNamedStatement(stmt_name, params);
+        try self.conn.send(self.encoder.getWritten());
+
+        var row_count: usize = 0;
+        var field_names_template: []const []const u8 = &.{};
+        errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+
+        var column_scratch: []?[]const u8 = &.{};
+        defer if (column_scratch.len > 0) self.allocator.free(column_scratch);
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(false));
+
+        while (true) {
+            const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
+            switch (msg.msg_type) {
+                .parse_complete, .bind_complete => {},
+                .row_description => {
+                    var decoder = Decoder.init(msg.payload);
+                    const field_descriptions = try decoder.parseRowDescription(self.allocator);
+                    defer self.allocator.free(field_descriptions);
+
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
+                    }
+
+                    var names = try self.allocator.alloc([]const u8, field_descriptions.len);
+                    var copied: usize = 0;
+                    errdefer {
+                        for (names[0..copied]) |name| {
+                            self.allocator.free(name);
+                        }
+                        self.allocator.free(names);
+                    }
+                    for (field_descriptions, 0..) |fd, i| {
+                        names[i] = try self.allocator.dupe(u8, fd.name);
+                        copied += 1;
+                    }
+                    field_names_template = names;
+                },
+                .data_row => {
+                    if (msg.payload.len < 2) return error.InvalidDataRow;
+                    const col_count: usize = @intCast(std.mem.readInt(u16, msg.payload[0..2], .big));
+                    if (column_scratch.len < col_count) {
+                        if (column_scratch.len > 0) self.allocator.free(column_scratch);
+                        column_scratch = try self.allocator.alloc(?[]const u8, col_count);
+                    }
+
+                    var decoder = Decoder.init(msg.payload);
+                    const columns = try decoder.parseDataRowInto(column_scratch);
+                    const row = row_mod.PgBytesRow{
+                        .columns = columns,
+                        .field_names = field_names_template,
+                    };
+                    try on_row(ctx, &row);
+                    row_count += 1;
+                },
+                .command_complete, .no_data => {},
+                .ready_for_query => {
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
+                    }
+                    break;
+                },
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
+                    if (isPreparedStatementRetryableError(err.code, err.message)) {
+                        return error.PreparedStatementRetryable;
+                    }
+                    return error.QueryError;
+                },
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
+            }
+        }
+
+        return row_count;
     }
 
     fn fetchAllTrusted(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
@@ -781,10 +959,12 @@ pub const PgDriver = struct {
 
         var field_names_template: []const []const u8 = &.{};
         errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(true));
 
         // Read responses
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
 
             switch (msg.msg_type) {
                 .parse_complete, .bind_complete => {},
@@ -835,7 +1015,8 @@ pub const PgDriver = struct {
                 },
                 .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 .no_data => {},
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
 
@@ -859,6 +1040,12 @@ pub const PgDriver = struct {
     /// Execute a QAIL AST command (for mutations) - returns affected row count
     pub fn execute(self: *PgDriver, cmd: *const QailCmd) !u64 {
         try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.executeCached(cmd);
+    }
+
+    /// Execute a QAIL AST command without using statement cache.
+    pub fn executeUncached(self: *PgDriver, cmd: *const QailCmd) !u64 {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         return try self.executeTrusted(cmd);
     }
 
@@ -867,9 +1054,11 @@ pub const PgDriver = struct {
         try self.conn.send(self.encoder.getWritten());
 
         var affected_rows: u64 = 0;
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(true));
 
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
 
             switch (msg.msg_type) {
                 .parse_complete, .bind_complete => {},
@@ -883,6 +1072,7 @@ pub const PgDriver = struct {
                         affected_rows = std.fmt.parseInt(u64, last, 10) catch 0;
                     }
                 },
+                .no_data => {},
                 .ready_for_query => break,
                 .error_response => {
                     var decoder = Decoder.init(msg.payload);
@@ -892,7 +1082,8 @@ pub const PgDriver = struct {
                     return error.ExecuteError;
                 },
                 .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
 
@@ -1081,7 +1272,7 @@ pub const PgDriver = struct {
     /// Run EXPLAIN (FORMAT JSON) for a QAIL command and parse estimate.
     pub fn explainEstimate(self: *PgDriver, cmd: *const QailCmd) !?ExplainEstimate {
         try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
-        const sql = try transpiler.toSql(self.allocator, cmd);
+        const sql = try self.encoder.toSqlOwned(self.allocator, cmd);
         defer self.allocator.free(sql);
         return try self.explainEstimateSql(sql);
     }
@@ -1155,7 +1346,7 @@ pub const PgDriver = struct {
                     std.debug.print("Notification wait error: {s}\n", .{err.message orelse "unknown"});
                     return error.QueryError;
                 },
-                else => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
     }
@@ -1337,47 +1528,236 @@ pub const PgDriver = struct {
     ///
     /// This gives zero-transpilation-cost on hot paths.
     pub fn fetchAllCached(self: *PgDriver, cmd: *const QailCmd) ![]PgRow {
-        const stmt_name = try self.getOrPrepare(cmd);
-        return try self.fetchPrepared(stmt_name, &.{});
+        var retried = false;
+        while (true) {
+            const stmt_name = self.getOrPrepare(cmd) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    error.PreparedStatementAlreadyExists => {
+                        if (retried) return err;
+                        retried = true;
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+
+            const rows = self.fetchPrepared(stmt_name, &.{}) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+            return rows;
+        }
     }
 
     /// Execute a QAIL AST mutation with PREPARED STATEMENT CACHING.
     ///
     /// Same as fetchAllCached but for INSERT/UPDATE/DELETE — returns affected row count.
     pub fn executeCached(self: *PgDriver, cmd: *const QailCmd) !u64 {
-        const stmt_name = try self.getOrPrepare(cmd);
-        return try self.executePrepared(stmt_name, &.{});
+        var retried = false;
+        while (true) {
+            const stmt_name = self.getOrPrepare(cmd) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    error.PreparedStatementAlreadyExists => {
+                        if (retried) return err;
+                        retried = true;
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+
+            const affected = self.executePrepared(stmt_name, &.{}) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+            return affected;
+        }
     }
 
     /// Execute with parameters using prepared statement cache.
     pub fn fetchAllCachedParams(self: *PgDriver, cmd: *const QailCmd, params: []const ?[]const u8) ![]PgRow {
-        const stmt_name = try self.getOrPrepare(cmd);
-        return try self.fetchPrepared(stmt_name, params);
+        var retried = false;
+        while (true) {
+            const stmt_name = self.getOrPrepare(cmd) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    error.PreparedStatementAlreadyExists => {
+                        if (retried) return err;
+                        retried = true;
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+
+            const rows = self.fetchPrepared(stmt_name, params) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+            return rows;
+        }
     }
 
     /// Execute mutation with parameters using prepared statement cache.
     pub fn executeCachedParams(self: *PgDriver, cmd: *const QailCmd, params: []const ?[]const u8) !u64 {
-        const stmt_name = try self.getOrPrepare(cmd);
-        return try self.executePrepared(stmt_name, params);
+        var retried = false;
+        while (true) {
+            const stmt_name = self.getOrPrepare(cmd) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    error.PreparedStatementAlreadyExists => {
+                        if (retried) return err;
+                        retried = true;
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+
+            const affected = self.executePrepared(stmt_name, params) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+            return affected;
+        }
     }
 
-    /// Internal: transpile, hash, and prepare (on cache miss)
+    /// Internal: render SQL, hash, and prepare (on cache miss)
     fn getOrPrepare(self: *PgDriver, cmd: *const QailCmd) ![]const u8 {
         try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
-        // Transpile AST → SQL
-        const sql = try transpiler.toSql(self.allocator, cmd);
+        // Render SQL with the AST encoder path used by runtime Parse messages.
+        const sql = try self.encoder.toSqlOwned(self.allocator, cmd);
         defer self.allocator.free(sql);
 
         // Cache lookup (hash-based): returns name + hit/miss status
-        const result = try self.cache.getOrCreateWithStatus(sql);
+        var result = try self.cache.getOrCreateWithStatus(sql);
+        defer result.deinit(self.allocator);
+
+        if (result.evicted_stmt_name) |evicted_stmt_name| {
+            self.deallocatePreparedBestEffort(evicted_stmt_name) catch |err| {
+                // Miss path inserted a local cache entry already; remove it on failure.
+                if (!result.was_hit) _ = self.cache.remove(sql);
+                return err;
+            };
+        }
 
         if (!result.was_hit) {
             // Cache miss → prepare the statement on the server
-            try self.prepareNamed(result.name, sql);
+            self.prepareNamed(result.name, sql) catch |err| {
+                // Keep cache/server state aligned when prepare fails, except
+                // when server reports statement already exists (42P05).
+                if (err != error.PreparedStatementAlreadyExists) {
+                    _ = self.cache.remove(sql);
+                }
+                return err;
+            };
         }
         // Cache hit → statement already prepared on server, skip Parse
 
         return result.name;
+    }
+
+    fn deallocatePreparedBestEffort(self: *PgDriver, stmt_name: []const u8) !void {
+        const sql = try raw_sql_mod.buildDeallocatePrepared(self.allocator, stmt_name);
+        defer self.allocator.free(sql);
+
+        _ = self.executeTrustedRaw(sql) catch |err| {
+            // Statement may already be absent on server; keep cache flow resilient.
+            if (err == error.ExecuteError) return;
+            return err;
+        };
+    }
+
+    fn clearPreparedCacheState(self: *PgDriver) void {
+        self.cache.clear();
+    }
+
+    fn isPreparedStatementRetryableError(code: ?[]const u8, message: ?[]const u8) bool {
+        if (code) |sqlstate| {
+            if (std.ascii.eqlIgnoreCase(sqlstate, MISSING_PREPARED_STMT_SQLSTATE)) return true;
+            if (std.ascii.eqlIgnoreCase(sqlstate, CACHED_PLAN_REPLANNED_SQLSTATE)) {
+                if (message) |msg| return containsAsciiIgnoreCase(msg, CACHED_PLAN_REPLANNED_MSG);
+                return false;
+            }
+        }
+        if (message) |msg| return containsAsciiIgnoreCase(msg, CACHED_PLAN_REPLANNED_MSG);
+        return false;
+    }
+
+    fn isPreparedStatementAlreadyExistsError(code: ?[]const u8, message: ?[]const u8) bool {
+        if (code) |sqlstate| {
+            if (!std.ascii.eqlIgnoreCase(sqlstate, PREPARED_STMT_ALREADY_EXISTS_SQLSTATE)) return false;
+        } else {
+            return false;
+        }
+
+        const msg = message orelse return false;
+        return containsAsciiIgnoreCase(msg, PREPARED_STMT_MSG) and containsAsciiIgnoreCase(msg, ALREADY_EXISTS_MSG);
+    }
+
+    fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len == 0) return true;
+        if (haystack.len < needle.len) return false;
+
+        var i: usize = 0;
+        while (i + needle.len <= haystack.len) : (i += 1) {
+            var j: usize = 0;
+            while (j < needle.len) : (j += 1) {
+                if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
+            }
+            if (j == needle.len) return true;
+        }
+        return false;
     }
 
     /// Internal: send Parse + Sync for a named statement
@@ -1386,8 +1766,10 @@ pub const PgDriver = struct {
         try self.conn.send(self.encoder.getWritten());
 
         // Wait for ParseComplete + ReadyForQuery
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseOnly(true));
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
                 .parse_complete => {},
                 .ready_for_query => break,
@@ -1396,10 +1778,17 @@ pub const PgDriver = struct {
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Prepare error: {s}\n", .{err.message orelse "unknown"});
                     _ = self.drainUntilReadyForQuery() catch {};
+                    if (isPreparedStatementAlreadyExistsError(err.code, err.message)) {
+                        return error.PreparedStatementAlreadyExists;
+                    }
+                    if (isPreparedStatementRetryableError(err.code, err.message)) {
+                        return error.PreparedStatementRetryable;
+                    }
                     return error.PrepareError;
                 },
                 .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
     }
@@ -1425,8 +1814,10 @@ pub const PgDriver = struct {
         try self.conn.send(self.encoder.getWritten());
 
         // Wait for ParseComplete
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseOnly(true));
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
                 .parse_complete => {},
                 .ready_for_query => break,
@@ -1438,7 +1829,8 @@ pub const PgDriver = struct {
                     return error.PrepareError;
                 },
                 .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
     }
@@ -1450,9 +1842,11 @@ pub const PgDriver = struct {
         try self.conn.send(self.encoder.getWritten());
 
         var affected_rows: u64 = 0;
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(false));
 
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
                 .bind_complete => {},
                 .command_complete => {
@@ -1469,10 +1863,14 @@ pub const PgDriver = struct {
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Execute error: {s}\n", .{err.message orelse "unknown"});
                     _ = self.drainUntilReadyForQuery() catch {};
+                    if (isPreparedStatementRetryableError(err.code, err.message)) {
+                        return error.PreparedStatementRetryable;
+                    }
                     return error.ExecuteError;
                 },
                 .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
 
@@ -1492,9 +1890,11 @@ pub const PgDriver = struct {
 
         var field_names_template: []const []const u8 = &.{};
         errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(false));
 
         while (true) {
             const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
                 .bind_complete => {},
                 .row_description => {
@@ -1540,25 +1940,50 @@ pub const PgDriver = struct {
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
                     _ = self.drainUntilReadyForQuery() catch {};
+                    if (isPreparedStatementRetryableError(err.code, err.message)) {
+                        return error.PreparedStatementRetryable;
+                    }
                     return error.QueryError;
                 },
                 .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
-                else => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
             }
         }
 
         return try rows.toOwnedSlice(self.allocator);
     }
 
+    fn validateExtendedFlow(
+        self: *PgDriver,
+        flow: *ExtendedFlowTracker,
+        msg_type: BackendMessage,
+        error_pending: bool,
+    ) !void {
+        flow.validate(msg_type, error_pending) catch |err| {
+            // Best-effort resync on protocol-order violations.
+            _ = self.drainUntilReadyForQuery() catch {};
+            return err;
+        };
+    }
+
     fn drainUntilReadyForQuery(self: *PgDriver) !void {
         while (true) {
             const msg = try self.conn.readMessage();
+            if (!isDriverDrainAllowedMessage(msg.msg_type)) return error.UnexpectedBackendMessageType;
             switch (msg.msg_type) {
                 .ready_for_query => return,
                 .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
                 else => {},
             }
         }
+    }
+
+    fn isDriverDrainAllowedMessage(msg_type: BackendMessage) bool {
+        return switch (msg_type) {
+            .ready_for_query, .notification, .error_response, .notice, .parameter_status => true,
+            else => false,
+        };
     }
 
     fn ensureReplicationMode(self: *const PgDriver, operation: []const u8) !void {
@@ -2295,6 +2720,31 @@ fn makeHardeningTestDriver() PgDriver {
 test "replication hardening: ensure replication mode required" {
     var driver = makeHardeningTestDriver();
     try std.testing.expectError(error.ReplicationModeRequired, driver.ensureReplicationMode("IDENTIFY_SYSTEM"));
+}
+
+test "driver hardening: drain allowlist rejects unexpected message types" {
+    try std.testing.expect(PgDriver.isDriverDrainAllowedMessage(.ready_for_query));
+    try std.testing.expect(PgDriver.isDriverDrainAllowedMessage(.notification));
+    try std.testing.expect(PgDriver.isDriverDrainAllowedMessage(.error_response));
+    try std.testing.expect(PgDriver.isDriverDrainAllowedMessage(.notice));
+    try std.testing.expect(PgDriver.isDriverDrainAllowedMessage(.parameter_status));
+    try std.testing.expect(!PgDriver.isDriverDrainAllowedMessage(.data_row));
+    try std.testing.expect(!PgDriver.isDriverDrainAllowedMessage(.command_complete));
+}
+
+test "prepared statement hardening: retryable error detection" {
+    try std.testing.expect(PgDriver.isPreparedStatementRetryableError("26000", "prepared statement \"s1\" does not exist"));
+    try std.testing.expect(PgDriver.isPreparedStatementRetryableError("0A000", "cached plan must be replanned"));
+    try std.testing.expect(PgDriver.isPreparedStatementRetryableError("42P01", "cached plan must be replanned"));
+    try std.testing.expect(!PgDriver.isPreparedStatementRetryableError("42P01", "relation does not exist"));
+    try std.testing.expect(!PgDriver.isPreparedStatementRetryableError(null, null));
+}
+
+test "prepared statement hardening: already-exists error detection" {
+    try std.testing.expect(PgDriver.isPreparedStatementAlreadyExistsError("42P05", "prepared statement \"s1\" already exists"));
+    try std.testing.expect(!PgDriver.isPreparedStatementAlreadyExistsError("26000", "prepared statement \"s1\" already exists"));
+    try std.testing.expect(!PgDriver.isPreparedStatementAlreadyExistsError("42P05", "duplicate key value"));
+    try std.testing.expect(!PgDriver.isPreparedStatementAlreadyExistsError(null, null));
 }
 
 test "replication hardening: control operations blocked while stream active" {

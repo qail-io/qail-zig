@@ -6,6 +6,29 @@
 const std = @import("std");
 const pg_types = @import("types/mod.zig");
 
+/// Borrowed row view for zero-copy streaming paths.
+///
+/// Column slices alias the active protocol message buffer and are valid only
+/// until the caller reads the next backend message.
+pub const PgBytesRow = struct {
+    columns: []const ?[]const u8,
+    field_names: []const []const u8 = &.{},
+
+    pub fn getString(self: *const PgBytesRow, index: usize) ?[]const u8 {
+        if (index >= self.columns.len) return null;
+        return self.columns[index];
+    }
+
+    pub fn getByName(self: *const PgBytesRow, name: []const u8) ?[]const u8 {
+        for (self.field_names, 0..) |field_name, i| {
+            if (std.mem.eql(u8, field_name, name)) {
+                return self.columns[i];
+            }
+        }
+        return null;
+    }
+};
+
 /// A row of data from PostgreSQL
 pub const PgRow = struct {
     columns: []?[]const u8,
@@ -199,6 +222,20 @@ test "pgrow getString" {
 
     try std.testing.expectEqualStrings("hello", row.getString(0).?);
     try std.testing.expectEqualStrings("world", row.getString(1).?);
+    try std.testing.expect(row.getString(2) == null);
+}
+
+test "pgbytesrow getters" {
+    const columns = [_]?[]const u8{ "42", "alice", null };
+    const names = [_][]const u8{ "id", "name", "email" };
+    const row = PgBytesRow{
+        .columns = &columns,
+        .field_names = &names,
+    };
+
+    try std.testing.expectEqualStrings("42", row.getString(0).?);
+    try std.testing.expectEqualStrings("alice", row.getByName("name").?);
+    try std.testing.expect(row.getByName("missing") == null);
     try std.testing.expect(row.getString(2) == null);
 }
 

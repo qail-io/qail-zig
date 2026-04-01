@@ -57,6 +57,14 @@ pub fn buildAlterTableRls(
     return std.fmt.allocPrint(allocator, "ALTER TABLE {s} {s}", .{ quoted_table, rlsClause(mode) });
 }
 
+pub fn buildDeallocatePrepared(allocator: std.mem.Allocator, stmt_name: []const u8) ![]u8 {
+    if (stmt_name.len == 0) return error.InvalidStatementName;
+    for (stmt_name) |ch| {
+        if (!isIdentifierChar(ch)) return error.InvalidStatementName;
+    }
+    return std.fmt.allocPrint(allocator, "DEALLOCATE {s}", .{stmt_name});
+}
+
 fn rlsClause(mode: AlterTableRlsMode) []const u8 {
     return switch (mode) {
         .enable => "ENABLE ROW LEVEL SECURITY",
@@ -82,6 +90,10 @@ fn quoteIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
     return try out.toOwnedSlice(allocator);
 }
 
+fn isIdentifierChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
+}
+
 test "build listen quotes identifier" {
     const sql = try buildListen(std.testing.allocator, "chan\"nel");
     defer std.testing.allocator.free(sql);
@@ -101,4 +113,13 @@ test "build alter table rls sql quotes identifier" {
     defer std.testing.allocator.free(sql);
 
     try std.testing.expectEqualStrings("ALTER TABLE \"tenant\"\"orders\" ENABLE ROW LEVEL SECURITY", sql);
+}
+
+test "build deallocate prepared statement sql validates name" {
+    const sql = try buildDeallocatePrepared(std.testing.allocator, "s0123abcd");
+    defer std.testing.allocator.free(sql);
+    try std.testing.expectEqualStrings("DEALLOCATE s0123abcd", sql);
+
+    try std.testing.expectError(error.InvalidStatementName, buildDeallocatePrepared(std.testing.allocator, ""));
+    try std.testing.expectError(error.InvalidStatementName, buildDeallocatePrepared(std.testing.allocator, "drop;all"));
 }

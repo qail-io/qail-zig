@@ -15,6 +15,7 @@ const net = @import("../compat/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const tls_mod = @import("tls/mod.zig");
 const tls_client = @import("../compat/tls_client.zig");
+const message_limits = @import("message_limits.zig");
 
 const Encoder = protocol.Encoder;
 const StartupParam = Encoder.StartupParam;
@@ -218,7 +219,7 @@ pub const TlsConnection = struct {
 
         const msg_type: BackendMessage = @enumFromInt(self.pg_read_buffer[self.pg_read_pos]);
         const length = std.mem.readInt(u32, self.pg_read_buffer[self.pg_read_pos + 1 ..][0..4], .big);
-        const payload_len = length - 4;
+        const payload_len = try message_limits.validateLengthField(length, self.pg_read_buffer.len - 1);
 
         try self.ensurePgRead(5 + payload_len);
 
@@ -229,6 +230,7 @@ pub const TlsConnection = struct {
     }
 
     fn ensurePgRead(self: *TlsConnection, needed: usize) !void {
+        if (needed > self.pg_read_buffer.len) return error.MessageTooLarge;
         while (self.pg_read_len - self.pg_read_pos < needed) {
             if (self.pg_read_pos > 0) {
                 const remaining = self.pg_read_len - self.pg_read_pos;
@@ -453,7 +455,8 @@ pub const TlsConnection = struct {
                 .error_response => {
                     return error.ServerError;
                 },
-                else => {},
+                .notice => {},
+                else => return error.UnexpectedStartupMessageType,
             }
         }
     }

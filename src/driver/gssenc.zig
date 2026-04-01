@@ -5,6 +5,7 @@ const protocol = @import("../protocol/mod.zig");
 const auth_options_mod = @import("auth_options.zig");
 const io_backend_mod = @import("io_backend.zig");
 const kerberos_provider_mod = @import("kerberos_provider.zig");
+const message_limits = @import("message_limits.zig");
 
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
@@ -125,7 +126,7 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 
         const msg_type: BackendMessage = @enumFromInt(self.read_plain.items[self.read_pos]);
         const length = std.mem.readInt(u32, self.read_plain.items[self.read_pos + 1 ..][0..4], .big);
-        const payload_len = length - 4;
+        const payload_len = try message_limits.validateLengthField(length, message_limits.max_backend_message_len_field);
         try self.ensureRead(5 + payload_len);
 
         const payload = self.read_plain.items[self.read_pos + 5 .. self.read_pos + 5 + payload_len];
@@ -312,7 +313,8 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
                     std.debug.print("Server error: {s}\n", .{err_info.message orelse "unknown"});
                     return error.ServerError;
                 },
-                else => {},
+                .notice => {},
+                else => return error.UnexpectedStartupMessageType,
             }
         }
     }
@@ -388,6 +390,7 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 };
 
 fn writeFrame(stream: net.Stream, bytes: []const u8) !void {
+    if (bytes.len > std.math.maxInt(u32)) return error.MessageTooLarge;
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, @intCast(bytes.len), .big);
     try net.writeAllStream(stream, &len_buf);
@@ -474,6 +477,14 @@ test "gssenc writeFrame prefixes length and payload" {
     try std.testing.expect(ctx.ok);
     try std.testing.expectEqual(@as(u32, 5), ctx.frame_len);
     try std.testing.expectEqualStrings("hello", ctx.payload[0..ctx.payload_len]);
+}
+
+test "gssenc writeFrame rejects oversized payload length" {
+    const stream: net.Stream = undefined;
+    const too_large_len: usize = @as(usize, std.math.maxInt(u32)) + 1;
+    const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.MessageTooLarge, writeFrame(stream, payload));
 }
 
 test "gssenc readHandshakeFrame reads length-prefixed payload" {
