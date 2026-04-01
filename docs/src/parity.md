@@ -4,7 +4,7 @@ qail-zig tracks qail.rs as the reference implementation for PostgreSQL driver be
 
 ## Current Snapshot
 
-As of `2026-03-31`, the narrow AST/codegen parity checks against a local `qail.rs` checkout are green:
+As of `2026-04-01`, the narrow AST/codegen parity checks against a local `qail.rs` checkout are green:
 
 - `./scripts/check_codegen_sync.sh ../qail.rs` -> `codegen sync check passed`
 - `./scripts/check_parity.sh ../qail.rs` -> `AST actions: rust=75 zig=76`, `Encoder actions: rust=57 zig=76`, `parity check passed`
@@ -52,12 +52,13 @@ The main remaining policy difference is narrower now:
 - `qail-zig` now ships Linux Kerberos environment preflight diagnostics (`linuxKrb5Preflight`) and a built-in Linux Kerberos provider (`linuxKrb5TokenProvider`) via runtime GSSAPI loading on Linux.
 - `qail-zig` now also exposes a session-aware `GssTokenProviderEx` callback shape, which removes the old API limitation that prevented Rust-style stateful GSS provider implementations.
 - On Linux, accepted `GSSENCRequest` now proceeds into an encrypted GSS transport instead of failing closed after the preface.
+- The repository now also carries a dedicated Linux Kerberos/GSSENC smoke workflow that provisions a local realm + PostgreSQL service principal and proves one AST-native roundtrip over `gssencmode=require`.
 - Typed RLS helpers and typed policy parsing are now present on the Zig side, including normalization of common wrapped `current_setting(...)` forms emitted by `pg_dump`.
 - The old raw nested-query and raw policy-SQL string fields have been removed from the Zig AST shape entirely; trusted compatibility now flows through internal helper modules and raw AST variants that the public runtime gate already rejects.
 
 The main remaining enterprise-auth gap is narrower now:
 
-- runtime validation depth and maintenance burden are now the main gap, especially exercising the Linux GSSENC path against real Kerberos environments and keeping the local TLS/GSS compatibility layers stable across Zig upgrades
+- runtime coverage depth and maintenance burden are now the main gap, especially expanding beyond the new smoke path and keeping the local TLS/GSS compatibility layers stable across Zig upgrades
 
 ## PG Driver Focus
 

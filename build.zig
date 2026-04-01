@@ -245,6 +245,26 @@ pub fn build(b: *std.Build) void {
     const e2e_step = b.step("e2e", "Run E2E integration test against real PostgreSQL");
     e2e_step.dependOn(&run_e2e.step);
 
+    // ==================== Linux Kerberos/GSSENC Smoke Test ====================
+    const gssenc_smoke = b.addExecutable(.{
+        .name = "qail-gssenc-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gssenc_smoke_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+
+    const run_gssenc_smoke = b.addRunArtifact(gssenc_smoke);
+    if (b.args) |args| {
+        run_gssenc_smoke.addArgs(args);
+    }
+    const gssenc_smoke_step = b.step("gssenc-smoke", "Run Linux Kerberos/GSSENC smoke test against real PostgreSQL");
+    gssenc_smoke_step.dependOn(&run_gssenc_smoke.step);
+
     // ==================== I/O Benchmark (real DB queries) ====================
     const io_bench = b.addExecutable(.{
         .name = "io_bench",

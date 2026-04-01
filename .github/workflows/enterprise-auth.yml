@@ -1,0 +1,40 @@
+name: Enterprise Auth Smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  gssenc-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout qail-zig
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.1
+
+      - name: Provision Kerberos realm and PostgreSQL GSSENC lab
+        run: ./scripts/ci/setup_gssenc_lab.sh
+
+      - name: Run Linux Kerberos/GSSENC smoke test
+        run: zig build gssenc-smoke -Doptimize=ReleaseSafe
+
+      - name: Dump Kerberos and PostgreSQL diagnostics
+        if: failure()
+        run: |
+          set -x
+          klist || true
+          sudo bash -lc "cat ${QAIL_GSSENC_PG_LOG:-/var/log/postgresql/postgresql-*-main.log} || true"
+          sudo journalctl -u postgresql --no-pager -n 200 || true
+          sudo journalctl -u krb5-kdc --no-pager -n 200 || true
+          sudo cat /etc/krb5.conf || true
+          PG_MAJOR="${QAIL_GSSENC_PG_MAJOR:-$(psql --version | awk '{print $3}' | cut -d. -f1)}"
+          sudo cat "/etc/postgresql/${PG_MAJOR}/main/pg_hba.conf" || true
