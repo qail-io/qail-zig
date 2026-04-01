@@ -33,6 +33,13 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
     pub const GSS_C_CONF_FLAG: OmUint32 = 0x0000_0010;
     const GSS_SESSION_TTL_MS: i64 = 120_000;
     const GSS_MAX_SESSIONS: usize = 256;
+    // RFC 2743 / MIT Kerberos host-based service name type:
+    // 1.2.840.113554.1.2.1.4
+    const fallback_hostbased_service_oid_bytes = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04 };
+    var fallback_hostbased_service_oid_desc = GssOidDesc{
+        .length = fallback_hostbased_service_oid_bytes.len,
+        .elements = @ptrCast(@constCast(fallback_hostbased_service_oid_bytes[0..].ptr)),
+    };
 
     pub const Api = struct {
         lib: std.DynLib,
@@ -178,8 +185,16 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
                 if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via GSS_C_NT_HOSTBASED_SERVICE", .{candidate});
                 return oid_ptr.*;
             }
+            if (lib.lookup(*GssOid, "GSS_C_NT_HOSTBASED_SERVICE_X")) |oid_ptr| {
+                if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via GSS_C_NT_HOSTBASED_SERVICE_X", .{candidate});
+                return oid_ptr.*;
+            }
             if (lib.lookup(*GssOid, "__GSS_C_NT_HOSTBASED_SERVICE")) |oid_ptr| {
                 if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via __GSS_C_NT_HOSTBASED_SERVICE", .{candidate});
+                return oid_ptr.*;
+            }
+            if (lib.lookup(*GssOid, "__GSS_C_NT_HOSTBASED_SERVICE_X")) |oid_ptr| {
+                if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via __GSS_C_NT_HOSTBASED_SERVICE_X", .{candidate});
                 return oid_ptr.*;
             }
             if (lib.lookup(*GssOidDesc, "__gss_c_nt_hostbased_service_oid_desc")) |oid_desc| {
@@ -190,8 +205,8 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
                 if (debug) std.log.warn("gssapi: candidate {s} resolved hostbased OID via gss_nt_service_name", .{candidate});
                 return oid_desc;
             }
-            if (debug) std.log.warn("gssapi: candidate {s} missing hostbased service OID symbol", .{candidate});
-            return null;
+            if (debug) std.log.warn("gssapi: candidate {s} missing hostbased service OID symbol; using RFC fallback", .{candidate});
+            return &fallback_hostbased_service_oid_desc;
         }
 
         fn lookupRequired(
@@ -606,5 +621,19 @@ test "linux krb5 token provider is unsupported on non-linux targets" {
     try std.testing.expectError(
         error.UnsupportedLinuxKrb5ProviderPlatform,
         linuxKrb5TokenProvider(std.testing.allocator, .{ .host = "db.internal" }),
+    );
+}
+
+test "linux krb5 hostbased oid fallback matches RFC value" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const oid = LinuxKrb5Provider.fallback_hostbased_service_oid_desc;
+    try std.testing.expectEqual(@as(u32, 10), oid.length);
+
+    const bytes: [*]const u8 = @ptrCast(oid.elements.?);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04 },
+        bytes[0..oid.length],
     );
 }
