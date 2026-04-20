@@ -75,7 +75,7 @@ fn rlsClause(mode: AlterTableRlsMode) []const u8 {
 }
 
 fn quoteIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     try out.append(allocator, '"');

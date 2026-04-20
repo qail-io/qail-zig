@@ -110,7 +110,7 @@ fn runPipelinedBenchmark(stream: *net.Stream, encoder: *Encoder, read_buf: *[819
     }
 
     const end = time.now() catch unreachable;
-    return end.since(start);
+    return time.since(end, start);
 }
 
 fn readBatchResponses(stream: *net.Stream, buf: *[8192]u8, expected: u64) !void {

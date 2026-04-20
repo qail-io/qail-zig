@@ -52,7 +52,7 @@ fn benchmarkEncoding(allocator: std.mem.Allocator, iterations: u64) !u64 {
     }
 
     const end = time.now() catch unreachable;
-    return end.since(start);
+    return time.since(end, start);
 }
 
 fn printResult(iterations: u64, nanos: u64) void {

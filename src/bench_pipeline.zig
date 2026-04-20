@@ -61,7 +61,7 @@ pub fn main() !void {
         const completed = try pipeline.pipelinePreparedFast(&stmt, params_batch);
 
         const end = time.now() catch unreachable;
-        const nanos = end.since(start);
+        const nanos = time.since(end, start);
         const ms = @as(f64, @floatFromInt(nanos)) / 1_000_000.0;
         const qps = @as(f64, @floatFromInt(completed)) / (ms / 1000.0);
 

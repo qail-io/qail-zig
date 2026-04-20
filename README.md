@@ -2,7 +2,7 @@
 
 **Zig-first PostgreSQL driver with AST-native query building, codegen, CLI, and optional Linux Kerberos/GSSENC integration.**
 
-[![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
+[![Zig](https://img.shields.io/badge/Zig-0.16+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.7.3-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.7.3)
@@ -71,7 +71,7 @@ zig build ast-bench          # AST benchmark on healthy Zig toolchains
 zig build pgzig-bench -- qail single --workload point
 zig build pgzig-bench -- pgzig pool10 --workload many_params
 
-# macOS 26 + Zig 0.15.x workaround wrapper
+# Optional convenience wrapper (equivalent commands)
 ./scripts/zigw pgzig-bench qail single --workload point
 ./scripts/zigw pgzig-bench pgzig pool10 --workload many_params
 ```
@@ -79,12 +79,12 @@ zig build pgzig-bench -- pgzig pool10 --workload many_params
 ## Installation
 
 ```bash
-# Requires Zig 0.15+ and PostgreSQL 14+
+# Requires Zig 0.16+ and PostgreSQL 14+
 git clone https://github.com/qail-io/qail-zig.git
 cd qail-zig
 zig build -Doptimize=ReleaseFast
 
-# On the known macOS 26 build-runner issue path:
+# Optional wrapper for the common build/test commands:
 ./scripts/zigw doctor
 ./scripts/zigw test
 ```

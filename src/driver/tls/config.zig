@@ -34,12 +34,28 @@ pub const VerifyMode = union(enum) {
     // Future: system (load system certs)
 };
 
+pub const ClientOptions = struct {
+    host: union(enum) {
+        no_verification,
+        explicit: []const u8,
+    },
+    ca: union(enum) {
+        no_verification,
+        self_signed,
+        bundle: Certificate.Bundle,
+    },
+    read_buffer: []u8,
+    write_buffer: []u8,
+    allow_truncation_attacks: bool = false,
+    alert: ?*std.crypto.tls.Alert = null,
+};
+
 /// Build std.crypto.tls.Client.Options from TlsConfig
 pub fn buildClientOptions(
     config: TlsConfig,
     read_buffer: []u8,
     write_buffer: []u8,
-) std.crypto.tls.Client.Options {
+) ClientOptions {
     return .{
         .host = if (config.server_name) |name|
             .{ .explicit = name }
@@ -54,7 +70,6 @@ pub fn buildClientOptions(
         .write_buffer = write_buffer,
         .allow_truncation_attacks = config.allow_truncation_attacks,
         .alert = null,
-        .ssl_key_log = null,
     };
 }
 

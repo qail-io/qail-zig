@@ -1,6 +1,13 @@
 // QAIL Zig - Pure Zig PostgreSQL Driver with AST-Native Query Building
 //
 // This is the root module that exports all QAIL functionality.
+const builtin = @import("builtin");
+
+comptime {
+    if (builtin.zig_version.major == 0 and builtin.zig_version.minor < 16) {
+        @compileError("qail-zig requires Zig 0.16.0 or newer.");
+    }
+}
 
 pub const ast = @import("ast/mod.zig");
 pub const protocol = @import("protocol/mod.zig");

@@ -279,7 +279,7 @@ pub fn parseLimitClause(input: []const u8) ParseError!ParseResult(?i64) {
     const val = try parseValue(remaining);
     const limit = switch (val.value) {
         .int => |n| n,
-        .param => |_| return .{ .remaining = val.remaining, .value = null }, // Dynamic limit
+        .param => return .{ .remaining = val.remaining, .value = null }, // Dynamic limit
         else => return ParseError.InvalidNumber,
     };
 
@@ -299,7 +299,7 @@ pub fn parseOffsetClause(input: []const u8) ParseError!ParseResult(?i64) {
     const val = try parseValue(remaining);
     const offset = switch (val.value) {
         .int => |n| n,
-        .param => |_| return .{ .remaining = val.remaining, .value = null },
+        .param => return .{ .remaining = val.remaining, .value = null },
         else => return ParseError.InvalidNumber,
     };
 

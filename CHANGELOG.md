@@ -4,6 +4,17 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+### Changed
+
+- The project now targets Zig `0.16+` only; legacy Zig `0.15` compatibility shims have been removed from the std-I/O compatibility layer.
+- `compat/io` now targets Zig 0.16 `std.Io` only, using the threaded runtime by default with optional evented runtime enablement via `QAIL_STD_IO_EVENTED`.
+- `scripts/zigw` is now a thin convenience wrapper over `zig build`; the old Zig `0.15` direct-build workaround path was removed.
+
+### Fixed
+
+- Analyzer scanner parity with qail.rs was improved for Rust-style builder chains (`Qail::get(...).columns(...).eq(...).order_by(...)`), including resolution of const/let table and column bindings.
+- Scanner preprocessing now preserves line boundaries when joining multiline `let`/`const` statements, preventing inline `//` comments inside const column arrays from swallowing the remainder of the statement.
+
 ## v0.7.3 — 2026-04-01
 
 ### Fixed

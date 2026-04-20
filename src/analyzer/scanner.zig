@@ -4,6 +4,7 @@
 // used by your application, for migration impact analysis.
 
 const std = @import("std");
+const io_compat = @import("../compat/io.zig");
 
 /// Type of query found in source code
 pub const QueryType = enum {
@@ -35,6 +36,7 @@ pub const CodeReference = struct {
         self.allocator.free(self.file);
         self.allocator.free(self.table);
         self.allocator.free(self.snippet);
+        for (self.columns.items) |col| self.allocator.free(col);
         self.columns.deinit(self.allocator);
     }
 };
@@ -61,7 +63,7 @@ pub const CodebaseScanner = struct {
 
     /// Scan a directory or file for QAIL/SQL references
     pub fn scan(self: *CodebaseScanner, path: []const u8) !void {
-        const stat = std.fs.cwd().statFile(path) catch |err| {
+        const stat = std.Io.Dir.cwd().statFile(io_compat.runtimeIo(), path, .{}) catch |err| {
             if (err == error.IsDir) {
                 try self.scanDir(path);
                 return;
@@ -74,8 +76,9 @@ pub const CodebaseScanner = struct {
 
     /// Scan a directory recursively
     pub fn scanDir(self: *CodebaseScanner, dir_path: []const u8) !void {
-        var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-        defer dir.close();
+        const io_iface = io_compat.runtimeIo();
+        var dir = try std.Io.Dir.cwd().openDir(io_iface, dir_path, .{ .iterate = true });
+        defer dir.close(io_iface);
 
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
@@ -91,20 +94,20 @@ pub const CodebaseScanner = struct {
                     continue;
                 }
                 // Recursively scan subdirectory
-                var sub_path = std.ArrayList(u8).init(self.allocator);
-                defer sub_path.deinit();
-                try sub_path.appendSlice(dir_path);
-                try sub_path.append('/');
-                try sub_path.appendSlice(entry.name);
+                var sub_path: std.ArrayList(u8) = .empty;
+                defer sub_path.deinit(self.allocator);
+                try sub_path.appendSlice(self.allocator, dir_path);
+                try sub_path.append(self.allocator, '/');
+                try sub_path.appendSlice(self.allocator, entry.name);
                 try self.scanDir(sub_path.items);
             } else if (entry.kind == .file) {
                 // Check file extension
                 if (isSourceFile(entry.name)) {
-                    var file_path = std.ArrayList(u8).init(self.allocator);
-                    defer file_path.deinit();
-                    try file_path.appendSlice(dir_path);
-                    try file_path.append('/');
-                    try file_path.appendSlice(entry.name);
+                    var file_path: std.ArrayList(u8) = .empty;
+                    defer file_path.deinit(self.allocator);
+                    try file_path.appendSlice(self.allocator, dir_path);
+                    try file_path.append(self.allocator, '/');
+                    try file_path.appendSlice(self.allocator, entry.name);
                     self.scanFile(file_path.items) catch continue;
                 }
             }
@@ -113,11 +116,16 @@ pub const CodebaseScanner = struct {
 
     /// Scan a single file for references
     pub fn scanFile(self: *CodebaseScanner, file_path: []const u8) !void {
-        const file = try std.fs.cwd().openFile(file_path, .{});
-        defer file.close();
-
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024); // 1MB max
+        const content = try std.Io.Dir.cwd().readFileAlloc(
+            io_compat.runtimeIo(),
+            file_path,
+            self.allocator,
+            std.Io.Limit.limited(1024 * 1024),
+        );
         defer self.allocator.free(content);
+
+        var bindings = try LiteralBindings.collect(self.allocator, content);
+        defer bindings.deinit();
 
         var line_num: usize = 1;
         var line_start: usize = 0;
@@ -135,6 +143,8 @@ pub const CodebaseScanner = struct {
             const line = content[line_start..];
             try self.scanLine(file_path, line_num, line);
         }
+
+        try self.scanQailBuilderChains(file_path, content, &bindings);
     }
 
     /// Scan a single line for patterns
@@ -168,7 +178,7 @@ pub const CodebaseScanner = struct {
                     const col_start = col_pos + 1;
                     const col_end = findIdentifierEnd(line, col_start);
                     if (col_end > col_start) {
-                        try columns.append(self.allocator, line[col_start..col_end]);
+                        try columns.append(self.allocator, try self.allocator.dupe(u8, line[col_start..col_end]));
                         col_idx = col_end;
                     } else {
                         break;
@@ -187,6 +197,113 @@ pub const CodebaseScanner = struct {
             }
             idx = pos + pattern.len;
         }
+    }
+
+    fn scanQailBuilderChains(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        content: []const u8,
+        bindings: *const LiteralBindings,
+    ) !void {
+        var line_starts: std.ArrayList(usize) = .empty;
+        defer line_starts.deinit(self.allocator);
+        try line_starts.append(self.allocator, 0);
+        for (content, 0..) |c, i| {
+            if (c == '\n') try line_starts.append(self.allocator, i + 1);
+        }
+
+        var idx: usize = 0;
+        while (std.mem.indexOfPos(u8, content, idx, "Qail::")) |pos| {
+            const action_start = pos + "Qail::".len;
+            const action_end = findIdentifierEnd(content, action_start);
+            if (action_end <= action_start) {
+                idx = action_start;
+                continue;
+            }
+            const action = content[action_start..action_end];
+            if (!isQailBuilderAction(action)) {
+                idx = action_end;
+                continue;
+            }
+
+            const open_paren = skipWs(content, action_end);
+            if (open_paren >= content.len or content[open_paren] != '(') {
+                idx = action_end;
+                continue;
+            }
+
+            const close_paren = findMatchingParen(content, open_paren) orelse {
+                idx = open_paren + 1;
+                continue;
+            };
+            const statement_end = findStatementEnd(content, close_paren + 1) orelse {
+                idx = close_paren + 1;
+                continue;
+            };
+            const chain = content[pos .. statement_end + 1];
+            const first_arg = firstTopLevelArg(content[open_paren + 1 .. close_paren]);
+
+            var tables = try self.resolveBuilderTables(first_arg, bindings);
+            defer {
+                for (tables.items) |t| self.allocator.free(t);
+                tables.deinit(self.allocator);
+            }
+            if (tables.items.len == 0) {
+                idx = statement_end + 1;
+                continue;
+            }
+
+            var extracted_columns = try extractColumnsFromChain(self.allocator, chain, bindings);
+            defer {
+                for (extracted_columns.items) |c| self.allocator.free(c);
+                extracted_columns.deinit(self.allocator);
+            }
+
+            const line_no = offsetToLine(line_starts.items, pos);
+            const line_start = line_starts.items[line_no - 1];
+            var line_end = content.len;
+            if (line_no < line_starts.items.len) line_end = line_starts.items[line_no] - 1;
+            const snippet = trimSnippet(content[line_start..line_end]);
+
+            for (tables.items) |table| {
+                var columns = std.ArrayList([]const u8).empty;
+                for (extracted_columns.items) |col| {
+                    try columns.append(self.allocator, try self.allocator.dupe(u8, col));
+                }
+                try self.refs.append(self.allocator, .{
+                    .file = try self.allocator.dupe(u8, file_path),
+                    .line = line_no,
+                    .table = try self.allocator.dupe(u8, table),
+                    .columns = columns,
+                    .query_type = .qail,
+                    .snippet = try self.allocator.dupe(u8, snippet),
+                    .allocator = self.allocator,
+                });
+            }
+
+            idx = statement_end + 1;
+        }
+    }
+
+    fn resolveBuilderTables(self: *CodebaseScanner, first_arg: []const u8, bindings: *const LiteralBindings) !std.ArrayList([]const u8) {
+        var tables = std.ArrayList([]const u8).empty;
+
+        if (extractStringLiteral(self.allocator, first_arg)) |table| {
+            try tables.append(self.allocator, table);
+            return tables;
+        } else |err| switch (err) {
+            error.NotAStringLiteral => {},
+            else => return err,
+        }
+
+        if (extractLookupIdent(first_arg)) |ident| {
+            if (bindings.scalars.get(ident)) |values| {
+                for (values.items) |val| {
+                    try tables.append(self.allocator, try self.allocator.dupe(u8, val));
+                }
+            }
+        }
+        return tables;
     }
 
     /// Find SQL SELECT pattern
@@ -309,6 +426,599 @@ fn findIdentifierEnd(s: []const u8, start: usize) usize {
     return i;
 }
 
+fn skipWs(s: []const u8, start: usize) usize {
+    var i = start;
+    while (i < s.len and std.ascii.isWhitespace(s[i])) : (i += 1) {}
+    return i;
+}
+
+fn isQailBuilderAction(name: []const u8) bool {
+    return std.mem.eql(u8, name, "get") or
+        std.mem.eql(u8, name, "set") or
+        std.mem.eql(u8, name, "add") or
+        std.mem.eql(u8, name, "del") or
+        std.mem.eql(u8, name, "put") or
+        std.mem.eql(u8, name, "make");
+}
+
+fn findMatchingParen(s: []const u8, open_idx: usize) ?usize {
+    if (open_idx >= s.len or s[open_idx] != '(') return null;
+    var depth: usize = 0;
+    var i = open_idx;
+    var in_string = false;
+    var escape = false;
+    var line_comment = false;
+    var block_comment = false;
+
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+
+        if (line_comment) {
+            if (c == '\n') line_comment = false;
+            continue;
+        }
+        if (block_comment) {
+            if (c == '*' and i + 1 < s.len and s[i + 1] == '/') {
+                block_comment = false;
+                i += 1;
+            }
+            continue;
+        }
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '/' and i + 1 < s.len and s[i + 1] == '/') {
+            line_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < s.len and s[i + 1] == '*') {
+            block_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+
+        if (c == '(') {
+            depth += 1;
+        } else if (c == ')') {
+            if (depth == 0) return null;
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+    }
+    return null;
+}
+
+fn findStatementEnd(s: []const u8, start: usize) ?usize {
+    var i = start;
+    var paren: i32 = 0;
+    var bracket: i32 = 0;
+    var brace: i32 = 0;
+    var in_string = false;
+    var escape = false;
+    var line_comment = false;
+    var block_comment = false;
+
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+
+        if (line_comment) {
+            if (c == '\n') line_comment = false;
+            continue;
+        }
+        if (block_comment) {
+            if (c == '*' and i + 1 < s.len and s[i + 1] == '/') {
+                block_comment = false;
+                i += 1;
+            }
+            continue;
+        }
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '/' and i + 1 < s.len and s[i + 1] == '/') {
+            line_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < s.len and s[i + 1] == '*') {
+            block_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+
+        switch (c) {
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            '[' => bracket += 1,
+            ']' => bracket -= 1,
+            '{' => brace += 1,
+            '}' => brace -= 1,
+            ';' => if (paren <= 0 and bracket <= 0 and brace <= 0) return i,
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn offsetToLine(line_starts: []const usize, offset: usize) usize {
+    var lo: usize = 0;
+    var hi: usize = line_starts.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        if (line_starts[mid] <= offset) lo = mid + 1 else hi = mid;
+    }
+    return if (lo == 0) 1 else lo;
+}
+
+fn firstTopLevelArg(args: []const u8) []const u8 {
+    var i: usize = 0;
+    var paren: i32 = 0;
+    var bracket: i32 = 0;
+    var brace: i32 = 0;
+    var in_string = false;
+    var escape = false;
+    while (i < args.len) : (i += 1) {
+        const c = args[i];
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+        switch (c) {
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            '[' => bracket += 1,
+            ']' => bracket -= 1,
+            '{' => brace += 1,
+            '}' => brace -= 1,
+            ',' => if (paren == 0 and bracket == 0 and brace == 0) {
+                return std.mem.trim(u8, args[0..i], " \t\r\n");
+            },
+            else => {},
+        }
+    }
+    return std.mem.trim(u8, args, " \t\r\n");
+}
+
+fn extractLookupIdent(arg: []const u8) ?[]const u8 {
+    var s = std.mem.trim(u8, arg, " \t\r\n");
+    while (std.mem.startsWith(u8, s, "&")) s = std.mem.trimStart(u8, s[1..], " \t");
+    if (s.len == 0) return null;
+    if (s[0] == '"') return null;
+
+    var seg = s;
+    if (std.mem.lastIndexOfScalar(u8, s, '.')) |dot| seg = s[dot + 1 ..];
+    if (std.mem.lastIndexOf(u8, seg, "::")) |sep| seg = seg[sep + 2 ..];
+    seg = std.mem.trim(u8, seg, " \t\r\n()[]");
+    if (seg.len == 0) return null;
+    if (!isIdentifier(seg)) return null;
+    return seg;
+}
+
+fn isIdentifier(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (!std.ascii.isAlphabetic(s[0]) and s[0] != '_') return false;
+    for (s[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    return true;
+}
+
+const StringList = std.ArrayList([]const u8);
+
+const LiteralBindings = struct {
+    allocator: std.mem.Allocator,
+    scalars: std.StringHashMap(StringList),
+    arrays: std.StringHashMap(StringList),
+
+    fn init(allocator: std.mem.Allocator) LiteralBindings {
+        return .{
+            .allocator = allocator,
+            .scalars = std.StringHashMap(StringList).init(allocator),
+            .arrays = std.StringHashMap(StringList).init(allocator),
+        };
+    }
+
+    fn deinit(self: *LiteralBindings) void {
+        var it_scalars = self.scalars.iterator();
+        while (it_scalars.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            for (entry.value_ptr.items) |v| self.allocator.free(v);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.scalars.deinit();
+
+        var it_arrays = self.arrays.iterator();
+        while (it_arrays.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            for (entry.value_ptr.items) |v| self.allocator.free(v);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.arrays.deinit();
+    }
+
+    fn collect(allocator: std.mem.Allocator, content: []const u8) !LiteralBindings {
+        var out = LiteralBindings.init(allocator);
+        errdefer out.deinit();
+
+        var lines: std.ArrayList([]const u8) = .empty;
+        defer lines.deinit(allocator);
+        var split = std.mem.splitScalar(u8, content, '\n');
+        while (split.next()) |line| try lines.append(allocator, line);
+
+        var i: usize = 0;
+        while (i < lines.items.len) {
+            const line = std.mem.trim(u8, lines.items[i], " \t\r\n");
+
+            if (std.mem.startsWith(u8, line, "let ")) {
+                var stmt: std.ArrayList(u8) = .empty;
+                defer stmt.deinit(allocator);
+                try stmt.appendSlice(allocator, line);
+
+                var j = i + 1;
+                while (j < lines.items.len and std.mem.indexOfScalar(u8, stmt.items, ';') == null) : (j += 1) {
+                    try stmt.append(allocator, '\n');
+                    try stmt.appendSlice(allocator, std.mem.trim(u8, lines.items[j], " \t\r\n"));
+                }
+                try out.recordLetOrConst(stmt.items, true);
+                i = if (j > i) j else i + 1;
+                continue;
+            }
+
+            if (looksLikeConstBinding(line)) {
+                var stmt: std.ArrayList(u8) = .empty;
+                defer stmt.deinit(allocator);
+                try stmt.appendSlice(allocator, line);
+
+                var j = i + 1;
+                while (j < lines.items.len and std.mem.indexOfScalar(u8, stmt.items, ';') == null) : (j += 1) {
+                    try stmt.append(allocator, '\n');
+                    try stmt.appendSlice(allocator, std.mem.trim(u8, lines.items[j], " \t\r\n"));
+                }
+                try out.recordLetOrConst(stmt.items, false);
+                i = if (j > i) j else i + 1;
+                continue;
+            }
+
+            i += 1;
+        }
+
+        return out;
+    }
+
+    fn recordLetOrConst(self: *LiteralBindings, stmt: []const u8, is_let: bool) !void {
+        const parsed = if (is_let) parseLetBinding(stmt) else parseConstBinding(stmt);
+        if (parsed == null) return;
+        const binding = parsed.?;
+
+        if (extractStringLiteral(self.allocator, binding.rhs)) |scalar| {
+            try self.appendBinding(&self.scalars, binding.name, scalar);
+        } else |err| switch (err) {
+            error.NotAStringLiteral => {},
+            else => return err,
+        }
+
+        var array_vals = try extractArrayStringLiterals(self.allocator, binding.rhs);
+        defer {
+            for (array_vals.items) |v| self.allocator.free(v);
+            array_vals.deinit(self.allocator);
+        }
+        if (array_vals.items.len > 0) {
+            for (array_vals.items) |v| {
+                try self.appendBinding(&self.arrays, binding.name, try self.allocator.dupe(u8, v));
+            }
+        }
+    }
+
+    fn appendBinding(
+        self: *LiteralBindings,
+        map: *std.StringHashMap(StringList),
+        name: []const u8,
+        value_owned: []const u8,
+    ) !void {
+        var gop = try map.getOrPut(name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try self.allocator.dupe(u8, name);
+            gop.value_ptr.* = .empty;
+        }
+        for (gop.value_ptr.items) |existing| {
+            if (std.mem.eql(u8, existing, value_owned)) {
+                self.allocator.free(value_owned);
+                return;
+            }
+        }
+        try gop.value_ptr.append(self.allocator, value_owned);
+    }
+};
+
+const ParsedBinding = struct {
+    name: []const u8,
+    rhs: []const u8,
+};
+
+fn parseLetBinding(stmt: []const u8) ?ParsedBinding {
+    var s = std.mem.trim(u8, stmt, " \t\r\n");
+    if (!std.mem.startsWith(u8, s, "let ")) return null;
+    s = std.mem.trimStart(u8, s["let ".len..], " \t");
+    if (std.mem.startsWith(u8, s, "mut ")) s = std.mem.trimStart(u8, s["mut ".len..], " \t");
+    if (s.len == 0 or s[0] == '(') return null;
+
+    const name_end = findIdentifierEnd(s, 0);
+    if (name_end == 0) return null;
+    const name = s[0..name_end];
+
+    var rest = std.mem.trimStart(u8, s[name_end..], " \t");
+    if (rest.len > 0 and rest[0] == ':') {
+        if (std.mem.indexOfScalar(u8, rest, '=')) |eq| {
+            rest = rest[eq..];
+        } else return null;
+    }
+    if (rest.len == 0 or rest[0] != '=') return null;
+    var rhs = std.mem.trim(u8, rest[1..], " \t\r\n");
+    rhs = std.mem.trimEnd(u8, rhs, "; \t\r\n");
+    return .{ .name = name, .rhs = rhs };
+}
+
+fn looksLikeConstBinding(line: []const u8) bool {
+    const prefixes = [_][]const u8{
+        "const ",
+        "static ",
+        "pub const ",
+        "pub static ",
+        "pub(crate) const ",
+        "pub(crate) static ",
+        "pub(super) const ",
+        "pub(super) static ",
+    };
+    for (prefixes) |p| if (std.mem.startsWith(u8, line, p)) return true;
+    return false;
+}
+
+fn parseConstBinding(stmt: []const u8) ?ParsedBinding {
+    var s = std.mem.trim(u8, stmt, " \t\r\n");
+    const prefixes = [_][]const u8{
+        "pub(crate) ",
+        "pub(super) ",
+        "pub ",
+        "const ",
+        "static ",
+    };
+    var rounds: usize = 0;
+    while (rounds < 6) : (rounds += 1) {
+        var advanced = false;
+        for (prefixes) |p| {
+            if (std.mem.startsWith(u8, s, p)) {
+                s = std.mem.trimStart(u8, s[p.len..], " \t");
+                advanced = true;
+            }
+        }
+        if (!advanced) break;
+    }
+    if (std.mem.startsWith(u8, s, "mut ")) s = std.mem.trimStart(u8, s["mut ".len..], " \t");
+    const name_end = findIdentifierEnd(s, 0);
+    if (name_end == 0) return null;
+    const name = s[0..name_end];
+
+    var rest = std.mem.trimStart(u8, s[name_end..], " \t");
+    if (rest.len > 0 and rest[0] == ':') {
+        if (std.mem.indexOfScalar(u8, rest, '=')) |eq| {
+            rest = rest[eq..];
+        } else return null;
+    }
+    if (rest.len == 0 or rest[0] != '=') return null;
+    var rhs = std.mem.trim(u8, rest[1..], " \t\r\n");
+    rhs = std.mem.trimEnd(u8, rhs, "; \t\r\n");
+    return .{ .name = name, .rhs = rhs };
+}
+
+fn extractStringLiteral(allocator: std.mem.Allocator, expr: []const u8) ![]const u8 {
+    const s = std.mem.trim(u8, expr, " \t\r\n");
+    if (s.len == 0 or s[0] != '"') return error.NotAStringLiteral;
+
+    var i: usize = 1;
+    var escape = false;
+    while (i < s.len) : (i += 1) {
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (s[i] == '\\') {
+            escape = true;
+            continue;
+        }
+        if (s[i] == '"') {
+            return allocator.dupe(u8, s[1..i]);
+        }
+    }
+    return error.NotAStringLiteral;
+}
+
+fn extractArrayStringLiterals(allocator: std.mem.Allocator, expr: []const u8) !std.ArrayList([]const u8) {
+    var out = std.ArrayList([]const u8).empty;
+    if (std.mem.indexOfScalar(u8, expr, '[') == null) return out;
+
+    var in_string = false;
+    var escape = false;
+    var line_comment = false;
+    var block_comment = false;
+    var str_start: usize = 0;
+    var i: usize = 0;
+
+    while (i < expr.len) : (i += 1) {
+        const c = expr[i];
+        if (line_comment) {
+            if (c == '\n') line_comment = false;
+            continue;
+        }
+        if (block_comment) {
+            if (c == '*' and i + 1 < expr.len and expr[i + 1] == '/') {
+                block_comment = false;
+                i += 1;
+            }
+            continue;
+        }
+        if (in_string) {
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (c == '\\') {
+                escape = true;
+                continue;
+            }
+            if (c == '"') {
+                try appendUniqueOwned(&out, allocator, expr[str_start..i]);
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '/' and i + 1 < expr.len and expr[i + 1] == '/') {
+            line_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < expr.len and expr[i + 1] == '*') {
+            block_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            str_start = i + 1;
+            continue;
+        }
+    }
+    return out;
+}
+
+fn appendUniqueOwned(list: *std.ArrayList([]const u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    for (list.items) |existing| {
+        if (std.mem.eql(u8, existing, value)) return;
+    }
+    try list.append(allocator, try allocator.dupe(u8, value));
+}
+
+fn extractColumnsFromChain(
+    allocator: std.mem.Allocator,
+    chain: []const u8,
+    bindings: *const LiteralBindings,
+) !std.ArrayList([]const u8) {
+    var columns = std.ArrayList([]const u8).empty;
+    var idx: usize = 0;
+
+    while (std.mem.indexOfPos(u8, chain, idx, ".")) |dot| {
+        const name_start = dot + 1;
+        const name_end = findIdentifierEnd(chain, name_start);
+        if (name_end <= name_start) {
+            idx = name_start;
+            continue;
+        }
+        const name = chain[name_start..name_end];
+        const open = skipWs(chain, name_end);
+        if (open >= chain.len or chain[open] != '(') {
+            idx = name_end;
+            continue;
+        }
+        const close = findMatchingParen(chain, open) orelse {
+            idx = open + 1;
+            continue;
+        };
+
+        const args = chain[open + 1 .. close];
+        const first_arg = firstTopLevelArg(args);
+
+        if (std.mem.eql(u8, name, "column")) {
+            if (extractStringLiteral(allocator, first_arg)) |col| {
+                try appendUniqueOwned(&columns, allocator, col);
+                allocator.free(col);
+            } else |_| {}
+        } else if (std.mem.eql(u8, name, "columns")) {
+            var vals = try extractArrayStringLiterals(allocator, first_arg);
+            defer {
+                for (vals.items) |v| allocator.free(v);
+                vals.deinit(allocator);
+            }
+            if (vals.items.len == 0) {
+                if (extractLookupIdent(first_arg)) |ident| {
+                    if (bindings.arrays.get(ident)) |arr| {
+                        for (arr.items) |v| try appendUniqueOwned(&columns, allocator, v);
+                    }
+                }
+            } else {
+                for (vals.items) |v| try appendUniqueOwned(&columns, allocator, v);
+            }
+        } else if (isSingleColumnMethod(name)) {
+            if (extractStringLiteral(allocator, first_arg)) |col| {
+                if (std.mem.indexOfScalar(u8, col, '.') == null) {
+                    try appendUniqueOwned(&columns, allocator, col);
+                }
+                allocator.free(col);
+            } else |_| {}
+        }
+
+        idx = close + 1;
+    }
+
+    return columns;
+}
+
+fn isSingleColumnMethod(name: []const u8) bool {
+    return std.mem.eql(u8, name, "filter") or
+        std.mem.eql(u8, name, "eq") or
+        std.mem.eql(u8, name, "ne") or
+        std.mem.eql(u8, name, "gt") or
+        std.mem.eql(u8, name, "lt") or
+        std.mem.eql(u8, name, "gte") or
+        std.mem.eql(u8, name, "lte") or
+        std.mem.eql(u8, name, "like") or
+        std.mem.eql(u8, name, "ilike") or
+        std.mem.eql(u8, name, "where_eq") or
+        std.mem.eql(u8, name, "order_by") or
+        std.mem.eql(u8, name, "order_desc") or
+        std.mem.eql(u8, name, "order_asc") or
+        std.mem.eql(u8, name, "in_vals") or
+        std.mem.eql(u8, name, "is_null") or
+        std.mem.eql(u8, name, "is_not_null") or
+        std.mem.eql(u8, name, "set_value") or
+        std.mem.eql(u8, name, "set_coalesce") or
+        std.mem.eql(u8, name, "set_coalesce_opt");
+}
+
 /// Trim snippet to max 60 chars
 fn trimSnippet(line: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
@@ -357,4 +1067,80 @@ test "isSourceFile" {
     try std.testing.expect(isSourceFile("server.zig"));
     try std.testing.expect(!isSourceFile("readme.md"));
     try std.testing.expect(!isSourceFile("config.json"));
+}
+
+test "scanFile resolves const array columns with inline comments in qail builder chain" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\const ORDER_COLUMNS: &[&str] = &[
+        \\    "id",                 // 0
+        \\    "invoice_number",     // 1
+        \\    "status",             // 2
+        \\    "total_amount",       // 3
+        \\    "created_at",         // 4
+        \\];
+        \\
+        \\fn list(uid: &str) {
+        \\    let _cmd = qail_core::ast::Qail::get("orders")
+        \\        .columns(ORDER_COLUMNS)
+        \\        .eq("user_id", uid)
+        \\        .order_by("created_at", qail_core::ast::SortOrder::Desc);
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.rs", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.rs", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    const ref = scanner.refs.items[0];
+    try std.testing.expectEqualStrings("orders", ref.table);
+
+    try expectHasColumn(ref.columns.items, "id");
+    try expectHasColumn(ref.columns.items, "invoice_number");
+    try expectHasColumn(ref.columns.items, "status");
+    try expectHasColumn(ref.columns.items, "total_amount");
+    try expectHasColumn(ref.columns.items, "created_at");
+    try expectHasColumn(ref.columns.items, "user_id");
+}
+
+test "scanFile resolves const scalar table binding in qail builder chain" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\const USERS_TABLE: &str = "users";
+        \\
+        \\fn demo(uid: &str) {
+        \\    let _cmd = qail_core::ast::Qail::get(USERS_TABLE)
+        \\        .column("id")
+        \\        .eq("id", uid);
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.rs", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.rs", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    const ref = scanner.refs.items[0];
+    try std.testing.expectEqualStrings("users", ref.table);
+    try expectHasColumn(ref.columns.items, "id");
+}
+
+fn expectHasColumn(columns: []const []const u8, target: []const u8) !void {
+    for (columns) |col| {
+        if (std.mem.eql(u8, col, target)) return;
+    }
+    return error.ExpectedColumnMissing;
 }

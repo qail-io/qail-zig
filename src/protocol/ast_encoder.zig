@@ -38,7 +38,7 @@ pub const AstEncoder = struct {
 
     pub fn init(allocator: std.mem.Allocator) AstEncoder {
         return .{
-            .buffer = .{},
+            .buffer = .empty,
             .allocator = allocator,
         };
     }
@@ -160,9 +160,12 @@ pub const AstEncoder = struct {
         try self.writeU32(0); // patched after SQL is written
         try self.writeCString(stmt_name);
 
-        // Render SQL directly into the protocol buffer to avoid an extra copy
-        // through a temporary stack buffer.
-        try self.writeAstToSql(self.buffer.writer(self.allocator), cmd);
+        var sql_writer = io.AllocatingWriter.init(self.allocator);
+        defer sql_writer.deinit();
+        try self.writeAstToSql(sql_writer.writer(), cmd);
+        const sql = try sql_writer.toOwnedSlice();
+        defer self.allocator.free(sql);
+        try self.writeBytes(sql);
         try self.writeByte(0); // SQL cstring terminator
         try self.writeU16(0); // No parameter types
 

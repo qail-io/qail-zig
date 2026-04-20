@@ -1,4 +1,5 @@
 .zig-cache/
+.zig-cache-016/
 zig-out/
 .DS_Store
 *.o
@@ -6,3 +7,5 @@ zig-out/
 *.so
 *.dylib
 .zig-global-cache/
+zig-pkg/
+.tooling/

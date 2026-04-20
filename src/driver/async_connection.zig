@@ -46,7 +46,7 @@ pub const AsyncConnection = struct {
     }
 
     pub fn close(self: *AsyncConnection) void {
-        posix.close(self.fd);
+        _ = posix.system.close(self.fd);
     }
 
     /// Send bytes with timeout
@@ -58,7 +58,7 @@ pub const AsyncConnection = struct {
                 return error.WriteTimeout;
             }
 
-            const n = posix.write(self.fd, bytes[sent..]) catch |err| {
+            const n = fdWrite(self.fd, bytes[sent..]) catch |err| {
                 if (err == error.WouldBlock) continue;
                 return err;
             };
@@ -78,7 +78,7 @@ pub const AsyncConnection = struct {
             return error.ReadTimeout;
         }
 
-        const n = posix.read(self.fd, buf) catch |err| {
+        const n = fdRead(self.fd, buf) catch |err| {
             if (err == error.WouldBlock) return 0;
             return err;
         };
@@ -128,12 +128,36 @@ pub const AsyncConnection = struct {
             }
 
             // Read more data
-            const n = posix.read(self.fd, self.read_buffer[self.read_len..]) catch |err| {
+            const n = fdRead(self.fd, self.read_buffer[self.read_len..]) catch |err| {
                 if (err == error.WouldBlock) continue;
                 return err;
             };
             if (n == 0) return error.ConnectionClosed;
             self.read_len += n;
+        }
+    }
+
+    fn fdWrite(fd: posix.fd_t, bytes: []const u8) !usize {
+        while (true) {
+            const rc = posix.system.write(fd, bytes.ptr, bytes.len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => |err| return posix.unexpectedErrno(err),
+            }
+        }
+    }
+
+    fn fdRead(fd: posix.fd_t, buf: []u8) !usize {
+        while (true) {
+            const rc = posix.system.read(fd, buf.ptr, buf.len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => |err| return posix.unexpectedErrno(err),
+            }
         }
     }
 

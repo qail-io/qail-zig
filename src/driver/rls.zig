@@ -130,7 +130,7 @@ pub const RlsContext = struct {
 /// Denylist (removed even if printable):
 /// - `'` `\` `;` `$`
 pub fn sanitizeGucValue(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     for (value) |c| {

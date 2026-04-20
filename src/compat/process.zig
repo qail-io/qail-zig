@@ -1,13 +1,32 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
-pub fn argsAlloc(allocator: std.mem.Allocator) ![][:0]u8 {
-    return std.process.argsAlloc(allocator);
-}
+pub const EnvMap = std.process.Environ.Map;
 
-pub fn argsFree(allocator: std.mem.Allocator, args: []const [:0]u8) void {
-    std.process.argsFree(allocator, args);
+pub fn getEnvMap(allocator: std.mem.Allocator) !EnvMap {
+    return switch (builtin.os.tag) {
+        .windows => std.process.Environ.createMap(.{ .block = .global }, allocator),
+        else => blk: {
+            var map = EnvMap.init(allocator);
+            errdefer map.deinit();
+
+            if (!builtin.link_libc) break :blk map;
+
+            const c = std.c;
+            if (!@hasDecl(c, "environ")) break :blk map;
+
+            var len: usize = 0;
+            while (c.environ[len] != null) : (len += 1) {}
+            const env_slice = c.environ[0..len :null];
+            try map.putPosixBlock(.{ .slice = @ptrCast(env_slice) });
+            break :blk map;
+        },
+    };
 }
 
 pub fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, key);
+    var env_map = try getEnvMap(allocator);
+    defer env_map.deinit();
+    const value = env_map.get(key) orelse return error.EnvironmentVariableNotFound;
+    return allocator.dupe(u8, value);
 }

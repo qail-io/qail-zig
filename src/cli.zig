@@ -14,6 +14,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const QailCmd = @import("ast/cmd.zig").QailCmd;
 const Expr = @import("ast/expr.zig").Expr;
+const io_compat = @import("compat/io.zig");
 
 const print = std.debug.print;
 const data_safety = @import("data_safety.zig");
@@ -364,13 +365,13 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("  {s} → {s}\n\n", .{ diff.old.?, diff.new.? });
 
             // Load schema files
-            const old_content = std.fs.cwd().readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
+            const old_content = readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
                 print("Error reading old schema: {}\n", .{err});
                 return;
             };
             defer allocator.free(old_content);
 
-            const new_content = std.fs.cwd().readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
+            const new_content = readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
                 print("Error reading new schema: {}\n", .{err});
                 return;
             };
@@ -432,13 +433,13 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("Database: {s}\n\n", .{u.url});
 
             // Load schema files
-            const old_content = std.fs.cwd().readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
+            const old_content = readFileAlloc(allocator, diff.old.?, 1024 * 1024) catch |err| {
                 print("Error reading old schema: {}\n", .{err});
                 return;
             };
             defer allocator.free(old_content);
 
-            const new_content = std.fs.cwd().readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
+            const new_content = readFileAlloc(allocator, diff.new.?, 1024 * 1024) catch |err| {
                 print("Error reading new schema: {}\n", .{err});
                 return;
             };
@@ -624,7 +625,7 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("✅ Rollback complete (dry-run)\n", .{});
         },
         .create => |c| {
-            const timestamp = std.time.timestamp();
+            const timestamp = std.Io.Clock.now(.real, io_compat.runtimeIo()).toSeconds();
             print("📝 Creating migration: {d}_{s}.qail\n", .{ timestamp, c.name });
         },
         .shadow => |s| {
@@ -642,6 +643,15 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             print("Codebase: {s}\n", .{a.codebase});
         },
     }
+}
+
+fn readFileAlloc(allocator: Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(
+        io_compat.runtimeIo(),
+        path,
+        allocator,
+        std.Io.Limit.limited(max_bytes),
+    );
 }
 
 /// Parse schema diff path (old.qail:new.qail)

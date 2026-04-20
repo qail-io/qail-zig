@@ -14,7 +14,7 @@ const MockConn = struct {
     allocator: std.mem.Allocator,
     messages: []const MockMsg,
     index: usize = 0,
-    sent: std.ArrayListUnmanaged(u8) = .{},
+    sent: std.ArrayListUnmanaged(u8) = .empty,
 
     fn init(allocator: std.mem.Allocator, messages: []const MockMsg) MockConn {
         return .{
