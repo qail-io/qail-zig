@@ -104,6 +104,15 @@ pub const BytesRowHandler = *const fn (
     row: *const row_mod.PgBytesRow,
 ) anyerror!void;
 
+/// Callback for zero-copy first-column streaming.
+///
+/// Value slice aliases the current backend message buffer and is only valid
+/// for the callback duration.
+pub const FirstColumnBytesHandler = *const fn (
+    ctx: ?*anyopaque,
+    value: ?[]const u8,
+) anyerror!void;
+
 pub const TlsMode = connect_url_mod.TlsMode;
 pub const GssEncMode = connect_url_mod.GssEncMode;
 
@@ -113,14 +122,20 @@ pub const CancelToken = struct {
     port: u16,
     process_id: i32,
     secret_key: i32,
+    cancel_key_len: u16 = 0,
+    cancel_key: [cancel_mod.MAX_CANCEL_KEY_BYTES]u8 = [_]u8{0} ** cancel_mod.MAX_CANCEL_KEY_BYTES,
+
+    pub fn cancelKeyBytes(self: *const CancelToken) []const u8 {
+        return self.cancel_key[0..@as(usize, self.cancel_key_len)];
+    }
 
     pub fn cancelQuery(self: *const CancelToken, allocator: std.mem.Allocator) !void {
-        try cancel_mod.cancelQuery(
+        try cancel_mod.cancelQueryBytes(
             allocator,
             self.host,
             self.port,
             self.process_id,
-            self.secret_key,
+            self.cancelKeyBytes(),
         );
     }
 };
@@ -292,6 +307,24 @@ pub const DriverConnection = union(enum) {
         };
     }
 
+    /// Read one message and expose raw wire message-type byte.
+    pub fn readMessageRawFast(self: *DriverConnection) !struct { msg_type: u8, payload: []const u8 } {
+        return switch (self.*) {
+            .plain => |*conn| blk: {
+                const msg = try conn.readMessageRawFast();
+                break :blk .{ .msg_type = msg.msg_type, .payload = msg.payload };
+            },
+            .tls => |*conn| blk: {
+                const msg = try conn.readMessage();
+                break :blk .{ .msg_type = @intFromEnum(msg.msg_type), .payload = msg.payload };
+            },
+            .gssenc => |*conn| blk: {
+                const msg = try conn.readMessage();
+                break :blk .{ .msg_type = @intFromEnum(msg.msg_type), .payload = msg.payload };
+            },
+        };
+    }
+
     pub fn startupWithParamsAndAuth(
         self: *DriverConnection,
         user: []const u8,
@@ -328,6 +361,14 @@ pub const DriverConnection = union(enum) {
             .plain => |conn| conn.secret_key,
             .tls => |conn| conn.secret_key,
             .gssenc => |conn| conn.secret_key,
+        };
+    }
+
+    pub fn cancelKeyBytes(self: *const DriverConnection) []const u8 {
+        return switch (self.*) {
+            .plain => |conn| conn.cancel_key[0..@as(usize, conn.cancel_key_len)],
+            .tls => |conn| conn.cancel_key[0..@as(usize, conn.cancel_key_len)],
+            .gssenc => |conn| conn.cancel_key[0..@as(usize, conn.cancel_key_len)],
         };
     }
 };
@@ -402,6 +443,11 @@ pub const PgDriver = struct {
         return self.conn.secretKey();
     }
 
+    /// Full backend cancel key bytes (`4..=256`) from `BackendKeyData`.
+    pub fn backendCancelKeyBytes(self: *const PgDriver) []const u8 {
+        return self.conn.cancelKeyBytes();
+    }
+
     /// Get cancel key pair for this connection.
     pub fn getCancelKey(self: *const PgDriver) CancelKey {
         return makeCancelKey(self.backendProcessId(), self.backendSecretKey());
@@ -415,12 +461,20 @@ pub const PgDriver = struct {
         const host = self.connect_host orelse return error.ConnectionEndpointUnknown;
         const port = self.connect_port orelse return error.ConnectionEndpointUnknown;
         const key = self.getCancelKey();
-        return .{
+        const cancel_key_bytes = self.backendCancelKeyBytes();
+        if (cancel_key_bytes.len < cancel_mod.MIN_CANCEL_KEY_BYTES or cancel_key_bytes.len > cancel_mod.MAX_CANCEL_KEY_BYTES) {
+            return error.InvalidCancelKeyLength;
+        }
+
+        var token: CancelToken = .{
             .host = host,
             .port = port,
             .process_id = key.process_id,
             .secret_key = key.secret_key,
         };
+        token.cancel_key_len = @intCast(cancel_key_bytes.len);
+        @memcpy(token.cancel_key[0..cancel_key_bytes.len], cancel_key_bytes);
+        return token;
     }
 
     /// Cancel currently running query using this driver's backend key.
@@ -811,6 +865,33 @@ pub const PgDriver = struct {
         return try self.scanBytesCached(cmd, params, ctx, on_row);
     }
 
+    /// Stream only the first column of each row to callback without per-row allocation.
+    ///
+    /// Value slice is borrowed and valid only for callback duration.
+    pub fn scanFirstColumnBytes(
+        self: *PgDriver,
+        cmd: *const QailCmd,
+        ctx: ?*anyopaque,
+        on_value: FirstColumnBytesHandler,
+    ) !usize {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.scanFirstColumnBytesCached(cmd, &.{}, ctx, on_value);
+    }
+
+    /// Stream only the first column with bind parameters.
+    ///
+    /// Value slice is borrowed and valid only for callback duration.
+    pub fn scanFirstColumnBytesParams(
+        self: *PgDriver,
+        cmd: *const QailCmd,
+        params: []const ?[]const u8,
+        ctx: ?*anyopaque,
+        on_value: FirstColumnBytesHandler,
+    ) !usize {
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
+        return try self.scanFirstColumnBytesCached(cmd, params, ctx, on_value);
+    }
+
     fn scanBytesCached(
         self: *PgDriver,
         cmd: *const QailCmd,
@@ -852,6 +933,47 @@ pub const PgDriver = struct {
         }
     }
 
+    fn scanFirstColumnBytesCached(
+        self: *PgDriver,
+        cmd: *const QailCmd,
+        params: []const ?[]const u8,
+        ctx: ?*anyopaque,
+        on_value: FirstColumnBytesHandler,
+    ) !usize {
+        var retried = false;
+        while (true) {
+            const stmt_name = self.getOrPrepare(cmd) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    error.PreparedStatementAlreadyExists => {
+                        if (retried) return err;
+                        retried = true;
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+
+            const row_count = self.scanPreparedFirstColumnBytes(stmt_name, params, ctx, on_value) catch |err| {
+                switch (err) {
+                    error.PreparedStatementRetryable => {
+                        if (retried) return err;
+                        retried = true;
+                        self.clearPreparedCacheState();
+                        continue;
+                    },
+                    else => return err,
+                }
+            };
+            return row_count;
+        }
+    }
+
     fn scanPreparedBytes(
         self: *PgDriver,
         stmt_name: []const u8,
@@ -871,11 +993,11 @@ pub const PgDriver = struct {
         var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(false));
 
         while (true) {
-            const msg = try self.conn.readMessage();
-            try self.validateExtendedFlow(&flow, msg.msg_type, false);
+            const msg = try self.conn.readMessageRawFast();
+            try self.validateExtendedFlowMsgType(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
-                .parse_complete, .bind_complete => {},
-                .row_description => {
+                '1', '2' => {},
+                'T' => {
                     var decoder = Decoder.init(msg.payload);
                     const field_descriptions = try decoder.parseRowDescription(self.allocator);
                     defer self.allocator.free(field_descriptions);
@@ -899,7 +1021,7 @@ pub const PgDriver = struct {
                     }
                     field_names_template = names;
                 },
-                .data_row => {
+                'D' => {
                     if (msg.payload.len < 2) return error.InvalidDataRow;
                     const col_count: usize = @intCast(std.mem.readInt(u16, msg.payload[0..2], .big));
                     if (column_scratch.len < col_count) {
@@ -907,8 +1029,7 @@ pub const PgDriver = struct {
                         column_scratch = try self.allocator.alloc(?[]const u8, col_count);
                     }
 
-                    var decoder = Decoder.init(msg.payload);
-                    const columns = try decoder.parseDataRowInto(column_scratch);
+                    const columns = try parseDataRowPayloadInto(column_scratch[0..col_count], msg.payload);
                     const row = row_mod.PgBytesRow{
                         .columns = columns,
                         .field_names = field_names_template,
@@ -916,15 +1037,15 @@ pub const PgDriver = struct {
                     try on_row(ctx, &row);
                     row_count += 1;
                 },
-                .command_complete, .no_data => {},
-                .ready_for_query => {
+                'C', 'n' => {},
+                'Z' => {
                     if (field_names_template.len > 0) {
                         PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
                         field_names_template = &.{};
                     }
                     break;
                 },
-                .error_response => {
+                'E' => {
                     var decoder = Decoder.init(msg.payload);
                     const err = try decoder.parseErrorResponse();
                     std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
@@ -934,8 +1055,52 @@ pub const PgDriver = struct {
                     }
                     return error.QueryError;
                 },
-                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
-                .notice, .parameter_status => {},
+                'A' => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
+                'N', 'S' => {},
+                else => return error.UnexpectedBackendMessageType,
+            }
+        }
+
+        return row_count;
+    }
+
+    fn scanPreparedFirstColumnBytes(
+        self: *PgDriver,
+        stmt_name: []const u8,
+        params: []const ?[]const u8,
+        ctx: ?*anyopaque,
+        on_value: FirstColumnBytesHandler,
+    ) !usize {
+        try self.encoder.executeNamedStatement(stmt_name, params);
+        try self.conn.send(self.encoder.getWritten());
+
+        var row_count: usize = 0;
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(false));
+
+        while (true) {
+            const msg = try self.conn.readMessageRawFast();
+            try self.validateExtendedFlowMsgType(&flow, msg.msg_type, false);
+            switch (msg.msg_type) {
+                '1', '2', 'T' => {},
+                'D' => {
+                    const first_column = try parseDataRowFirstColumnPayload(msg.payload);
+                    try on_value(ctx, first_column);
+                    row_count += 1;
+                },
+                'C', 'n' => {},
+                'Z' => break,
+                'E' => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
+                    if (isPreparedStatementRetryableError(err.code, err.message)) {
+                        return error.PreparedStatementRetryable;
+                    }
+                    return error.QueryError;
+                },
+                'A' => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
+                'N', 'S' => {},
                 else => return error.UnexpectedBackendMessageType,
             }
         }
@@ -1760,6 +1925,63 @@ pub const PgDriver = struct {
         return false;
     }
 
+    fn parseDataRowPayloadInto(columns: []?[]const u8, payload: []const u8) ![]?[]const u8 {
+        if (payload.len < 2) return error.InvalidDataRow;
+        const col_count: usize = @intCast(std.mem.readInt(u16, payload[0..2], .big));
+        if (columns.len != col_count) return error.InvalidDataRow;
+
+        var pos: usize = 2;
+        for (columns) |*col| {
+            if (pos + 4 > payload.len) return error.InvalidDataRow;
+            const len = std.mem.readInt(i32, payload[pos..][0..4], .big);
+            pos += 4;
+
+            if (len == -1) {
+                col.* = null;
+                continue;
+            }
+            if (len < -1) return error.InvalidDataRow;
+
+            const ulen: usize = @intCast(len);
+            const end = std.math.add(usize, pos, ulen) catch return error.InvalidDataRow;
+            if (end > payload.len) return error.InvalidDataRow;
+            col.* = payload[pos..end];
+            pos = end;
+        }
+
+        if (pos != payload.len) return error.InvalidDataRow;
+        return columns;
+    }
+
+    fn parseDataRowFirstColumnPayload(payload: []const u8) !?[]const u8 {
+        if (payload.len < 2) return error.InvalidDataRow;
+        const col_count: usize = @intCast(std.mem.readInt(u16, payload[0..2], .big));
+
+        var pos: usize = 2;
+        var first_column: ?[]const u8 = null;
+
+        for (0..col_count) |idx| {
+            if (pos + 4 > payload.len) return error.InvalidDataRow;
+            const len = std.mem.readInt(i32, payload[pos..][0..4], .big);
+            pos += 4;
+
+            if (len == -1) {
+                if (idx == 0) first_column = null;
+                continue;
+            }
+            if (len < -1) return error.InvalidDataRow;
+
+            const ulen: usize = @intCast(len);
+            const end = std.math.add(usize, pos, ulen) catch return error.InvalidDataRow;
+            if (end > payload.len) return error.InvalidDataRow;
+            if (idx == 0) first_column = payload[pos..end];
+            pos = end;
+        }
+
+        if (pos != payload.len) return error.InvalidDataRow;
+        return first_column;
+    }
+
     /// Internal: send Parse + Sync for a named statement
     fn prepareNamed(self: *PgDriver, stmt_name: []const u8, sql: []const u8) !void {
         try self.encoder.encodePrepareNamed(stmt_name, sql);
@@ -1961,6 +2183,19 @@ pub const PgDriver = struct {
         error_pending: bool,
     ) !void {
         flow.validate(msg_type, error_pending) catch |err| {
+            // Best-effort resync on protocol-order violations.
+            _ = self.drainUntilReadyForQuery() catch {};
+            return err;
+        };
+    }
+
+    fn validateExtendedFlowMsgType(
+        self: *PgDriver,
+        flow: *ExtendedFlowTracker,
+        msg_type: u8,
+        error_pending: bool,
+    ) !void {
+        flow.validateMsgType(msg_type, error_pending) catch |err| {
             // Best-effort resync on protocol-order violations.
             _ = self.drainUntilReadyForQuery() catch {};
             return err;

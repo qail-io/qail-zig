@@ -33,6 +33,8 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 
     process_id: u32 = 0,
     secret_key: u32 = 0,
+    cancel_key_len: u16 = 0,
+    cancel_key: [256]u8 = [_]u8{0} ** 256,
     ready: bool = false,
     in_transaction: bool = false,
 
@@ -152,6 +154,7 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
         var gss_mechanism: ?auth_options_mod.GssMechanism = null;
         var gss_session_id: ?u64 = null;
         var gss_roundtrips: u32 = 0;
+        const requested_protocol_minor: u16 = @intCast(protocol.wire.PROTOCOL_VERSION & 0xFFFF);
         const AuthFlow = enum { none, cleartext, md5, sasl, gss };
         var auth_flow: AuthFlow = .none;
         var auth_ok = false;
@@ -290,6 +293,14 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
                         else => return error.UnsupportedAuth,
                     }
                 },
+                .negotiate_protocol_version => {
+                    if (auth_ok) return error.NegotiateProtocolVersionAfterAuthOk;
+                    var decoder = Decoder.init(msg.payload);
+                    const negotiate = try decoder.parseNegotiateProtocolVersion(self.allocator);
+                    defer self.allocator.free(negotiate.unrecognized_options);
+                    const negotiated_minor = try Decoder.parseProtocolMinorFromNegotiate(negotiate.newest_minor_supported);
+                    if (negotiated_minor > requested_protocol_minor) return error.ProtocolMinorAboveRequested;
+                },
                 .parameter_status => {
                     if (!auth_ok) return error.ParameterStatusBeforeAuthOk;
                 },
@@ -299,6 +310,11 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
                     const key_data = try decoder.parseBackendKeyData();
                     self.process_id = key_data.process_id;
                     self.secret_key = key_data.secret_key;
+                    self.cancel_key_len = @intCast(key_data.secret_key_bytes.len);
+                    @memcpy(
+                        self.cancel_key[0..key_data.secret_key_bytes.len],
+                        key_data.secret_key_bytes,
+                    );
                 },
                 .ready_for_query => {
                     if (!auth_ok) return error.StartupCompletedWithoutAuthOk;
@@ -350,6 +366,8 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 } else struct {
     process_id: u32 = 0,
     secret_key: u32 = 0,
+    cancel_key_len: u16 = 0,
+    cancel_key: [256]u8 = [_]u8{0} ** 256,
     ready: bool = false,
     in_transaction: bool = false,
 

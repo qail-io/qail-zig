@@ -122,50 +122,68 @@ pub const RlsContext = struct {
     }
 };
 
-/// Sanitize SQL GUC values for insertion into single-quoted literals.
+/// Sanitize raw GUC values before embedding into SQL.
 ///
-/// Allowlist:
-/// - printable ASCII (0x20..0x7E)
-///
-/// Denylist (removed even if printable):
-/// - `'` `\` `;` `$`
+/// PostgreSQL rejects interior NUL bytes in text payloads. Preserve all
+/// other bytes to avoid collapsing identities.
 pub fn sanitizeGucValue(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     for (value) |c| {
-        if (c < 0x20 or c > 0x7E) continue;
-        switch (c) {
-            '\'', '\\', ';', '$' => continue,
-            else => {},
+        if (c == 0) {
+            try out.appendSlice(allocator, "\xEF\xBF\xBD");
+        } else {
+            try out.append(allocator, c);
         }
-        try out.append(allocator, c);
     }
 
     return try out.toOwnedSlice(allocator);
+}
+
+fn quoteGucLiteral(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    const sanitized = try sanitizeGucValue(allocator, value);
+    defer allocator.free(sanitized);
+
+    var idx: usize = 0;
+    while (true) : (idx += 1) {
+        const tag = if (idx == 0)
+            try allocator.dupe(u8, "qail_guc")
+        else
+            try std.fmt.allocPrint(allocator, "qail_guc_{}", .{idx});
+        defer allocator.free(tag);
+
+        const delim = try std.fmt.allocPrint(allocator, "${s}$", .{tag});
+        defer allocator.free(delim);
+
+        if (std.mem.indexOf(u8, sanitized, delim) != null) continue;
+        return try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ delim, sanitized, delim });
+    }
 }
 
 /// Build SQL that starts a transaction and configures RLS/session GUC values.
 pub fn contextToSql(allocator: std.mem.Allocator, ctx: *const RlsContext) ![]u8 {
     const nil_uuid = "00000000-0000-0000-0000-000000000000";
 
-    const tenant_raw = if (ctx.isGlobal() and ctx.tenant_id.len == 0) nil_uuid else ctx.tenant_id;
-    const agent_raw = if (ctx.isGlobal() and ctx.agent_id.len == 0) nil_uuid else ctx.agent_id;
+    const tenant_raw = if (ctx.tenant_id.len == 0) nil_uuid else ctx.tenant_id;
+    const agent_raw = if (ctx.agent_id.len == 0) nil_uuid else ctx.agent_id;
     const user_raw = if (ctx.userId().len == 0) nil_uuid else ctx.userId();
 
-    const tenant = try sanitizeGucValue(allocator, tenant_raw);
+    const tenant = try quoteGucLiteral(allocator, tenant_raw);
     defer allocator.free(tenant);
-    const agent = try sanitizeGucValue(allocator, agent_raw);
+    const agent = try quoteGucLiteral(allocator, agent_raw);
     defer allocator.free(agent);
-    const user = try sanitizeGucValue(allocator, user_raw);
+    const user = try quoteGucLiteral(allocator, user_raw);
     defer allocator.free(user);
 
-    const is_global = if (ctx.isGlobal()) "true" else "false";
-    const is_super_admin = if (ctx.bypassesRls()) "true" else "false";
+    const is_global = try quoteGucLiteral(allocator, if (ctx.isGlobal()) "true" else "false");
+    defer allocator.free(is_global);
+    const is_super_admin = try quoteGucLiteral(allocator, if (ctx.bypassesRls()) "true" else "false");
+    defer allocator.free(is_super_admin);
 
     return std.fmt.allocPrint(
         allocator,
-        "BEGIN; SET LOCAL app.is_global = '{s}'; SELECT set_config('app.current_user_id', '{s}', true), set_config('app.current_tenant_id', '{s}', true), set_config('app.tenant_id', '{s}', true), set_config('app.current_agent_id', '{s}', true), set_config('app.is_super_admin', '{s}', true)",
+        "BEGIN; SET LOCAL app.is_global = {s}; SELECT set_config('app.current_user_id', {s}, true), set_config('app.current_tenant_id', {s}, true), set_config('app.tenant_id', {s}, true), set_config('app.current_agent_id', {s}, true), set_config('app.is_super_admin', {s}, true)",
         .{ is_global, user, tenant, tenant, agent, is_super_admin },
     );
 }
@@ -184,15 +202,15 @@ pub fn contextToSqlWithTimeouts(
 ) ![]u8 {
     const nil_uuid = "00000000-0000-0000-0000-000000000000";
 
-    const tenant_raw = if (ctx.isGlobal() and ctx.tenant_id.len == 0) nil_uuid else ctx.tenant_id;
-    const agent_raw = if (ctx.isGlobal() and ctx.agent_id.len == 0) nil_uuid else ctx.agent_id;
+    const tenant_raw = if (ctx.tenant_id.len == 0) nil_uuid else ctx.tenant_id;
+    const agent_raw = if (ctx.agent_id.len == 0) nil_uuid else ctx.agent_id;
     const user_raw = if (ctx.userId().len == 0) nil_uuid else ctx.userId();
 
-    const tenant = try sanitizeGucValue(allocator, tenant_raw);
+    const tenant = try quoteGucLiteral(allocator, tenant_raw);
     defer allocator.free(tenant);
-    const agent = try sanitizeGucValue(allocator, agent_raw);
+    const agent = try quoteGucLiteral(allocator, agent_raw);
     defer allocator.free(agent);
-    const user = try sanitizeGucValue(allocator, user_raw);
+    const user = try quoteGucLiteral(allocator, user_raw);
     defer allocator.free(user);
 
     const lock_clause = if (lock_timeout_ms > 0)
@@ -201,12 +219,14 @@ pub fn contextToSqlWithTimeouts(
         try allocator.dupe(u8, "");
     defer allocator.free(lock_clause);
 
-    const is_global = if (ctx.isGlobal()) "true" else "false";
-    const is_super_admin = if (ctx.bypassesRls()) "true" else "false";
+    const is_global = try quoteGucLiteral(allocator, if (ctx.isGlobal()) "true" else "false");
+    defer allocator.free(is_global);
+    const is_super_admin = try quoteGucLiteral(allocator, if (ctx.bypassesRls()) "true" else "false");
+    defer allocator.free(is_super_admin);
 
     return std.fmt.allocPrint(
         allocator,
-        "BEGIN; SET LOCAL statement_timeout = {};{s} SET LOCAL app.is_global = '{s}'; SELECT set_config('app.current_user_id', '{s}', true), set_config('app.current_tenant_id', '{s}', true), set_config('app.tenant_id', '{s}', true), set_config('app.current_agent_id', '{s}', true), set_config('app.is_super_admin', '{s}', true)",
+        "BEGIN; SET LOCAL statement_timeout = {};{s} SET LOCAL app.is_global = {s}; SELECT set_config('app.current_user_id', {s}, true), set_config('app.current_tenant_id', {s}, true), set_config('app.tenant_id', {s}, true), set_config('app.current_agent_id', {s}, true), set_config('app.is_super_admin', {s}, true)",
         .{ statement_timeout_ms, lock_clause, is_global, user, tenant, tenant, agent, is_super_admin },
     );
 }
@@ -222,9 +242,10 @@ test "contextToSql tenant sets app.current_tenant_id" {
     const sql = try contextToSql(allocator, &ctx);
     defer allocator.free(sql);
 
-    try std.testing.expect(std.mem.indexOf(u8, sql, "SET LOCAL app.is_global = 'false'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.current_tenant_id', 'abc-123'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.tenant_id', 'abc-123'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SET LOCAL app.is_global = $qail_guc$false$qail_guc$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.current_tenant_id', $qail_guc$abc-123$qail_guc$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.tenant_id', $qail_guc$abc-123$qail_guc$") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.current_agent_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$") != null);
 }
 
 test "contextToSql global emits nil uuid and app.is_global true" {
@@ -233,7 +254,7 @@ test "contextToSql global emits nil uuid and app.is_global true" {
     const sql = try contextToSql(allocator, &ctx);
     defer allocator.free(sql);
 
-    try std.testing.expect(std.mem.indexOf(u8, sql, "SET LOCAL app.is_global = 'true'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SET LOCAL app.is_global = $qail_guc$true$qail_guc$") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "00000000-0000-0000-0000-000000000000") != null);
 }
 
@@ -243,14 +264,30 @@ test "contextToSql user empty maps to nil uuid" {
     const sql = try contextToSql(allocator, &ctx);
     defer allocator.free(sql);
 
-    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.current_user_id', '00000000-0000-0000-0000-000000000000'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.current_user_id', $qail_guc$00000000-0000-0000-0000-000000000000$qail_guc$") != null);
 }
 
-test "sanitizeGucValue strips dangerous chars" {
+test "sanitizeGucValue preserves symbols and replaces nul byte" {
     const allocator = std.testing.allocator;
-    const out = try sanitizeGucValue(allocator, "'; DROP TABLE users; --");
+    const out = try sanitizeGucValue(allocator, "ten\x00ant';--");
     defer allocator.free(out);
-    try std.testing.expectEqualStrings(" DROP TABLE users --", out);
+    try std.testing.expectEqualStrings("ten\xEF\xBF\xBDant';--", out);
+}
+
+test "quoteGucLiteral chooses non-colliding tag" {
+    const allocator = std.testing.allocator;
+    const out = try quoteGucLiteral(allocator, "$qail_guc$inside$qail_guc$");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("$qail_guc_1$$qail_guc$inside$qail_guc$$qail_guc_1$", out);
+}
+
+test "contextToSql keeps dangerous text inside dollar-quoted literal" {
+    const allocator = std.testing.allocator;
+    const ctx = RlsContext.user("'; DROP TABLE users; --");
+    const sql = try contextToSql(allocator, &ctx);
+    defer allocator.free(sql);
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "$qail_guc$'; DROP TABLE users; --$qail_guc$") != null);
 }
 
 test "contextToSqlWithTimeout sets statement timeout" {
@@ -260,7 +297,7 @@ test "contextToSqlWithTimeout sets statement timeout" {
     defer allocator.free(sql);
 
     try std.testing.expect(std.mem.indexOf(u8, sql, "SET LOCAL statement_timeout = 5000;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.current_tenant_id', 'tenant-1'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "set_config('app.current_tenant_id', $qail_guc$tenant-1$qail_guc$") != null);
 }
 
 test "contextToSqlWithTimeouts omits lock timeout when zero" {

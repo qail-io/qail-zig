@@ -85,6 +85,7 @@ pub const AstEncoder = struct {
     }
 
     fn writeCString(self: *AstEncoder, str: []const u8) !void {
+        if (std.mem.indexOfScalar(u8, str, 0) != null) return error.NullByte;
         try self.buffer.appendSlice(self.allocator, str);
         try self.buffer.append(self.allocator, 0);
     }
@@ -165,6 +166,7 @@ pub const AstEncoder = struct {
         try self.writeAstToSql(sql_writer.writer(), cmd);
         const sql = try sql_writer.toOwnedSlice();
         defer self.allocator.free(sql);
+        if (std.mem.indexOfScalar(u8, sql, 0) != null) return error.NullByte;
         try self.writeBytes(sql);
         try self.writeByte(0); // SQL cstring terminator
         try self.writeU16(0); // No parameter types
@@ -777,11 +779,11 @@ pub const AstEncoder = struct {
             },
             .create_database => {
                 try writer.writeAll("CREATE DATABASE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierMaybeQuoted(writer, cmd.table);
             },
             .drop_database => {
                 try writer.writeAll("DROP DATABASE IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierMaybeQuoted(writer, cmd.table);
             },
             .grant => {
                 const role = cmd.payload orelse return error.MissingGrantRole;
@@ -1253,6 +1255,32 @@ fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
             try writer.writeByte(c);
         }
     }
+}
+
+fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
+    const needs_quotes = blk: {
+        if (ident.len == 0) break :blk true;
+        if (std.ascii.isDigit(ident[0])) break :blk true;
+        for (ident) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '_') break :blk true;
+        }
+        break :blk false;
+    };
+
+    if (!needs_quotes) {
+        try writer.writeAll(ident);
+        return;
+    }
+
+    try writer.writeByte('"');
+    for (ident) |c| {
+        if (c == '"') {
+            try writer.writeAll("\"\"");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeByte('"');
 }
 
 fn writeExpr(writer: anytype, expr: *const Expr) !void {
@@ -1926,6 +1954,27 @@ test "ast encoder grant and revoke" {
     try std.testing.expect(std.mem.indexOf(u8, encoder.getWritten(), "REVOKE SELECT, INSERT ON users FROM app_role") != null);
 }
 
+test "ast encoder create and drop database quote hyphenated names" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const create_cmd = QailCmd.createDatabase("qail-engine-db_shadow");
+    try encoder.encodeQuery(&create_cmd);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoder.getWritten(),
+        "CREATE DATABASE \"qail-engine-db_shadow\"",
+    ) != null);
+
+    const drop_cmd = QailCmd.dropDatabase("qail-engine-db_shadow");
+    try encoder.encodeQuery(&drop_cmd);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoder.getWritten(),
+        "DROP DATABASE IF EXISTS \"qail-engine-db_shadow\"",
+    ) != null);
+}
+
 test "ast encoder create and drop policy" {
     var encoder = AstEncoder.init(std.testing.allocator);
     defer encoder.deinit();
@@ -2039,4 +2088,25 @@ test "ast encoder execute named rejects oversized parameter payload" {
     const params = [_]?[]const u8{huge_param};
 
     try std.testing.expectError(error.MessageTooLarge, encoder.executeNamedStatement("stmt", &params));
+}
+
+test "ast encoder rejects embedded nul in rendered sql cstring" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const where = [_]ast.cmd.WhereClause{
+        .{
+            .condition = .{
+                .column = "datname",
+                .op = .eq,
+                .value = .{ .string = "po\x00stgres" },
+            },
+        },
+    };
+    const cmd = QailCmd.get("pg_database")
+        .select(&.{Expr.col("datname")})
+        .where(&where)
+        .limit(1);
+
+    try std.testing.expectError(error.NullByte, encoder.encodeQuery(&cmd));
 }

@@ -186,12 +186,81 @@ pub const Decoder = struct {
         return .{ .name = name, .value = value };
     }
 
-    /// Parse BackendKeyData message
-    pub fn parseBackendKeyData(self: *Decoder) !struct { process_id: u32, secret_key: u32 } {
+    /// Parse BackendKeyData message.
+    ///
+    /// Protocol 3.0 uses a fixed 4-byte cancel key.
+    /// Protocol 3.2 can carry variable-length cancel key bytes (4..=256).
+    ///
+    /// For compatibility with legacy `i32` cancel wrappers, this parser returns:
+    /// - `secret_key`: real 4-byte key when present
+    /// - `secret_key`: `0` for extended-length keys
+    /// - `secret_key_bytes`: full `4..=256` bytes used by protocol 3.2 cancel
+    pub fn parseBackendKeyData(self: *Decoder) !struct { process_id: u32, secret_key: u32, secret_key_bytes: []const u8 } {
         const process_id = try self.readU32();
-        const secret_key = try self.readU32();
+        const secret_len = self.remaining();
+        if (secret_len < 4 or secret_len > 256) return error.InvalidBackendKeyDataPayload;
+
+        const secret_key_bytes = try self.readBytes(secret_len);
+        const secret_key: u32 = if (secret_len == 4)
+            std.mem.readInt(u32, secret_key_bytes[0..4], .big)
+        else
+            0;
+
         if (self.remaining() != 0) return error.InvalidBackendKeyDataPayload;
-        return .{ .process_id = process_id, .secret_key = secret_key };
+        return .{
+            .process_id = process_id,
+            .secret_key = secret_key,
+            .secret_key_bytes = secret_key_bytes,
+        };
+    }
+
+    pub const NegotiateProtocolVersion = struct {
+        newest_minor_supported: u32,
+        unrecognized_options: [][]const u8,
+    };
+
+    /// Parse NegotiateProtocolVersion payload.
+    pub fn parseNegotiateProtocolVersion(
+        self: *Decoder,
+        allocator: std.mem.Allocator,
+    ) !NegotiateProtocolVersion {
+        if (self.remaining() < 8) return error.InvalidNegotiateProtocolVersionPayload;
+        const newest_minor_supported = try self.readU32();
+        const raw_count = try self.readI32();
+        if (raw_count < 0) return error.InvalidNegotiateProtocolVersionPayload;
+
+        const option_count: usize = @intCast(raw_count);
+        // Each option is NUL-terminated, so even an empty option consumes 1 byte.
+        if (option_count > self.remaining()) return error.InvalidNegotiateProtocolVersionPayload;
+
+        var options = try allocator.alloc([]const u8, option_count);
+        var parsed: usize = 0;
+        errdefer allocator.free(options);
+        while (parsed < option_count) : (parsed += 1) {
+            options[parsed] = try self.readCString();
+        }
+        if (self.remaining() != 0) return error.InvalidNegotiateProtocolVersionPayload;
+
+        return .{
+            .newest_minor_supported = newest_minor_supported,
+            .unrecognized_options = options,
+        };
+    }
+
+    /// Parse protocol minor from NegotiateProtocolVersion field.
+    ///
+    /// Supports both:
+    /// - pure minor values (0, 1, 2, ...)
+    /// - packed protocol version values (`3 << 16 | minor`)
+    pub fn parseProtocolMinorFromNegotiate(newest_minor_supported: u32) !u16 {
+        if (newest_minor_supported <= std.math.maxInt(u16)) {
+            return @intCast(newest_minor_supported);
+        }
+
+        const major: u16 = @intCast(newest_minor_supported >> 16);
+        const minor: u16 = @intCast(newest_minor_supported & 0xFFFF);
+        if (major != 3) return error.InvalidNegotiateProtocolVersionPayload;
+        return minor;
     }
 
     /// Parse NotificationResponse message.
@@ -316,6 +385,31 @@ pub const Decoder = struct {
 
         if (self.remaining() != 0) return error.InvalidDataRowPayload;
         return out;
+    }
+
+    /// Parse DataRow payload and return only the first column.
+    ///
+    /// Still validates the full payload shape, but avoids caller-side
+    /// allocation and per-column output materialization.
+    pub fn parseDataRowFirstColumn(self: *Decoder) !?[]const u8 {
+        const raw_count = try self.readU16();
+        const col_count: usize = @intCast(raw_count);
+
+        var first_column: ?[]const u8 = null;
+        for (0..col_count) |i| {
+            const len = try self.readI32();
+            if (len == -1) {
+                if (i == 0) first_column = null;
+            } else if (len < -1) {
+                return error.InvalidDataRowPayload;
+            } else {
+                const value = try self.readBytes(@intCast(len));
+                if (i == 0) first_column = value;
+            }
+        }
+
+        if (self.remaining() != 0) return error.InvalidDataRowPayload;
+        return first_column;
     }
 
     /// Parse DataRow message and deep-copy all non-null column bytes.
@@ -520,14 +614,85 @@ test "decode parameter status rejects trailing bytes" {
     try std.testing.expectError(error.InvalidParameterStatusPayload, decoder.parseParameterStatus());
 }
 
-test "decode backend key data rejects trailing bytes" {
+test "decode negotiate protocol version payload" {
     const data = [_]u8{
-        0,  0, 0, 1,
-        0,  0, 0, 2,
-        99,
+        0, 0, 0, 2, // newest minor supported
+        0,   0, 0,   2, // unrecognized option count
+        'a', 0, 'b', 0,
+    };
+    var decoder = Decoder.init(&data);
+    const negotiate = try decoder.parseNegotiateProtocolVersion(std.testing.allocator);
+    defer std.testing.allocator.free(negotiate.unrecognized_options);
+
+    try std.testing.expectEqual(@as(u32, 2), negotiate.newest_minor_supported);
+    try std.testing.expectEqual(@as(usize, 2), negotiate.unrecognized_options.len);
+    try std.testing.expectEqualStrings("a", negotiate.unrecognized_options[0]);
+    try std.testing.expectEqualStrings("b", negotiate.unrecognized_options[1]);
+}
+
+test "decode negotiate protocol version rejects impossible option count" {
+    const data = [_]u8{
+        0, 3, 0, 0, // packed 3.0
+        0, 0, 4, 0, // unrecognized option count = 1024
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(
+        error.InvalidNegotiateProtocolVersionPayload,
+        decoder.parseNegotiateProtocolVersion(std.testing.allocator),
+    );
+}
+
+test "parse protocol minor from negotiate supports packed format" {
+    try std.testing.expectEqual(@as(u16, 2), try Decoder.parseProtocolMinorFromNegotiate(2));
+    try std.testing.expectEqual(@as(u16, 2), try Decoder.parseProtocolMinorFromNegotiate((@as(u32, 3) << 16) | 2));
+    try std.testing.expectError(error.InvalidNegotiateProtocolVersionPayload, Decoder.parseProtocolMinorFromNegotiate((@as(u32, 4) << 16) | 0));
+}
+
+test "decode backend key data with legacy 4-byte key" {
+    const data = [_]u8{
+        0, 0, 0, 1, // process id
+        0, 0, 0, 2, // secret key
     };
     var decoder = Decoder.init(&data);
 
+    const key = try decoder.parseBackendKeyData();
+    try std.testing.expectEqual(@as(u32, 1), key.process_id);
+    try std.testing.expectEqual(@as(u32, 2), key.secret_key);
+    try std.testing.expectEqual(@as(usize, 4), key.secret_key_bytes.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 2 }, key.secret_key_bytes);
+}
+
+test "decode backend key data accepts extended key payload" {
+    const data = [_]u8{
+        0, 0, 0, 1, // process id
+        1, 2, 3, 4, 5, 6, 7, 8, // extended key bytes
+    };
+    var decoder = Decoder.init(&data);
+
+    const key = try decoder.parseBackendKeyData();
+    try std.testing.expectEqual(@as(u32, 1), key.process_id);
+    // Legacy i32 key is compatibility-only for 4-byte keys.
+    try std.testing.expectEqual(@as(u32, 0), key.secret_key);
+    try std.testing.expectEqual(@as(usize, 8), key.secret_key_bytes.len);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, key.secret_key_bytes);
+}
+
+test "decode backend key data rejects key shorter than 4 bytes" {
+    const data = [_]u8{
+        0, 0, 0, 1, // process id
+        1, 2, 3, // 3 bytes (invalid)
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidBackendKeyDataPayload, decoder.parseBackendKeyData());
+}
+
+test "decode backend key data rejects key longer than 256 bytes" {
+    var data: [4 + 257]u8 = undefined;
+    std.mem.writeInt(u32, data[0..4], 1, .big);
+    @memset(data[4..], 0xAA);
+
+    var decoder = Decoder.init(&data);
     try std.testing.expectError(error.InvalidBackendKeyDataPayload, decoder.parseBackendKeyData());
 }
 
@@ -593,6 +758,51 @@ test "decode data row into caller buffer" {
     try std.testing.expectEqual(@as(usize, 2), cols.len);
     try std.testing.expectEqualStrings("a", cols[0].?);
     try std.testing.expect(cols[1] == null);
+}
+
+test "decode data row first column" {
+    const payload = [_]u8{
+        0, 3, // column count
+        0, 0, 0, 2, '4', '2', // col0 = "42"
+        0, 0, 0, 1, 'x', // col1 = "x"
+        255, 255, 255, 255, // col2 = NULL
+    };
+    var decoder = Decoder.init(&payload);
+    const first = try decoder.parseDataRowFirstColumn();
+
+    try std.testing.expect(first != null);
+    try std.testing.expectEqualStrings("42", first.?);
+}
+
+test "decode data row first column handles null first value" {
+    const payload = [_]u8{
+        0, 2, // column count
+        255, 255, 255, 255, // col0 = NULL
+        0, 0, 0, 1, 'a', // col1 = "a"
+    };
+    var decoder = Decoder.init(&payload);
+    const first = try decoder.parseDataRowFirstColumn();
+    try std.testing.expect(first == null);
+}
+
+test "decode data row first column rejects invalid negative length" {
+    const payload = [_]u8{
+        0, 1, // column count
+        255, 255, 255, 254, // -2 (invalid)
+    };
+    var decoder = Decoder.init(&payload);
+    try std.testing.expectError(error.InvalidDataRowPayload, decoder.parseDataRowFirstColumn());
+}
+
+test "decode data row first column rejects trailing bytes" {
+    const payload = [_]u8{
+        0, 1, // column count
+        0,   0, 0, 1, // len=1
+        'a',
+        'x', // trailing
+    };
+    var decoder = Decoder.init(&payload);
+    try std.testing.expectError(error.InvalidDataRowPayload, decoder.parseDataRowFirstColumn());
 }
 
 test "decode data row into caller buffer rejects undersized storage" {

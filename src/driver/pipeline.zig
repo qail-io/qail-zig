@@ -321,31 +321,26 @@ pub const Pipeline = struct {
         var results: std.ArrayList([2]?[]const u8) = .empty;
         errdefer results.deinit(self.allocator);
         var flow = ExtendedFlowTracker.init(flow_cfg);
+        const enforce_order = expected <= 1;
 
         while (true) {
-            const msg = try self.conn.readMessage();
-            try self.validateExtendedFlow(&flow, msg.msg_type, false);
+            const msg = try self.conn.readMessageRawFast();
+            if (enforce_order) {
+                try self.validateExtendedFlowMsgType(&flow, msg.msg_type, false);
+            }
 
             switch (msg.msg_type) {
-                .data_row => {
-                    var decoder = protocol.Decoder.init(msg.payload);
-                    const columns = try decoder.parseDataRow(self.allocator);
-
-                    // Extract first 2 columns
-                    var pair: [2]?[]const u8 = .{ null, null };
-                    if (columns.len > 0) pair[0] = columns[0];
-                    if (columns.len > 1) pair[1] = columns[1];
-                    self.allocator.free(columns);
-
+                'D' => {
+                    const pair = try parseDataRowFirstTwoPayload(msg.payload);
                     try results.append(self.allocator, pair);
                 },
-                .command_complete, .bind_complete, .no_data => {},
-                .ready_for_query => {
+                'C', '2', 'n' => {},
+                'Z' => {
                     if (results.items.len >= expected or results.items.len > 0) {
                         return try results.toOwnedSlice(self.allocator);
                     }
                 },
-                .error_response => {
+                'E' => {
                     _ = self.drainUntilReadyAfterError() catch {};
                     if (isPreparedStatementRetryablePayload(msg.payload)) {
                         self.clearCache();
@@ -353,7 +348,7 @@ pub const Pipeline = struct {
                     }
                     return error.QueryError;
                 },
-                .notice, .parameter_status => {},
+                'A', 'N', 'S' => {},
                 else => return error.UnexpectedBackendMessageType,
             }
         }
@@ -447,21 +442,22 @@ pub const Pipeline = struct {
     fn countCompletions(self: *Pipeline, expected: usize, flow_cfg: ExtendedFlowConfig) !usize {
         var completed: usize = 0;
         var flow = ExtendedFlowTracker.init(flow_cfg);
+        const enforce_order = expected <= 1;
 
         while (true) {
-            const msg = try self.conn.readMessage();
-            try self.validateExtendedFlow(&flow, msg.msg_type, false);
+            const msg = try self.conn.readMessageRawFast();
+            if (enforce_order) {
+                try self.validateExtendedFlowMsgType(&flow, msg.msg_type, false);
+            }
 
             switch (msg.msg_type) {
-                .bind_complete, .parse_complete => {},
-                .row_description => {},
-                .data_row => {},
-                .command_complete => completed += 1,
-                .no_data => completed += 1,
-                .ready_for_query => {
+                '2', '1', 'T', 'D' => {},
+                'C' => completed += 1,
+                'n' => completed += 1,
+                'Z' => {
                     if (completed >= expected) return completed;
                 },
-                .error_response => {
+                'E' => {
                     _ = self.drainUntilReadyAfterError() catch {};
                     if (isPreparedStatementRetryablePayload(msg.payload)) {
                         self.clearCache();
@@ -469,7 +465,7 @@ pub const Pipeline = struct {
                     }
                     return error.QueryError;
                 },
-                .notice, .parameter_status => {},
+                'A', 'N', 'S' => {},
                 else => return error.UnexpectedBackendMessageType,
             }
         }
@@ -480,17 +476,15 @@ pub const Pipeline = struct {
         var completed: usize = 0;
 
         while (true) {
-            const msg = try self.conn.readMessage();
+            const msg = try self.conn.readMessageRawFast();
             switch (msg.msg_type) {
-                .bind_complete, .parse_complete => {},
-                .row_description => {},
-                .data_row => {},
-                .command_complete => completed += 1,
-                .no_data => completed += 1,
-                .ready_for_query => {
+                '2', '1', 'T', 'D' => {},
+                'C' => completed += 1,
+                'n' => completed += 1,
+                'Z' => {
                     if (completed >= expected) return completed;
                 },
-                .error_response => {
+                'E' => {
                     _ = self.drainUntilReadyAfterError() catch {};
                     if (isPreparedStatementRetryablePayload(msg.payload)) {
                         self.clearCache();
@@ -498,7 +492,7 @@ pub const Pipeline = struct {
                     }
                     return error.QueryError;
                 },
-                .notice, .parameter_status => {},
+                'A', 'N', 'S' => {},
                 else => return error.UnexpectedBackendMessageType,
             }
         }
@@ -528,10 +522,13 @@ pub const Pipeline = struct {
         var field_names_template: []const []const u8 = &.{};
         errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
         var flow = ExtendedFlowTracker.init(flow_cfg);
+        const enforce_order = expected <= 1;
 
         while (true) {
             const msg = try self.conn.readMessage();
-            try self.validateExtendedFlow(&flow, msg.msg_type, false);
+            if (enforce_order) {
+                try self.validateExtendedFlow(&flow, msg.msg_type, false);
+            }
 
             switch (msg.msg_type) {
                 .bind_complete, .parse_complete => {},
@@ -566,7 +563,7 @@ pub const Pipeline = struct {
                 },
                 .command_complete => {
                     try all_results.append(self.allocator, try current_rows.toOwnedSlice(self.allocator));
-                    current_rows = .{};
+                    current_rows = .empty;
                 },
                 .no_data => {
                     const empty = try self.allocator.alloc(PgRow, 0);
@@ -589,7 +586,7 @@ pub const Pipeline = struct {
                     }
                     return error.QueryError;
                 },
-                .notice, .parameter_status => {},
+                .notification, .notice, .parameter_status => {},
                 else => return error.UnexpectedBackendMessageType,
             }
         }
@@ -602,6 +599,7 @@ pub const Pipeline = struct {
             const msg = try self.conn.readMessage();
             try self.validateExtendedFlow(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
+                .parse_complete => {},
                 .ready_for_query => return,
                 .error_response => {
                     const already_exists = isPreparedStatementAlreadyExistsPayload(msg.payload);
@@ -615,7 +613,7 @@ pub const Pipeline = struct {
                     }
                     return error.ServerError;
                 },
-                .notice, .parameter_status => {},
+                .notification, .notice, .parameter_status => {},
                 else => return error.UnexpectedBackendMessageType,
             }
         }
@@ -640,10 +638,22 @@ pub const Pipeline = struct {
             return err;
         };
     }
+
+    fn validateExtendedFlowMsgType(
+        self: *Pipeline,
+        flow: *ExtendedFlowTracker,
+        msg_type: u8,
+        error_pending: bool,
+    ) !void {
+        flow.validateMsgType(msg_type, error_pending) catch |err| {
+            _ = self.drainUntilReadyAfterError() catch {};
+            return err;
+        };
+    }
 };
 
 fn isPipelineSessionNoise(msg_type: BackendMessage) bool {
-    return msg_type == .notice or msg_type == .parameter_status;
+    return msg_type == .notification or msg_type == .notice or msg_type == .parameter_status;
 }
 
 fn isPipelineDrainAllowedMessage(msg_type: BackendMessage) bool {
@@ -695,6 +705,35 @@ fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
+fn parseDataRowFirstTwoPayload(payload: []const u8) ![2]?[]const u8 {
+    if (payload.len < 2) return error.InvalidDataRow;
+    const col_count: usize = @intCast(std.mem.readInt(u16, payload[0..2], .big));
+
+    var pos: usize = 2;
+    var pair: [2]?[]const u8 = .{ null, null };
+
+    for (0..col_count) |i| {
+        if (pos + 4 > payload.len) return error.InvalidDataRow;
+        const len = std.mem.readInt(i32, payload[pos..][0..4], .big);
+        pos += 4;
+
+        if (len == -1) {
+            if (i < 2) pair[i] = null;
+            continue;
+        }
+        if (len < -1) return error.InvalidDataRow;
+
+        const ulen: usize = @intCast(len);
+        const end = std.math.add(usize, pos, ulen) catch return error.InvalidDataRow;
+        if (end > payload.len) return error.InvalidDataRow;
+        if (i < 2) pair[i] = payload[pos..end];
+        pos = end;
+    }
+
+    if (pos != payload.len) return error.InvalidDataRow;
+    return pair;
+}
+
 // ==================== Tests ====================
 
 test "PreparedStatement struct" {
@@ -737,11 +776,11 @@ test "pipeline hardening: already-exists prepared statement payload detection" {
 test "pipeline hardening: drain allowlist rejects unexpected message types" {
     try std.testing.expect(isPipelineDrainAllowedMessage(.ready_for_query));
     try std.testing.expect(isPipelineDrainAllowedMessage(.error_response));
+    try std.testing.expect(isPipelineDrainAllowedMessage(.notification));
     try std.testing.expect(isPipelineDrainAllowedMessage(.notice));
     try std.testing.expect(isPipelineDrainAllowedMessage(.parameter_status));
     try std.testing.expect(!isPipelineDrainAllowedMessage(.data_row));
     try std.testing.expect(!isPipelineDrainAllowedMessage(.command_complete));
-    try std.testing.expect(!isPipelineDrainAllowedMessage(.notification));
 }
 
 test "pipeline hardening: direct bind rejects too many parameters" {

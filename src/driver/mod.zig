@@ -63,6 +63,7 @@ pub const QueryOpts = driver.QueryOpts;
 pub const ExplainEstimate = explain_estimate.ExplainEstimate;
 pub const CopyChunkHandler = driver.CopyChunkHandler;
 pub const BytesRowHandler = driver.BytesRowHandler;
+pub const FirstColumnBytesHandler = driver.FirstColumnBytesHandler;
 pub const Notification = notification.Notification;
 pub const PgDriverBuilder = driver.PgDriverBuilder;
 pub const ConnectOptions = connect_url.ConnectOptions;

@@ -228,6 +228,25 @@ pub fn build(b: *std.Build) void {
     const e2e_step = b.step("e2e", "Run E2E integration test against real PostgreSQL");
     e2e_step.dependOn(&run_e2e.step);
 
+    // ==================== Adversarial Integration Test ====================
+    const adversarial_test = b.addExecutable(.{
+        .name = "qail-adversarial-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/adversarial_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(adversarial_test);
+
+    const run_adversarial = b.addRunArtifact(adversarial_test);
+    run_adversarial.step.dependOn(b.getInstallStep());
+    const adversarial_step = b.step("adversarial-test", "Run adversarial integration tests against local PostgreSQL");
+    adversarial_step.dependOn(&run_adversarial.step);
+
     // ==================== Linux Kerberos/GSSENC Smoke Test ====================
     const gssenc_smoke = b.addExecutable(.{
         .name = "qail-gssenc-smoke",
