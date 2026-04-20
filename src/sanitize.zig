@@ -168,8 +168,8 @@ fn checkExpr(field: []const u8, expr: *const Expr) ?SanitizeError {
             }
             break :blk null;
         },
-        .subquery => |_| rawError("expr.subquery"),
-        .exists_subquery => |_| rawError("expr.exists_subquery"),
+        .subquery => rawError("expr.subquery"),
+        .exists_subquery => rawError("expr.exists_subquery"),
         .coalesce => |c| blk: {
             for (c.exprs) |*e| {
                 if (checkExpr("expr.coalesce", e)) |err| break :blk err;
@@ -266,7 +266,7 @@ fn checkExpr(field: []const u8, expr: *const Expr) ?SanitizeError {
             break :blk null;
         },
         .unary => |u| checkExpr(field, u.operand),
-        .raw => |_| rawError("expr.raw"),
+        .raw => rawError("expr.raw"),
     };
 }
 
@@ -311,7 +311,7 @@ fn checkConstraint(constraint: TableConstraint) ?SanitizeError {
             }
             break :blk null;
         },
-        .check => |_| rawError("constraint.check"),
+        .check => rawError("constraint.check"),
     };
 }
 

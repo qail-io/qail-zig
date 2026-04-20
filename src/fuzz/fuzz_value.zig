@@ -41,7 +41,7 @@ fn valueFromBytes(data: []const u8) Value {
     };
 }
 
-fn fuzzValueFormat(_: @TypeOf(.{}), input: []const u8) anyerror!void {
+fn fuzzValueFormatInput(input: []const u8) anyerror!void {
     const val = valueFromBytes(input);
 
     // format() must never panic — errors are OK, panics are NOT
@@ -50,6 +50,12 @@ fn fuzzValueFormat(_: @TypeOf(.{}), input: []const u8) anyerror!void {
     val.format(writer.writer()) catch return;
 
     // If format succeeds, the output should be non-empty for non-trivial values
+}
+
+fn fuzzValueFormat(_: @TypeOf(.{}), smith: *std.testing.Smith) anyerror!void {
+    var input: [4096]u8 = undefined;
+    const n: usize = @intCast(smith.slice(&input));
+    try fuzzValueFormatInput(input[0..n]);
 }
 
 test "fuzz: Value.format never panics on arbitrary values" {

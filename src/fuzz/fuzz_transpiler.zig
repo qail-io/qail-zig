@@ -33,7 +33,7 @@ fn splitStrings(data: []const u8, comptime max: usize) [max][]const u8 {
     return result;
 }
 
-fn fuzzTranspiler(_: @TypeOf(.{}), input: []const u8) anyerror!void {
+fn fuzzTranspilerInput(input: []const u8) anyerror!void {
     if (input.len < 2) return;
 
     const parts = splitStrings(input, 4);
@@ -91,6 +91,12 @@ fn fuzzTranspiler(_: @TypeOf(.{}), input: []const u8) anyerror!void {
         const sql = transpiler.toSql(allocator, &cmd) catch return;
         allocator.free(sql);
     }
+}
+
+fn fuzzTranspiler(_: @TypeOf(.{}), smith: *std.testing.Smith) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    const n: usize = @intCast(smith.slice(&buf));
+    try fuzzTranspilerInput(buf[0..n]);
 }
 
 test "fuzz: transpiler toSql never panics on structured queries" {

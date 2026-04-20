@@ -81,7 +81,7 @@ test "decode notification response" {
 }
 
 test "buffered notifications can be appended and popped" {
-    var notifications: std.ArrayListUnmanaged(Notification) = .{};
+    var notifications: std.ArrayListUnmanaged(Notification) = .empty;
     defer {
         for (notifications.items) |*notification| notification.deinit();
         notifications.deinit(std.testing.allocator);
@@ -108,7 +108,7 @@ test "buffered notifications can be appended and popped" {
 }
 
 test "drain buffered notifications preserves order" {
-    var notifications: std.ArrayListUnmanaged(Notification) = .{};
+    var notifications: std.ArrayListUnmanaged(Notification) = .empty;
     defer {
         for (notifications.items) |*notification| notification.deinit();
         notifications.deinit(std.testing.allocator);

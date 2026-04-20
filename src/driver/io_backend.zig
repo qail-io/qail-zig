@@ -123,7 +123,7 @@ const IoUringStream = if (builtin.os.tag == .linux) struct {
         if (self.closed) return;
         self.closed = true;
         self.ring.deinit();
-        posix.close(self.fd);
+        _ = linux.close(self.fd);
     }
 
     pub fn read(self: *Self, buffer: []u8) !usize {

@@ -204,7 +204,7 @@ pub const Pipeline = struct {
 
         // Pre-allocate buffer for ALL messages (Bind+Execute per query + Sync)
         // Estimate: ~50 bytes per query for SELECT 1 type queries
-        var buffer: std.ArrayList(u8) = .{};
+        var buffer: std.ArrayList(u8) = .empty;
         defer buffer.deinit(self.allocator);
         try buffer.ensureTotalCapacity(self.allocator, params_batch.len * 50 + 10);
 
@@ -235,7 +235,7 @@ pub const Pipeline = struct {
         if (params_batch.len == 0) return &.{};
 
         // Pre-allocate buffer for ALL messages
-        var buffer: std.ArrayList(u8) = .{};
+        var buffer: std.ArrayList(u8) = .empty;
         defer buffer.deinit(self.allocator);
         try buffer.ensureTotalCapacity(self.allocator, params_batch.len * 50 + 10);
 
@@ -296,7 +296,7 @@ pub const Pipeline = struct {
         if (params_batch.len == 0) return &.{};
 
         // Pre-allocate buffer for ALL messages
-        var buffer: std.ArrayList(u8) = .{};
+        var buffer: std.ArrayList(u8) = .empty;
         defer buffer.deinit(self.allocator);
         try buffer.ensureTotalCapacity(self.allocator, params_batch.len * 50 + 10);
 
@@ -318,7 +318,7 @@ pub const Pipeline = struct {
 
     /// Internal: collect 2-column result pairs
     fn collectUltraResults(self: *Pipeline, expected: usize, flow_cfg: ExtendedFlowConfig) ![][2]?[]const u8 {
-        var results: std.ArrayList([2]?[]const u8) = .{};
+        var results: std.ArrayList([2]?[]const u8) = .empty;
         errdefer results.deinit(self.allocator);
         var flow = ExtendedFlowTracker.init(flow_cfg);
 
@@ -506,7 +506,7 @@ pub const Pipeline = struct {
 
     /// Collect full results from pipeline
     fn collectResults(self: *Pipeline, expected: usize, flow_cfg: ExtendedFlowConfig) ![][]PgRow {
-        var all_results: std.ArrayList([]PgRow) = .{};
+        var all_results: std.ArrayList([]PgRow) = .empty;
         errdefer {
             for (all_results.items) |rows| {
                 for (rows) |*row| {
@@ -517,7 +517,7 @@ pub const Pipeline = struct {
             all_results.deinit(self.allocator);
         }
 
-        var current_rows: std.ArrayList(PgRow) = .{};
+        var current_rows: std.ArrayList(PgRow) = .empty;
         errdefer {
             for (current_rows.items) |*row| {
                 row.deinit();
@@ -753,7 +753,7 @@ test "pipeline hardening: direct bind rejects too many parameters" {
     };
     defer pipeline.deinit();
 
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
 
     const too_many_count = @as(usize, std.math.maxInt(i16)) + 1;
@@ -773,7 +773,7 @@ test "pipeline hardening: direct bind rejects oversized parameter payload" {
     };
     defer pipeline.deinit();
 
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
 
     const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
@@ -792,7 +792,7 @@ test "pipeline hardening: direct execute rejects oversized portal name" {
     };
     defer pipeline.deinit();
 
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
 
     const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;

@@ -1,23 +1,116 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const io_compat = @import("io.zig");
 const tls_client = @import("tls_client.zig");
 
-pub const Address = std.net.Address;
-pub const Server = std.net.Server;
-pub const Stream = std.net.Stream;
-pub const StreamReader = std.net.Stream.Reader;
-pub const StreamWriter = std.net.Stream.Writer;
+const Io = std.Io;
+const IpAddress = std.Io.net.IpAddress;
+const IoServer = std.Io.net.Server;
+const IoStream = std.Io.net.Stream;
+const HostName = std.Io.net.HostName;
+
+pub const StreamReader = std.Io.net.Stream.Reader;
+pub const StreamWriter = std.Io.net.Stream.Writer;
+
+pub const Address = struct {
+    inner: IpAddress,
+
+    pub fn parseIp4(host: []const u8, port: u16) !Address {
+        return .{ .inner = try IpAddress.parseIp4(host, port) };
+    }
+
+    pub fn getPort(self: Address) u16 {
+        return self.inner.getPort();
+    }
+
+    pub fn listen(self: Address, options: IpAddress.ListenOptions) !Server {
+        const server = try self.inner.listen(runtimeIo(), options);
+        return .{
+            .inner = server,
+            .listen_address = .{ .inner = server.socket.address },
+        };
+    }
+};
+
+pub const Stream = struct {
+    inner: IoStream,
+    handle: std.posix.fd_t,
+
+    fn fromInner(stream: IoStream) Stream {
+        return .{
+            .inner = stream,
+            .handle = stream.socket.handle,
+        };
+    }
+
+    pub fn close(self: Stream) void {
+        self.inner.close(runtimeIo());
+    }
+
+    pub fn read(self: Stream, buffer: []u8) !usize {
+        var data = [1][]u8{buffer};
+        const io_iface = runtimeIo();
+        return io_iface.vtable.netRead(io_iface.userdata, self.handle, &data);
+    }
+
+    pub fn write(self: Stream, bytes: []const u8) !usize {
+        const io_iface = runtimeIo();
+        return io_iface.vtable.netWrite(io_iface.userdata, self.handle, &.{}, &.{bytes}, 1);
+    }
+
+    pub fn writeAll(self: Stream, bytes: []const u8) !void {
+        return writeAllStream(self, bytes);
+    }
+
+    pub fn reader(self: Stream, buffer: []u8) StreamReader {
+        return self.inner.reader(runtimeIo(), buffer);
+    }
+
+    pub fn writer(self: Stream, buffer: []u8) StreamWriter {
+        return self.inner.writer(runtimeIo(), buffer);
+    }
+};
+
+pub const Server = struct {
+    inner: IoServer,
+    listen_address: Address,
+
+    pub fn deinit(self: *Server) void {
+        self.inner.deinit(runtimeIo());
+    }
+
+    pub fn accept(self: *Server) !struct { stream: Stream, address: Address } {
+        const stream = try self.inner.accept(runtimeIo());
+        return .{
+            .stream = Stream.fromInner(stream),
+            .address = .{ .inner = stream.socket.address },
+        };
+    }
+};
 
 pub fn parseIp4(host: []const u8, port: u16) !Address {
-    return std.net.Address.parseIp4(host, port);
+    return Address.parseIp4(host, port);
 }
 
 pub fn tcpConnectToAddress(address: Address) !Stream {
-    return std.net.tcpConnectToAddress(address);
+    const stream = address.inner.connect(runtimeIo(), .{
+        .mode = .stream,
+        .protocol = .tcp,
+        .timeout = .none,
+    }) catch |err| blk: {
+        if (!io_compat.retryWithThreaded(err)) return err;
+        break :blk try address.inner.connect(runtimeIo(), .{
+            .mode = .stream,
+            .protocol = .tcp,
+            .timeout = .none,
+        });
+    };
+    return Stream.fromInner(stream);
 }
 
 pub fn tcpConnectToHost(allocator: std.mem.Allocator, host: []const u8, port: u16) !Stream {
-    return std.net.tcpConnectToHost(allocator, host, port);
+    _ = allocator;
+    return tcpConnectToHostInner(host, port, .none);
 }
 
 pub fn tcpConnectToHostWithTimeout(
@@ -26,65 +119,26 @@ pub fn tcpConnectToHostWithTimeout(
     port: u16,
     timeout_ms: i32,
 ) !Stream {
-    const list = try std.net.getAddressList(allocator, host, port);
-    defer list.deinit();
-
-    if (list.addrs.len == 0) return error.UnknownHostName;
-
-    var last_err: ?anyerror = null;
-    for (list.addrs) |address| {
-        const stream = tcpConnectToAddressWithTimeout(address, timeout_ms) catch |err| {
-            last_err = err;
-            continue;
-        };
-        return stream;
-    }
-
-    return last_err orelse error.ConnectionRefused;
+    _ = allocator;
+    return tcpConnectToHostInner(host, port, sanitizeTimeout(timeoutFromMs(timeout_ms)));
 }
 
 pub fn tcpConnectToAddressWithTimeout(address: Address, timeout_ms: i32) !Stream {
-    const posix = std.posix;
-    const family = address.any.family;
-    const af_inet: @TypeOf(family) = @intCast(posix.AF.INET);
-    const af_inet6: @TypeOf(family) = @intCast(posix.AF.INET6);
-    if (family != af_inet and family != af_inet6) return error.AddressFamilyNotSupported;
-
-    // Create socket (initially blocking) using the target address family.
-    const fd = try posix.socket(@intCast(family), posix.SOCK.STREAM, 0);
-    errdefer posix.close(fd);
-
-    // Set non-blocking
-    try setBlocking(fd, false);
-
-    // Attempt connect (will return EINPROGRESS/WSAEWOULDBLOCK for non-blocking)
-    const result = posix.connect(fd, &address.any, address.getOsSockLen());
-    if (result) |_| {
-        // Connected immediately
-    } else |err| {
-        if (err == error.WouldBlock) {
-            // Wait for connection with timeout using poll
-            var fds = [1]posix.pollfd{
-                .{ .fd = if (builtin.os.tag == .windows) @ptrCast(fd) else fd, .events = posix.POLL.OUT, .revents = 0 },
-            };
-            const poll_result = try posix.poll(&fds, timeout_ms);
-            if (poll_result == 0) {
-                return error.ConnectionTimeout;
-            }
-
-            // Check for socket error (skip on Windows - getsockopt requires libc)
-            if (builtin.os.tag != .windows) {
-                try posix.getsockoptError(fd);
-            }
-        } else {
-            return err;
-        }
-    }
-
-    // Set socket back to blocking mode
-    try setBlocking(fd, true);
-
-    return .{ .handle = fd };
+    const timeout = sanitizeTimeout(timeoutFromMs(timeout_ms));
+    const stream = address.inner.connect(runtimeIo(), .{
+        .mode = .stream,
+        .protocol = .tcp,
+        .timeout = timeout,
+    }) catch |err| blk: {
+        if (!io_compat.retryWithThreaded(err)) return err;
+        const retry_timeout = sanitizeTimeout(timeout);
+        break :blk try address.inner.connect(runtimeIo(), .{
+            .mode = .stream,
+            .protocol = .tcp,
+            .timeout = retry_timeout,
+        });
+    };
+    return Stream.fromInner(stream);
 }
 
 pub fn tcpConnectToIp4WithTimeout(host: []const u8, port: u16, timeout_ms: i32) !Stream {
@@ -92,67 +146,14 @@ pub fn tcpConnectToIp4WithTimeout(host: []const u8, port: u16, timeout_ms: i32) 
     return tcpConnectToAddressWithTimeout(address, timeout_ms);
 }
 
-/// Cross-platform socket read helper.
-///
-/// `std.net.Stream.read` currently routes through `ReadFile` on Windows, which
-/// does not behave correctly for TCP sockets in our test/runtime paths. Use
-/// `recv` directly so plain socket I/O behaves consistently across platforms.
 pub fn readStream(stream: Stream, buffer: []u8) !usize {
-    if (builtin.os.tag != .windows) return stream.read(buffer);
-
-    const windows = std.os.windows;
-    const rc = windows.recvfrom(stream.handle, buffer.ptr, buffer.len, 0, null, null);
-    if (rc == windows.ws2_32.SOCKET_ERROR) {
-        switch (windows.ws2_32.WSAGetLastError()) {
-            .WSAECONNRESET => return error.ConnectionResetByPeer,
-            .WSAEFAULT => unreachable,
-            .WSAEINPROGRESS, .WSAEINTR => unreachable,
-            .WSAEINVAL => return error.SocketNotBound,
-            .WSAEMSGSIZE => return error.MessageTooBig,
-            .WSAENETDOWN => return error.NetworkSubsystemFailed,
-            .WSAENETRESET => return error.ConnectionResetByPeer,
-            .WSAENOTCONN => return error.SocketNotConnected,
-            .WSAEWOULDBLOCK => return error.WouldBlock,
-            .WSANOTINITIALISED => unreachable,
-            .WSA_IO_PENDING => unreachable,
-            .WSA_OPERATION_ABORTED => unreachable,
-            else => |err| return windows.unexpectedWSAError(err),
-        }
-    }
-    return @intCast(rc);
+    return stream.read(buffer);
 }
 
-/// Cross-platform socket write helper.
 pub fn writeStream(stream: Stream, bytes: []const u8) !usize {
-    if (builtin.os.tag != .windows) return stream.write(bytes);
-
-    const windows = std.os.windows;
-    const rc = windows.sendto(stream.handle, bytes.ptr, bytes.len, 0, null, 0);
-    if (rc == windows.ws2_32.SOCKET_ERROR) {
-        switch (windows.ws2_32.WSAGetLastError()) {
-            .WSAECONNABORTED, .WSAECONNRESET => return error.ConnectionResetByPeer,
-            .WSAEFAULT => unreachable,
-            .WSAEINPROGRESS, .WSAEINTR => unreachable,
-            .WSAEINVAL => return error.SocketNotBound,
-            .WSAEMSGSIZE => return error.MessageTooBig,
-            .WSAENETDOWN => return error.NetworkSubsystemFailed,
-            .WSAENETRESET => return error.ConnectionResetByPeer,
-            .WSAENOBUFS => return error.SystemResources,
-            .WSAENOTCONN => return error.SocketNotConnected,
-            .WSAENOTSOCK => unreachable,
-            .WSAEOPNOTSUPP => unreachable,
-            .WSAESHUTDOWN => unreachable,
-            .WSAEWOULDBLOCK => return error.WouldBlock,
-            .WSANOTINITIALISED => unreachable,
-            .WSA_IO_PENDING => unreachable,
-            .WSA_OPERATION_ABORTED => unreachable,
-            else => |err| return windows.unexpectedWSAError(err),
-        }
-    }
-    return @intCast(rc);
+    return stream.write(bytes);
 }
 
-/// Cross-platform socket write-all helper.
 pub fn writeAllStream(stream: Stream, bytes: []const u8) !void {
     var written: usize = 0;
     while (written < bytes.len) {
@@ -162,51 +163,110 @@ pub fn writeAllStream(stream: Stream, bytes: []const u8) !void {
     }
 }
 
-/// Construct the std stream reader via a compatibility shim.
 pub fn streamReader(stream: Stream, buffer: []u8) StreamReader {
     return stream.reader(buffer);
 }
 
-/// Construct the std stream writer via a compatibility shim.
 pub fn streamWriter(stream: Stream, buffer: []u8) StreamWriter {
     return stream.writer(buffer);
 }
 
-/// Initialize std TLS client via compatibility shim.
-///
-/// Any stream interface shape changes in future Zig versions should be localized
-/// to this function.
 pub fn initTlsClient(
     reader: *StreamReader,
     writer: *StreamWriter,
     options: tls_client.Options,
 ) !tls_client.Client {
-    return tls_client.Client.init(reader.interface(), &writer.interface, options);
+    return tls_client.Client.init(&reader.interface, &writer.interface, options);
 }
 
 fn setBlocking(fd: std.posix.fd_t, blocking: bool) !void {
-    if (builtin.os.tag == .windows) {
-        const windows = std.os.windows;
-        // 0 = blocking, 1 = non-blocking
-        var mode: c_ulong = if (blocking) 0 else 1;
-        const socket: windows.ws2_32.SOCKET = @ptrCast(fd);
-        const res = windows.ws2_32.ioctlsocket(socket, windows.ws2_32.FIONBIO, &mode);
-        if (res != 0) return error.SocketError;
-    } else {
-        const posix = std.posix;
-        // O_NONBLOCK values: Linux=2048, macOS/BSD=4
-        const O_NONBLOCK: u32 = if (builtin.os.tag == .linux) 2048 else 4;
-        const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-        const new_flags = if (blocking)
-            flags & ~O_NONBLOCK
-        else
-            flags | O_NONBLOCK;
-        _ = try posix.fcntl(fd, posix.F.SETFL, new_flags);
+    if (comptime builtin.os.tag == .windows) {
+        return;
+    }
+
+    const posix = std.posix;
+    const nonblock_bit = @as(usize, 1) << @bitOffsetOf(posix.O, "NONBLOCK");
+
+    var flags: usize = 0;
+    while (true) {
+        const rc = posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0));
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                flags = @intCast(rc);
+                break;
+            },
+            .INTR => continue,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+
+    const new_flags = if (blocking) (flags & ~nonblock_bit) else (flags | nonblock_bit);
+    while (true) {
+        switch (posix.errno(posix.system.fcntl(fd, posix.F.SETFL, new_flags))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => |err| return posix.unexpectedErrno(err),
+        }
     }
 }
 
 pub fn setStreamBlocking(stream: Stream, blocking: bool) !void {
     try setBlocking(stream.handle, blocking);
+}
+
+fn runtimeIo() Io {
+    return io_compat.runtimeIo();
+}
+
+fn timeoutFromMs(timeout_ms: i32) Io.Timeout {
+    if (timeout_ms <= 0) return .none;
+    return .{
+        .duration = .{
+            .clock = .awake,
+            .raw = Io.Duration.fromMilliseconds(timeout_ms),
+        },
+    };
+}
+
+fn sanitizeTimeout(timeout: Io.Timeout) Io.Timeout {
+    if (timeout == .none) return .none;
+    if (!io_compat.runtimeUsesEvented()) return .none;
+    return timeout;
+}
+
+fn tcpConnectToHostInner(host: []const u8, port: u16, timeout: Io.Timeout) !Stream {
+    if (IpAddress.parse(host, port)) |ip_address| {
+        const stream = ip_address.connect(runtimeIo(), .{
+            .mode = .stream,
+            .protocol = .tcp,
+            .timeout = timeout,
+        }) catch |err| blk: {
+            if (!io_compat.retryWithThreaded(err)) return err;
+            const retry_timeout = sanitizeTimeout(timeout);
+            break :blk try ip_address.connect(runtimeIo(), .{
+                .mode = .stream,
+                .protocol = .tcp,
+                .timeout = retry_timeout,
+            });
+        };
+        return Stream.fromInner(stream);
+    } else |_| {}
+
+    const host_name = try HostName.init(host);
+    const stream = HostName.connect(host_name, runtimeIo(), port, .{
+        .mode = .stream,
+        .protocol = .tcp,
+        .timeout = timeout,
+    }) catch |err| blk: {
+        if (!io_compat.retryWithThreaded(err)) return err;
+        const retry_timeout = sanitizeTimeout(timeout);
+        break :blk try HostName.connect(host_name, runtimeIo(), port, .{
+            .mode = .stream,
+            .protocol = .tcp,
+            .timeout = retry_timeout,
+        });
+    };
+    return Stream.fromInner(stream);
 }
 
 fn localhostAcceptThread(server: *Server) void {

@@ -1,4 +1,6 @@
 const std = @import("std");
+const process_compat = @import("../compat/process.zig");
+const io_compat = @import("../compat/io.zig");
 
 pub const LinuxKrb5ProviderConfig = struct {
     /// PostgreSQL service name (typically `postgres`).
@@ -42,7 +44,7 @@ pub fn linuxKrb5Preflight(
     allocator: std.mem.Allocator,
     config: LinuxKrb5ProviderConfig,
 ) !LinuxKrb5PreflightReport {
-    var env_map = try std.process.getEnvMap(allocator);
+    var env_map = try process_compat.getEnvMap(allocator);
     defer env_map.deinit();
 
     return linuxKrb5PreflightWithEnvMap(allocator, config, &env_map);
@@ -51,7 +53,7 @@ pub fn linuxKrb5Preflight(
 pub fn linuxKrb5PreflightWithEnvMap(
     allocator: std.mem.Allocator,
     config: LinuxKrb5ProviderConfig,
-    env_map: *const std.process.EnvMap,
+    env_map: *const process_compat.EnvMap,
 ) !LinuxKrb5PreflightReport {
     var warnings = std.ArrayList([]u8).empty;
     errdefer {
@@ -173,14 +175,20 @@ fn validateKeytabEnv(env_name: []const u8, raw: []const u8) !void {
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(io_compat.runtimeIo(), path, .{}) catch return false;
     return true;
 }
 
 fn pathIsDir(path: []const u8) bool {
-    var dir = std.fs.cwd().openDir(path, .{}) catch return false;
-    dir.close();
+    var dir = std.Io.Dir.cwd().openDir(io_compat.runtimeIo(), path, .{}) catch return false;
+    dir.close(io_compat.runtimeIo());
     return true;
+}
+
+fn tmpFilePathAlloc(allocator: std.mem.Allocator, dir: std.Io.Dir, name: []const u8) ![]u8 {
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try dir.realPath(std.testing.io, &base_buf);
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_buf[0..base_len], name });
 }
 
 fn hasWarning(report: LinuxKrb5PreflightReport, needle: []const u8) bool {
@@ -210,13 +218,13 @@ test "linux krb5 target name uses explicit override" {
 }
 
 test "linux krb5 preflight warns when no explicit credential source is set" {
-    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    var env_map = process_compat.EnvMap.init(std.testing.allocator);
     defer env_map.deinit();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
-    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "krb5.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
+    const cfg_path = try tmpFilePathAlloc(std.testing.allocator, tmp.dir, "krb5.conf");
     defer std.testing.allocator.free(cfg_path);
     try env_map.put("KRB5_CONFIG", cfg_path);
 
@@ -231,17 +239,17 @@ test "linux krb5 preflight warns when no explicit credential source is set" {
 }
 
 test "linux krb5 preflight validates FILE cache path" {
-    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    var env_map = process_compat.EnvMap.init(std.testing.allocator);
     defer env_map.deinit();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
-    try tmp.dir.writeFile(.{ .sub_path = "cache", .data = "ticket" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cache", .data = "ticket" });
 
-    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "krb5.conf");
+    const cfg_path = try tmpFilePathAlloc(std.testing.allocator, tmp.dir, "krb5.conf");
     defer std.testing.allocator.free(cfg_path);
-    const cache_path = try tmp.dir.realpathAlloc(std.testing.allocator, "cache");
+    const cache_path = try tmpFilePathAlloc(std.testing.allocator, tmp.dir, "cache");
     defer std.testing.allocator.free(cache_path);
 
     const ccache = try std.fmt.allocPrint(std.testing.allocator, "FILE:{s}", .{cache_path});
@@ -261,13 +269,13 @@ test "linux krb5 preflight validates FILE cache path" {
 }
 
 test "linux krb5 preflight warns for memory cache specs" {
-    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    var env_map = process_compat.EnvMap.init(std.testing.allocator);
     defer env_map.deinit();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
-    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "krb5.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
+    const cfg_path = try tmpFilePathAlloc(std.testing.allocator, tmp.dir, "krb5.conf");
     defer std.testing.allocator.free(cfg_path);
 
     try env_map.put("KRB5_CONFIG", cfg_path);
@@ -284,13 +292,13 @@ test "linux krb5 preflight warns for memory cache specs" {
 }
 
 test "linux krb5 preflight rejects missing keytab" {
-    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    var env_map = process_compat.EnvMap.init(std.testing.allocator);
     defer env_map.deinit();
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
-    const cfg_path = try tmp.dir.realpathAlloc(std.testing.allocator, "krb5.conf");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "krb5.conf", .data = "[libdefaults]\n" });
+    const cfg_path = try tmpFilePathAlloc(std.testing.allocator, tmp.dir, "krb5.conf");
     defer std.testing.allocator.free(cfg_path);
 
     try env_map.put("KRB5_CONFIG", cfg_path);

@@ -340,7 +340,7 @@ pub const PgDriver = struct {
     cache: StatementCache,
     connect_host: ?[]u8 = null,
     connect_port: ?u16 = null,
-    notifications: std.ArrayListUnmanaged(Notification) = .{},
+    notifications: std.ArrayListUnmanaged(Notification) = .empty,
     replication_mode_enabled: bool = false,
     replication_stream_active: bool = false,
     last_replication_wal_end: ?u64 = null,
@@ -366,7 +366,7 @@ pub const PgDriver = struct {
             .cache = StatementCache.init(allocator, DEFAULT_CACHE_SIZE),
             .connect_host = null,
             .connect_port = null,
-            .notifications = .{},
+            .notifications = .empty,
             .replication_mode_enabled = false,
             .replication_stream_active = false,
             .last_replication_wal_end = null,
@@ -949,7 +949,7 @@ pub const PgDriver = struct {
         try self.conn.send(self.encoder.getWritten());
 
         // Collect results
-        var rows: std.ArrayList(PgRow) = .{};
+        var rows: std.ArrayList(PgRow) = .empty;
         errdefer {
             for (rows.items) |*row| {
                 row.deinit();
@@ -1140,7 +1140,7 @@ pub const PgDriver = struct {
     pub fn copyExportRaw(self: *PgDriver, cmd: *const QailCmd) ![]u8 {
         if (cmd.kind != .copy_out) return error.InvalidCopyCommand;
 
-        var out: std.ArrayListUnmanaged(u8) = .{};
+        var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(self.allocator);
 
         var sink = CopyByteSink{
@@ -1882,7 +1882,7 @@ pub const PgDriver = struct {
         try self.encoder.executeNamedStatement(stmt_name, params);
         try self.conn.send(self.encoder.getWritten());
 
-        var rows: std.ArrayList(PgRow) = .{};
+        var rows: std.ArrayList(PgRow) = .empty;
         errdefer {
             for (rows.items) |*row| row.deinit();
             rows.deinit(self.allocator);
@@ -2032,7 +2032,7 @@ fn appendCopyChunk(ctx: ?*anyopaque, chunk: []const u8) !void {
 }
 
 fn extractCopyColumns(allocator: std.mem.Allocator, cmd: *const QailCmd) ![][]const u8 {
-    var columns: std.ArrayListUnmanaged([]const u8) = .{};
+    var columns: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer columns.deinit(allocator);
 
     if (cmd.columns.len != 0) {
@@ -2133,7 +2133,7 @@ test "parse connection url loads tls server end point cert der path" {
     defer tmp.cleanup();
 
     const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x0A };
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "leaf.der",
         .data = &cert_der,
     });
@@ -2142,12 +2142,13 @@ test "parse connection url loads tls server end point cert der path" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.fs.cwd().realpath(".", &cwd_buf);
+    var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path_len = try tmp.dir.realPath(std.testing.io, &tmp_path_buf);
+    const tmp_path = tmp_path_buf[0..tmp_path_len];
     const cert_path = try std.fmt.allocPrint(
         arena,
-        "{s}/.zig-cache/tmp/{s}/leaf.der",
-        .{ cwd, tmp.sub_path },
+        "{s}/leaf.der",
+        .{tmp_path},
     );
     const url = try std.fmt.allocPrint(
         arena,
@@ -2710,7 +2711,7 @@ fn makeHardeningTestDriver() PgDriver {
         .cache = undefined,
         .connect_host = null,
         .connect_port = null,
-        .notifications = .{},
+        .notifications = .empty,
         .replication_mode_enabled = false,
         .replication_stream_active = false,
         .last_replication_wal_end = null,

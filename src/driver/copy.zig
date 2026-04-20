@@ -183,7 +183,7 @@ pub fn copyExport(
     if (!saw_copy_out) return error.InvalidCopyState;
 
     // Receive CopyData messages
-    var rows: std.ArrayList([]const u8) = .{};
+    var rows: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (rows.items) |row| allocator.free(row);
         rows.deinit(allocator);

@@ -46,7 +46,7 @@ pub const StatementCache = struct {
     pub fn init(allocator: std.mem.Allocator, max_size: usize) StatementCache {
         return .{
             .entries = std.StringHashMap(CacheEntry).init(allocator),
-            .order = .{},
+            .order = .empty,
             .allocator = allocator,
             .max_size = if (max_size == 0) 1 else max_size,
         };

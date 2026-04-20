@@ -37,7 +37,7 @@ The methodology is intentionally strict:
 zig build pgzig-bench -- qail single --workload point
 zig build pgzig-bench -- pgzig single --workload point
 
-# macOS 26 + Zig 0.15.x workaround wrapper
+# Optional wrapper (equivalent commands)
 ./scripts/zigw pgzig-bench qail single --workload point
 ./scripts/zigw pgzig-bench pgzig single --workload point
 

@@ -44,10 +44,7 @@ pub fn tryGssEncRequestStream(
             defer net.setStreamBlocking(stream, true) catch {};
 
             var extra: [1]u8 = undefined;
-            const extra_n = net.readStream(stream, &extra) catch |err| switch (err) {
-                error.WouldBlock => 0,
-                else => return err,
-            };
+            const extra_n = net.readStream(stream, &extra) catch 0;
             if (extra_n > 0) return error.GssEncBufferStuffingDetected;
 
             handoff = true;

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const io_compat = @import("../compat/io.zig");
 
 const QailCmd = @import("../ast/cmd.zig").QailCmd;
 const Expr = @import("../ast/expr.zig").Expr;
@@ -70,7 +71,7 @@ pub fn getMigrationStatusCmd() QailCmd {
 
 /// Generate a migration version string (timestamp-based)
 pub fn generateVersion() [14]u8 {
-    const timestamp = std.time.timestamp();
+    const timestamp = std.Io.Clock.now(.real, io_compat.runtimeIo()).toSeconds();
     const secs = @as(u64, @intCast(timestamp));
 
     // Convert to datetime components

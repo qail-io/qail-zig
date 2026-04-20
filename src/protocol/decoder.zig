@@ -153,7 +153,7 @@ pub const Decoder = struct {
     ///
     /// Must be called after `parseAuthentication()` when auth type is `sasl`.
     pub fn parseAuthenticationSaslMechanisms(self: *Decoder, allocator: std.mem.Allocator) ![][]const u8 {
-        var mechs: std.ArrayList([]const u8) = .{};
+        var mechs: std.ArrayList([]const u8) = .empty;
         defer mechs.deinit(allocator);
 
         while (true) {

@@ -21,7 +21,7 @@ pub const Encoder = struct {
 
     pub fn init(allocator: std.mem.Allocator) Encoder {
         return .{
-            .buffer = .{},
+            .buffer = .empty,
             .allocator = allocator,
         };
     }

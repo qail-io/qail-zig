@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn encodeCopyRow(allocator: std.mem.Allocator, row: []const ?[]const u8) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .{};
+    var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
 
     for (row) |col| {
@@ -35,7 +35,7 @@ pub fn sendCopyDone(conn: anytype) !void {
 }
 
 pub fn quoteIdentifierListAlloc(allocator: std.mem.Allocator, columns: []const []const u8) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     for (columns, 0..) |column, i| {
@@ -52,7 +52,7 @@ pub fn quoteIdentifierListAlloc(allocator: std.mem.Allocator, columns: []const [
 pub fn quoteQualifiedIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
     if (ident.len == 0) return error.InvalidIdentifier;
 
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     var parts = std.mem.splitScalar(u8, ident, '.');

@@ -9,6 +9,7 @@ const Connection = @import("connection.zig").Connection;
 const config_mod = @import("pool/config.zig");
 const protocol = @import("../protocol/mod.zig");
 const rls_mod = @import("rls.zig");
+const io_compat = @import("../compat/io.zig");
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
 pub const PoolConfig = config_mod.PoolConfig;
@@ -71,8 +72,9 @@ pub const PgPool = struct {
     config: PoolConfig,
     allocator: std.mem.Allocator,
     idle_connections: std.ArrayList(PooledConn),
-    mutex: std.Thread.Mutex,
-    cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    cond: std.Io.Condition,
+    wait_epoch: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     active_count: usize,
     closed: bool,
     owns_config_strings: bool = false,
@@ -110,9 +112,9 @@ pub const PgPool = struct {
         var pool = PgPool{
             .config = resolved_config,
             .allocator = allocator,
-            .idle_connections = .{},
-            .mutex = .{},
-            .cond = .{},
+            .idle_connections = .empty,
+            .mutex = .init,
+            .cond = .init,
             .active_count = 0,
             .closed = false,
             .owns_config_strings = true,
@@ -125,7 +127,7 @@ pub const PgPool = struct {
         // Create initial connections
         for (0..config.min_connections) |_| {
             const conn = try pool.createConnection();
-            const now = std.time.milliTimestamp();
+            const now = nowMillis();
             try pool.idle_connections.append(allocator, .{
                 .conn = conn,
                 .created_at = now,
@@ -144,8 +146,8 @@ pub const PgPool = struct {
 
     /// Start background reconnect thread
     pub fn startReconnectThread(self: *PgPool) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_compat.runtimeIo());
+        defer self.mutex.unlock(io_compat.runtimeIo());
 
         if (self.closed) return error.PoolClosed;
         if (self.reconnect_thread != null) return;
@@ -166,15 +168,15 @@ pub const PgPool = struct {
     fn reconnectLoop(self: *PgPool) void {
         while (!self.should_stop.load(.acquire)) {
             self.maintainMinConnections();
-            std.time.sleep(self.config.reconnect_interval_ms * std.time.ns_per_ms);
+            sleepMs(@intCast(self.config.reconnect_interval_ms));
         }
     }
 
     /// Ensure minimum connections are available
     fn maintainMinConnections(self: *PgPool) void {
-        self.mutex.lock();
+        self.mutex.lockUncancelable(io_compat.runtimeIo());
         if (self.closed) {
-            self.mutex.unlock();
+            self.mutex.unlock(io_compat.runtimeIo());
             return;
         }
         const current = self.idle_connections.items.len + self.active_count;
@@ -182,24 +184,24 @@ pub const PgPool = struct {
             self.config.min_connections - current
         else
             0;
-        self.mutex.unlock();
+        self.mutex.unlock(io_compat.runtimeIo());
 
         for (0..needed) |_| {
             const conn = self.createConnection() catch continue;
-            self.mutex.lock();
+            self.mutex.lockUncancelable(io_compat.runtimeIo());
             if (self.closed) {
-                self.mutex.unlock();
+                self.mutex.unlock(io_compat.runtimeIo());
                 var c = conn;
                 c.close();
                 break;
             }
             if (self.idle_connections.items.len + self.active_count >= self.config.max_connections) {
-                self.mutex.unlock();
+                self.mutex.unlock(io_compat.runtimeIo());
                 var c = conn;
                 c.close();
                 break;
             }
-            const now = std.time.milliTimestamp();
+            const now = nowMillis();
             self.idle_connections.append(self.allocator, .{
                 .conn = conn,
                 .created_at = now,
@@ -208,8 +210,9 @@ pub const PgPool = struct {
                 var c = conn;
                 c.close();
             };
-            self.cond.signal();
-            self.mutex.unlock();
+            self.cond.signal(io_compat.runtimeIo());
+            self.notifyWaiters();
+            self.mutex.unlock(io_compat.runtimeIo());
         }
     }
 
@@ -224,44 +227,45 @@ pub const PgPool = struct {
     pub fn closeGraceful(self: *PgPool, drain_timeout_ms: i32) void {
         self.stopReconnectThread();
 
-        self.mutex.lock();
+        self.mutex.lockUncancelable(io_compat.runtimeIo());
         self.closed = true;
-        self.cond.broadcast();
+        self.cond.broadcast(io_compat.runtimeIo());
+        self.notifyWaiters();
 
         if (drain_timeout_ms > 0) {
-            const started_at = std.time.milliTimestamp();
+            const started_at = nowMillis();
             while (self.active_count > 0) {
-                const elapsed = std.time.milliTimestamp() - started_at;
+                const elapsed = nowMillis() - started_at;
                 if (elapsed >= drain_timeout_ms) break;
 
                 const remaining_ms = drain_timeout_ms - elapsed;
-                const timeout_ns = @as(u64, @intCast(remaining_ms)) * std.time.ns_per_ms;
-                self.cond.timedWait(&self.mutex, timeout_ns) catch |err| switch (err) {
-                    error.Timeout => break,
-                };
+                const observed_epoch = self.wait_epoch.load(.acquire);
+                self.mutex.unlock(io_compat.runtimeIo());
+                self.waitForStateChange(observed_epoch, remaining_ms);
+                self.mutex.lockUncancelable(io_compat.runtimeIo());
             }
         }
 
-        defer self.mutex.unlock();
+        defer self.mutex.unlock(io_compat.runtimeIo());
 
         for (self.idle_connections.items) |*pooled| {
             pooled.conn.close();
         }
         self.idle_connections.deinit(self.allocator);
-        self.idle_connections = .{};
+        self.idle_connections = .empty;
     }
 
     /// Acquire a connection from the pool
     pub fn acquire(self: *PgPool) !PooledConnection {
-        const started_at = std.time.milliTimestamp();
+        const started_at = nowMillis();
 
         while (true) {
-            self.mutex.lock();
+            self.mutex.lockUncancelable(io_compat.runtimeIo());
             if (self.closed) {
-                self.mutex.unlock();
+                self.mutex.unlock(io_compat.runtimeIo());
                 return error.PoolClosed;
             }
-            const now = std.time.milliTimestamp();
+            const now = nowMillis();
 
             // Try to get an idle connection
             while (self.idle_connections.items.len > 0) {
@@ -282,7 +286,7 @@ pub const PgPool = struct {
                 }
 
                 self.active_count += 1;
-                self.mutex.unlock();
+                self.mutex.unlock(io_compat.runtimeIo());
                 var conn = pooled.conn;
                 if (self.config.test_on_acquire) {
                     self.executeSimple(&conn, "SELECT 1") catch {
@@ -301,13 +305,14 @@ pub const PgPool = struct {
             // No idle connections - create new if under limit
             if (self.active_count < self.config.max_connections) {
                 self.active_count += 1;
-                self.mutex.unlock();
-                const created_at = std.time.milliTimestamp();
+                self.mutex.unlock(io_compat.runtimeIo());
+                const created_at = nowMillis();
                 var conn = self.createConnection() catch |err| {
-                    self.mutex.lock();
+                    self.mutex.lockUncancelable(io_compat.runtimeIo());
                     self.decrementActiveCount();
-                    self.cond.signal();
-                    self.mutex.unlock();
+                    self.cond.signal(io_compat.runtimeIo());
+                    self.notifyWaiters();
+                    self.mutex.unlock(io_compat.runtimeIo());
                     return err;
                 };
                 if (self.config.test_on_acquire) {
@@ -325,31 +330,29 @@ pub const PgPool = struct {
                 };
             }
 
-            const elapsed = std.time.milliTimestamp() - started_at;
+            const elapsed = nowMillis() - started_at;
             if (elapsed >= self.config.acquire_timeout_ms) {
-                self.mutex.unlock();
+                self.mutex.unlock(io_compat.runtimeIo());
                 return error.PoolAcquireTimeout;
             }
 
             const remaining_ms = self.config.acquire_timeout_ms - elapsed;
-            const timeout_ns = @as(u64, @intCast(remaining_ms)) * std.time.ns_per_ms;
-            self.cond.timedWait(&self.mutex, timeout_ns) catch |err| switch (err) {
-                error.Timeout => {
-                    self.mutex.unlock();
-                    return error.PoolAcquireTimeout;
-                },
-            };
-            self.mutex.unlock();
+            const observed_epoch = self.wait_epoch.load(.acquire);
+            self.mutex.unlock(io_compat.runtimeIo());
+            self.waitForStateChange(observed_epoch, remaining_ms);
         }
     }
 
     /// Return a connection to the pool
     pub fn returnConnection(self: *PgPool, conn: Connection, created_at: i64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_compat.runtimeIo());
+        defer self.mutex.unlock(io_compat.runtimeIo());
 
         self.decrementActiveCount();
-        defer self.cond.signal();
+        defer {
+            self.cond.signal(io_compat.runtimeIo());
+            self.notifyWaiters();
+        }
 
         if (self.closed) {
             var c = conn;
@@ -362,7 +365,7 @@ pub const PgPool = struct {
             self.idle_connections.append(self.allocator, .{
                 .conn = conn,
                 .created_at = created_at,
-                .last_used = std.time.milliTimestamp(),
+                .last_used = nowMillis(),
             }) catch {
                 var c = conn;
                 c.close();
@@ -375,26 +378,27 @@ pub const PgPool = struct {
 
     /// Close and drop an active connection without returning it to idle pool.
     fn discardConnection(self: *PgPool, conn: Connection) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_compat.runtimeIo());
+        defer self.mutex.unlock(io_compat.runtimeIo());
 
         self.decrementActiveCount();
-        self.cond.signal();
+        self.cond.signal(io_compat.runtimeIo());
+        self.notifyWaiters();
         var c = conn;
         c.close();
     }
 
     /// Get number of idle connections
     pub fn idleCount(self: *PgPool) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_compat.runtimeIo());
+        defer self.mutex.unlock(io_compat.runtimeIo());
         return self.idle_connections.items.len;
     }
 
     /// Get number of active (in-use) connections
     pub fn activeCount(self: *PgPool) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(io_compat.runtimeIo());
+        defer self.mutex.unlock(io_compat.runtimeIo());
         return self.active_count;
     }
 
@@ -537,6 +541,40 @@ pub const PgPool = struct {
 
     fn executeSimple(self: *PgPool, conn: *Connection, sql: []const u8) !void {
         try executeSimpleConn(self.allocator, conn, sql);
+    }
+
+    fn nowMillis() i64 {
+        return std.Io.Clock.now(.real, io_compat.runtimeIo()).toMilliseconds();
+    }
+
+    fn notifyWaiters(self: *PgPool) void {
+        _ = self.wait_epoch.fetchAdd(1, .release);
+        std.Io.futexWake(io_compat.runtimeIo(), u32, &self.wait_epoch.raw, std.math.maxInt(u32));
+    }
+
+    fn waitForStateChange(self: *PgPool, observed_epoch: u32, timeout_ms: i64) void {
+        if (timeout_ms <= 0) return;
+        std.Io.futexWaitTimeout(
+            io_compat.runtimeIo(),
+            u32,
+            &self.wait_epoch.raw,
+            observed_epoch,
+            .{
+                .duration = .{
+                    .clock = .awake,
+                    .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
+                },
+            },
+        ) catch {};
+    }
+
+    fn sleepMs(ms: u64) void {
+        if (ms == 0) return;
+        std.Io.sleep(
+            io_compat.runtimeIo(),
+            std.Io.Duration.fromMilliseconds(@intCast(ms)),
+            .awake,
+        ) catch {};
     }
 
     fn decrementActiveCount(self: *PgPool) void {
@@ -802,9 +840,9 @@ test "PgPool.acquire returns PoolClosed when already closed" {
             .reconnect_interval_ms = 1000,
         },
         .allocator = std.testing.allocator,
-        .idle_connections = .{},
-        .mutex = .{},
-        .cond = .{},
+        .idle_connections = .empty,
+        .mutex = .init,
+        .cond = .init,
         .active_count = 0,
         .closed = true,
     };
@@ -827,9 +865,9 @@ test "PgPool.acquire returns PoolAcquireTimeout when saturated with no idle" {
             .reconnect_interval_ms = 1000,
         },
         .allocator = std.testing.allocator,
-        .idle_connections = .{},
-        .mutex = .{},
-        .cond = .{},
+        .idle_connections = .empty,
+        .mutex = .init,
+        .cond = .init,
         .active_count = 1,
         .closed = false,
     };

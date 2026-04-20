@@ -2,6 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const auth_options = @import("auth_options.zig");
 const kerberos_preflight = @import("kerberos_preflight.zig");
+const io_compat = @import("../compat/io.zig");
+const process_compat = @import("../compat/process.zig");
 
 pub const LinuxKrb5ProviderConfig = kerberos_preflight.LinuxKrb5ProviderConfig;
 
@@ -224,7 +226,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
         }
 
         fn gssDebugEnabled() bool {
-            const value = std.process.getEnvVarOwned(std.heap.page_allocator, "QAIL_GSS_DEBUG") catch |err| switch (err) {
+            const value = process_compat.getEnvVarOwned(std.heap.page_allocator, "QAIL_GSS_DEBUG") catch |err| switch (err) {
                 error.EnvironmentVariableNotFound => return false,
                 else => return false,
             };
@@ -413,7 +415,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
     allocator: std.mem.Allocator,
     api: Api,
     target_name: []u8,
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     sessions: std.AutoHashMap(u64, TrackedSession),
 
     const Self = @This();
@@ -462,8 +464,9 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
     }
 
     fn handleRequest(self: *Self, request: auth_options.GssTokenRequest, allocator: std.mem.Allocator) ![]const u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io_iface = io_compat.runtimeIo();
+        self.mutex.lockUncancelable(io_iface);
+        defer self.mutex.unlock(io_iface);
 
         self.pruneStaleSessions();
 
@@ -483,7 +486,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
             if (!step.complete) {
                 try self.sessions.put(request.session_id, .{
                     .session = session,
-                    .last_seen_ms = std.time.milliTimestamp(),
+                    .last_seen_ms = std.Io.Clock.now(.real, io_compat.runtimeIo()).toMilliseconds(),
                 });
             }
 
@@ -501,7 +504,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
         if (!step.complete) {
             try self.sessions.put(request.session_id, .{
                 .session = tracked.value.session,
-                .last_seen_ms = std.time.milliTimestamp(),
+                .last_seen_ms = std.Io.Clock.now(.real, io_compat.runtimeIo()).toMilliseconds(),
             });
         } else {
             tracked.value.session.deinit();
@@ -511,7 +514,7 @@ pub const LinuxKrb5Provider = if (builtin.os.tag == .linux) struct {
     }
 
     fn pruneStaleSessions(self: *Self) void {
-        const cutoff = std.time.milliTimestamp() - GSS_SESSION_TTL_MS;
+        const cutoff = std.Io.Clock.now(.real, io_compat.runtimeIo()).toMilliseconds() - GSS_SESSION_TTL_MS;
         var stale_keys: [GSS_MAX_SESSIONS]u64 = undefined;
         var stale_count: usize = 0;
 
@@ -581,7 +584,7 @@ fn statusMessages(api: anytype, status: u32, status_type: i32) []const u8 {
     const GssBufferDesc = LinuxKrb5Provider.GssBufferDesc;
 
     var buffer: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buffer);
+    var fbs = io_compat.FixedBufferWriter.init(&buffer);
     const writer = fbs.writer();
     var message_context: u32 = 0;
     var first = true;
@@ -611,7 +614,7 @@ fn statusMessages(api: anytype, status: u32, status_type: i32) []const u8 {
         if (isGssError(major) or message_context == 0) break;
     }
 
-    if (fbs.pos == 0) return "code";
+    if (fbs.getWritten().len == 0) return "code";
     return fbs.getWritten();
 }
 
