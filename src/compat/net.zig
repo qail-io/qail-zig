@@ -37,10 +37,12 @@ pub const Stream = struct {
     handle: std.posix.fd_t,
 
     fn fromInner(stream: IoStream) Stream {
-        return .{
+        const wrapped = Stream{
             .inner = stream,
             .handle = stream.socket.handle,
         };
+        enableTcpNoDelay(wrapped.handle);
+        return wrapped;
     }
 
     pub fn close(self: Stream) void {
@@ -208,6 +210,18 @@ fn setBlocking(fd: std.posix.fd_t, blocking: bool) !void {
             else => |err| return posix.unexpectedErrno(err),
         }
     }
+}
+
+fn enableTcpNoDelay(fd: std.posix.fd_t) void {
+    if (comptime builtin.os.tag == .windows) return;
+
+    const one: i32 = 1;
+    std.posix.setsockopt(
+        fd,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        std.mem.asBytes(&one),
+    ) catch {};
 }
 
 pub fn setStreamBlocking(stream: Stream, blocking: bool) !void {

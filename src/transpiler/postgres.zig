@@ -82,11 +82,11 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
         },
         .create_database => {
             try writer.writeAll("CREATE DATABASE ");
-            try writer.writeAll(cmd.table);
+            try writeIdentifierMaybeQuoted(writer, cmd.table);
         },
         .drop_database => {
             try writer.writeAll("DROP DATABASE IF EXISTS ");
-            try writer.writeAll(cmd.table);
+            try writeIdentifierMaybeQuoted(writer, cmd.table);
         },
         .grant => {
             const role = cmd.payload orelse return error.MissingGrantRole;
@@ -168,6 +168,32 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
         },
         else => {},
     }
+}
+
+fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
+    const needs_quotes = blk: {
+        if (ident.len == 0) break :blk true;
+        if (std.ascii.isDigit(ident[0])) break :blk true;
+        for (ident) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '_') break :blk true;
+        }
+        break :blk false;
+    };
+
+    if (!needs_quotes) {
+        try writer.writeAll(ident);
+        return;
+    }
+
+    try writer.writeByte('"');
+    for (ident) |c| {
+        if (c == '"') {
+            try writer.writeAll("\"\"");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeByte('"');
 }
 
 // ==================== Tests ====================
@@ -395,6 +421,18 @@ test "transpile transaction commands" {
     const rollback = try toSql(std.testing.allocator, &QailCmd.rollbackTx());
     defer std.testing.allocator.free(rollback);
     try std.testing.expectEqualStrings("ROLLBACK", rollback);
+}
+
+test "transpile create and drop database quote hyphenated names" {
+    const create_cmd = QailCmd.createDatabase("qail-engine-db_shadow");
+    const create_sql = try toSql(std.testing.allocator, &create_cmd);
+    defer std.testing.allocator.free(create_sql);
+    try std.testing.expectEqualStrings("CREATE DATABASE \"qail-engine-db_shadow\"", create_sql);
+
+    const drop_cmd = QailCmd.dropDatabase("qail-engine-db_shadow");
+    const drop_sql = try toSql(std.testing.allocator, &drop_cmd);
+    defer std.testing.allocator.free(drop_sql);
+    try std.testing.expectEqualStrings("DROP DATABASE IF EXISTS \"qail-engine-db_shadow\"", drop_sql);
 }
 
 test "transpile listen notify" {

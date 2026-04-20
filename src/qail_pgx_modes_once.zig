@@ -53,6 +53,23 @@ const CREATE_BENCH_PAYLOAD_SQL =
     "ratio NUMERIC(12, 3) NOT NULL, " ++
     "optional_note TEXT NULL" ++
     ")";
+const WIDE_ROWS_SQL =
+    "SELECT gs AS id, " ++
+    "('harbor-' || gs)::text AS name, " ++
+    "repeat(md5(gs::text), 4) AS bio, " ++
+    "repeat(md5((gs * 17)::text), 3) AS region, " ++
+    "(gs * 11) AS visits, " ++
+    "(gs % 2 = 0) AS active, " ++
+    "round((gs::numeric / 7.0), 3) AS ratio, " ++
+    "CASE WHEN gs % 5 = 0 THEN NULL ELSE repeat(md5((gs * 3)::text), 2) END AS optional_note " ++
+    "FROM generate_series(1, $1::int) AS gs";
+const MANY_PARAMS_SQL =
+    "SELECT " ++
+    "$1::int + $2::int + $3::int + $4::int + $5::int + $6::int + $7::int + $8::int + " ++
+    "$9::int + $10::int + $11::int + $12::int + $13::int + $14::int + $15::int + $16::int + " ++
+    "$17::int + $18::int + $19::int + $20::int + $21::int + $22::int + $23::int + $24::int + " ++
+    "$25::int + $26::int + $27::int + $28::int + $29::int + $30::int + $31::int + $32::int " ++
+    "AS total";
 const MANY_PARAMS_PARAM_COUNT: usize = 32;
 const MANY_PARAM_COLUMNS = buildManyParamColumns();
 const CREATE_BENCH_MANY_PARAMS_SQL = buildManyParamsCreateSql();
@@ -98,7 +115,8 @@ const Workload = enum {
         if (std.mem.eql(u8, input, "wide_rows") or std.mem.eql(u8, input, "wide")) return .wide_rows;
         if (std.mem.eql(u8, input, "large_rows") or std.mem.eql(u8, input, "large")) return .large_rows;
         if (std.mem.eql(u8, input, "many_params") or std.mem.eql(u8, input, "params")) return .many_params;
-        if (std.mem.eql(u8, input, "aggregate") or std.mem.eql(u8, input, "agg") or std.mem.eql(u8, input, "server_heavy")) return .aggregate;
+        // Legacy aliases (`monster_cte` / `cte`) now route to native AST aggregate workload.
+        if (std.mem.eql(u8, input, "aggregate") or std.mem.eql(u8, input, "agg") or std.mem.eql(u8, input, "server_heavy") or std.mem.eql(u8, input, "monster_cte") or std.mem.eql(u8, input, "cte")) return .aggregate;
         return null;
     }
 };
@@ -108,7 +126,6 @@ const ResultMode = enum {
     point_rows,
     wide_rows,
     scalar_int,
-    aggregate_scalars,
 };
 
 const ParamSet = []const ?[]const u8;
@@ -167,13 +184,6 @@ const PAYLOAD_COLS = [_]Expr{
     Expr.col("ratio"),
     Expr.col("optional_note"),
 };
-const AGGREGATE_COLS = [_]Expr{
-    Expr.sum("visits").withAlias("sum_visits"),
-    Expr.max("visits").withAlias("max_visits"),
-    Expr.count().withAlias("row_count"),
-    .{ .raw = "SUM(CASE WHEN active THEN 1 ELSE 0 END) AS active_count" },
-};
-const MANY_PARAMS_SELECT = [_]Expr{Expr.col("total")};
 const POINT_WHERE = [_]WhereClause{.{
     .condition = .{ .column = "id", .op = .eq, .value = .{ .param = 1 } },
 }};
@@ -181,6 +191,11 @@ const PAYLOAD_WHERE = [_]WhereClause{.{
     .condition = .{ .column = "id", .op = .lte, .value = .{ .param = 1 } },
 }};
 const PAYLOAD_ORDER = [_]OrderBy{.{ .column = "id", .order = .asc }};
+const AGGREGATE_COLS = [_]Expr{
+    Expr.sum("visits").withAlias("sum_visits"),
+    Expr.max("visits").withAlias("max_visits"),
+    Expr.count().withAlias("row_count"),
+};
 const MANY_PARAM_CLAUSES = buildManyParamClauses();
 
 const POINT_CMD = QailCmd.get("harbors")
@@ -192,14 +207,12 @@ const PAYLOAD_ROWS_CMD = QailCmd.get("qail_bench_payload")
     .where(&PAYLOAD_WHERE)
     .orderBy(&PAYLOAD_ORDER);
 
+const WIDE_ROWS_CMD = QailCmd.raw(WIDE_ROWS_SQL);
 const AGGREGATE_CMD = QailCmd.get("qail_bench_payload")
     .select(&AGGREGATE_COLS)
     .where(&PAYLOAD_WHERE);
 
-const MANY_PARAMS_CMD = QailCmd.get("qail_bench_many_params")
-    .select(&MANY_PARAMS_SELECT)
-    .where(MANY_PARAM_CLAUSES[0..])
-    .limit(1);
+const MANY_PARAMS_CMD = QailCmd.raw(MANY_PARAMS_SQL);
 
 const PoolSync = struct {
     ready_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -313,9 +326,9 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .total_queries = WIDE_ROWS_TOTAL_QUERIES,
             .iterations = WIDE_ROWS_ITERATIONS,
             .result_mode = .wide_rows,
-            .requires_payload = true,
+            .requires_payload = false,
             .requires_many_params = false,
-            .cmd = &PAYLOAD_ROWS_CMD,
+            .cmd = &WIDE_ROWS_CMD,
         },
         .large_rows => .{
             .workload = .large_rows,
@@ -334,7 +347,7 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .iterations = MANY_PARAMS_ITERATIONS,
             .result_mode = .scalar_int,
             .requires_payload = false,
-            .requires_many_params = true,
+            .requires_many_params = false,
             .cmd = &MANY_PARAMS_CMD,
         },
         .aggregate => .{
@@ -342,7 +355,7 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .name = "aggregate",
             .total_queries = AGGREGATE_TOTAL_QUERIES,
             .iterations = AGGREGATE_ITERATIONS,
-            .result_mode = .aggregate_scalars,
+            .result_mode = .scalar_int,
             .requires_payload = true,
             .requires_many_params = false,
             .cmd = &AGGREGATE_CMD,
@@ -405,12 +418,17 @@ fn buildAggregateParams(allocator: std.mem.Allocator, total: usize) ![]ParamSet 
 }
 
 fn buildManyParamsBatch(allocator: std.mem.Allocator, total: usize) ![]ParamSet {
+    const cache = try allocator.alloc([]const u8, 256);
+    for (cache, 0..) |*slot, i| {
+        slot.* = try std.fmt.allocPrint(allocator, "{d}", .{i + 1});
+    }
+
     const params = try allocator.alloc(ParamSet, total);
     for (params, 0..) |*slot, query_idx| {
         const inner = try allocator.alloc(?[]const u8, MANY_PARAMS_PARAM_COUNT);
-        const row_slot = (query_idx % BENCH_MANY_PARAMS_TARGET_ROWS) + 1;
         for (0..MANY_PARAMS_PARAM_COUNT) |param_idx| {
-            inner[param_idx] = try std.fmt.allocPrint(allocator, "{d}", .{row_slot * (param_idx + 1)});
+            const value_idx = (query_idx + (param_idx * 7)) % cache.len;
+            inner[param_idx] = cache[value_idx];
         }
         slot.* = inner;
     }
@@ -614,19 +632,19 @@ fn runSingleMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult 
     var conn = try Connection.connect(std.heap.page_allocator, HOST, PORT);
     defer conn.close();
     try conn.startup(USER, DATABASE, null);
-    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd);
+    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd, std.heap.page_allocator);
 
-    var encoder = Encoder.init(std.heap.page_allocator);
-    defer encoder.deinit();
+    const wire_batch = try buildPreparedSinglesWireBatch(std.heap.page_allocator, STMT_NAME, params);
+    defer freePreparedSinglesWireBatch(std.heap.page_allocator, wire_batch);
 
-    const warmup = try runPreparedSingles(&conn, &encoder, STMT_NAME, params, spec.result_mode);
+    const warmup = try runPreparedSinglesEncoded(&conn, wire_batch, spec.result_mode);
     if (warmup.completed != params.len) return error.UnexpectedCompletionCount;
 
     var total_ns: u64 = 0;
     var aggregate = BatchStats{};
     for (0..spec.iterations) |_| {
         const start = try time.now();
-        const stats = try runPreparedSingles(&conn, &encoder, STMT_NAME, params, spec.result_mode);
+        const stats = try runPreparedSinglesEncoded(&conn, wire_batch, spec.result_mode);
         const end = try time.now();
         if (stats.completed != params.len) return error.UnexpectedCompletionCount;
         total_ns += time.since(end, start);
@@ -641,7 +659,7 @@ fn runPipelineMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResul
     var conn = try Connection.connect(std.heap.page_allocator, HOST, PORT);
     defer conn.close();
     try conn.startup(USER, DATABASE, null);
-    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd);
+    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd, std.heap.page_allocator);
 
     var encoder = Encoder.init(std.heap.page_allocator);
     defer encoder.deinit();
@@ -744,6 +762,10 @@ fn runPool10Mode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult 
 fn poolWorkerMain(ctx: *PoolWorkerCtx) void {
     var local_err: ?anyerror = null;
 
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const worker_allocator = arena_state.allocator();
+
     var pooled = ctx.pool.acquire() catch |err| {
         local_err = err;
         signalReady(ctx, local_err);
@@ -753,37 +775,46 @@ fn poolWorkerMain(ctx: *PoolWorkerCtx) void {
     };
     defer pooled.release();
 
-    var encoder = Encoder.init(std.heap.page_allocator);
-    defer encoder.deinit();
-
     if (local_err == null) {
         const conn = pooled.get();
-        prepareNamedAstStatement(conn, STMT_NAME, ctx.spec.cmd) catch |err| {
+        prepareNamedAstStatement(conn, STMT_NAME, ctx.spec.cmd, worker_allocator) catch |err| {
             local_err = err;
         };
         if (local_err == null) {
-            _ = runPreparedSingles(conn, &encoder, STMT_NAME, ctx.params, ctx.spec.result_mode) catch |err| {
+            const wire_batch = buildPreparedSinglesWireBatch(worker_allocator, STMT_NAME, ctx.params) catch |err| {
+                local_err = err;
+                signalReady(ctx, local_err);
+                waitForStart(ctx.sync);
+                signalDone(ctx, local_err);
+                return;
+            };
+
+            _ = runPreparedSinglesEncoded(conn, wire_batch, ctx.spec.result_mode) catch |err| {
                 local_err = err;
             };
+
+            signalReady(ctx, local_err);
+            waitForStart(ctx.sync);
+
+            if (local_err == null) {
+                var measured = BatchStats{};
+                for (0..ctx.spec.iterations) |_| {
+                    const stats = runPreparedSinglesEncoded(conn, wire_batch, ctx.spec.result_mode) catch |err| {
+                        local_err = err;
+                        break;
+                    };
+                    measured.add(stats);
+                }
+                ctx.result.stats = measured;
+            }
+
+            signalDone(ctx, local_err);
+            return;
         }
     }
 
     signalReady(ctx, local_err);
     waitForStart(ctx.sync);
-
-    if (local_err == null) {
-        const conn = pooled.get();
-        var measured = BatchStats{};
-        for (0..ctx.spec.iterations) |_| {
-            const stats = runPreparedSingles(conn, &encoder, STMT_NAME, ctx.params, ctx.spec.result_mode) catch |err| {
-                local_err = err;
-                break;
-            };
-            measured.add(stats);
-        }
-        ctx.result.stats = measured;
-    }
-
     signalDone(ctx, local_err);
 }
 
@@ -799,22 +830,27 @@ fn signalDone(ctx: *PoolWorkerCtx, local_err: ?anyerror) void {
 
 fn waitForStart(sync: *PoolSync) void {
     while (!sync.start_flag.load(.acquire)) {
-        std.Thread.yield() catch {
-            std.Io.sleep(io_compat.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {};
+        std.Io.sleep(io_compat.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {
+            std.Thread.yield() catch {};
         };
     }
 }
 
 fn waitForCounter(counter: *std.atomic.Value(usize), expected: usize) void {
     while (counter.load(.acquire) < expected) {
-        std.Thread.yield() catch {
-            std.Io.sleep(io_compat.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {};
+        std.Io.sleep(io_compat.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {
+            std.Thread.yield() catch {};
         };
     }
 }
 
-fn prepareNamedAstStatement(conn: *Connection, stmt_name: []const u8, cmd: *const QailCmd) !void {
-    var encoder = AstEncoder.init(std.heap.page_allocator);
+fn prepareNamedAstStatement(
+    conn: *Connection,
+    stmt_name: []const u8,
+    cmd: *const QailCmd,
+    allocator: std.mem.Allocator,
+) !void {
+    var encoder = AstEncoder.init(allocator);
     defer encoder.deinit();
 
     try encoder.encodePrepare(stmt_name, cmd);
@@ -857,6 +893,52 @@ fn runPreparedSingles(
         stats.add(result);
     }
     return stats;
+}
+
+fn runPreparedSinglesEncoded(
+    conn: *Connection,
+    wire_batch: []const []const u8,
+    result_mode: ResultMode,
+) !BatchStats {
+    var stats = BatchStats{};
+    for (wire_batch) |wire_bytes| {
+        try conn.send(wire_bytes);
+        const result = try consumeSingleResult(conn, result_mode);
+        stats.add(result);
+    }
+    return stats;
+}
+
+fn buildPreparedSinglesWireBatch(
+    allocator: std.mem.Allocator,
+    stmt_name: []const u8,
+    params_batch: []const ParamSet,
+) ![][]u8 {
+    var encoder = Encoder.init(allocator);
+    defer encoder.deinit();
+
+    const wires = try allocator.alloc([]u8, params_batch.len);
+    var written: usize = 0;
+    errdefer {
+        for (wires[0..written]) |wire| allocator.free(wire);
+        allocator.free(wires);
+    }
+
+    for (params_batch, 0..) |params, idx| {
+        encoder.reset();
+        try encoder.appendBind("", stmt_name, params);
+        try encoder.appendExecute("", 0);
+        try encoder.appendSync();
+        wires[idx] = try allocator.dupe(u8, encoder.getWritten());
+        written = idx + 1;
+    }
+
+    return wires;
+}
+
+fn freePreparedSinglesWireBatch(allocator: std.mem.Allocator, wire_batch: [][]u8) void {
+    for (wire_batch) |wire| allocator.free(wire);
+    allocator.free(wire_batch);
 }
 
 fn runPreparedPipeline(
@@ -933,20 +1015,22 @@ fn consumeSingleResult(conn: *Connection, result_mode: ResultMode) !BatchStats {
     var completed = false;
     var stats = BatchStats{};
     while (true) {
-        const msg = try conn.readMessage();
+        const msg = try conn.readMessageRawFast();
         switch (msg.msg_type) {
-            .bind_complete, .row_description, .notice, .parameter_status, .notification => {},
-            .data_row => try consumeDataRow(result_mode, msg.payload, &stats),
-            .command_complete, .no_data => {
+            '2', 'T', 'N', 'S', 'A' => {},
+            'D' => try consumeDataRow(result_mode, msg.payload, &stats),
+            'C', 'n' => {
                 completed = true;
                 stats.completed += 1;
             },
-            .ready_for_query => {
+            'Z' => {
                 if (!completed) return error.QueryDidNotComplete;
+                conn.ready = true;
+                conn.in_transaction = msg.payload.len > 0 and msg.payload[0] == 'T';
                 return stats;
             },
-            .error_response => {
-                _ = drainUntilReady(conn) catch {};
+            'E' => {
+                _ = drainUntilReadyFast(conn) catch {};
                 return error.QueryError;
             },
             else => {},
@@ -961,14 +1045,18 @@ fn consumePipelineResults(conn: *Connection, expected: usize, result_mode: Resul
 
     var stats = BatchStats{};
     while (true) {
-        const msg = try conn.readMessage();
+        const msg = try conn.readMessageRawFast();
         switch (msg.msg_type) {
-            .bind_complete, .row_description, .notice, .parameter_status, .notification => {},
-            .data_row => try consumeDataRow(result_mode, msg.payload, &stats),
-            .command_complete, .no_data => stats.completed += 1,
-            .ready_for_query => return stats,
-            .error_response => {
-                _ = drainUntilReady(conn) catch {};
+            '2', 'T', 'N', 'S', 'A' => {},
+            'D' => try consumeDataRow(result_mode, msg.payload, &stats),
+            'C', 'n' => stats.completed += 1,
+            'Z' => {
+                conn.ready = true;
+                conn.in_transaction = msg.payload.len > 0 and msg.payload[0] == 'T';
+                return stats;
+            },
+            'E' => {
+                _ = drainUntilReadyFast(conn) catch {};
                 return error.QueryError;
             },
             else => {},
@@ -1037,7 +1125,6 @@ fn consumeDataRow(result_mode: ResultMode, payload: []const u8, stats: *BatchSta
         .point_rows => try consumePointDataRow(payload, stats),
         .wide_rows => try consumeWideDataRow(payload, stats),
         .scalar_int => try consumeScalarDataRow(payload, stats),
-        .aggregate_scalars => try consumeAggregateDataRow(payload, stats),
     }
 }
 
@@ -1068,7 +1155,7 @@ fn consumePointDataRow(payload: []const u8, stats: *BatchStats) !void {
 
         switch (idx) {
             0 => {
-                const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+                const parsed = parseAsciiI64OrLen(value);
                 row_hash +%= @as(u64, @intCast(parsed));
             },
             else => row_hash = mixHash(row_hash, value),
@@ -1113,41 +1200,11 @@ fn consumeScalarDataRow(payload: []const u8, stats: *BatchStats) !void {
 
     if (first_value) |value| {
         stats.bytes += value.len;
-        const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+        const parsed = parseAsciiI64OrLen(value);
         stats.checksum +%= @as(u64, @intCast(parsed));
     } else {
         stats.checksum +%= 1;
     }
-}
-
-fn consumeAggregateDataRow(payload: []const u8, stats: *BatchStats) !void {
-    if (payload.len < 2) return error.InvalidDataRow;
-
-    const column_count = std.mem.readInt(u16, payload[0..2], .big);
-    var pos: usize = 2;
-    var row_hash: u64 = FNV_OFFSET;
-
-    for (0..column_count) |_| {
-        if (pos + 4 > payload.len) return error.InvalidDataRow;
-        const raw_len = std.mem.readInt(i32, payload[pos..][0..4], .big);
-        pos += 4;
-
-        if (raw_len < 0) continue;
-
-        const len: usize = @intCast(raw_len);
-        if (pos + len > payload.len) return error.InvalidDataRow;
-
-        const value = payload[pos .. pos + len];
-        pos += len;
-        stats.bytes += value.len;
-
-        const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
-        row_hash +%= @as(u64, @intCast(parsed));
-    }
-
-    if (pos != payload.len) return error.InvalidDataRow;
-    stats.rows += 1;
-    stats.checksum +%= row_hash;
 }
 
 fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
@@ -1177,7 +1234,7 @@ fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
 
         switch (idx) {
             0, 4 => {
-                const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+                const parsed = parseAsciiI64OrLen(value);
                 row_hash +%= @as(u64, @intCast(parsed));
             },
             5 => {
@@ -1196,6 +1253,30 @@ fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
     if (pos != payload.len) return error.InvalidDataRow;
     stats.rows += 1;
     stats.checksum +%= row_hash;
+}
+
+fn parseAsciiI64OrLen(value: []const u8) i64 {
+    if (value.len == 0) return 0;
+
+    var idx: usize = 0;
+    var negative = false;
+    if (value[0] == '-') {
+        negative = true;
+        idx = 1;
+        if (idx == value.len) return @as(i64, @intCast(value.len));
+    }
+
+    var acc: i64 = 0;
+    while (idx < value.len) : (idx += 1) {
+        const c = value[idx];
+        if (c < '0' or c > '9') return @as(i64, @intCast(value.len));
+
+        const digit: i64 = @as(i64, @intCast(c - '0'));
+        acc = std.math.mul(i64, acc, 10) catch return @as(i64, @intCast(value.len));
+        acc = std.math.add(i64, acc, digit) catch return @as(i64, @intCast(value.len));
+    }
+
+    return if (negative) -acc else acc;
 }
 
 fn mixHash(seed: u64, bytes: []const u8) u64 {

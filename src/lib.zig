@@ -39,6 +39,7 @@ pub const VerifyMode = driver.VerifyMode;
 pub const ExplainEstimate = driver.ExplainEstimate;
 pub const CopyChunkHandler = driver.CopyChunkHandler;
 pub const BytesRowHandler = driver.BytesRowHandler;
+pub const FirstColumnBytesHandler = driver.FirstColumnBytesHandler;
 pub const Notification = driver.Notification;
 pub const PgDriverBuilder = driver.PgDriverBuilder;
 pub const ConnectOptions = driver.ConnectOptions;
@@ -84,6 +85,7 @@ test {
     _ = @import("fuzz/fuzz_decoder.zig");
     _ = @import("fuzz/fuzz_value.zig");
     _ = @import("fuzz/fuzz_transpiler.zig");
+    _ = @import("driver/raw_policy.zig");
     _ = @import("hardening/protocol_hardening.zig");
     _ = @import("hardening/replication_hardening.zig");
     _ = @import("hardening/startup_hardening.zig");

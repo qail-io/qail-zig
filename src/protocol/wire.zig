@@ -4,8 +4,8 @@
 
 const std = @import("std");
 
-/// PostgreSQL protocol version (3.0)
-pub const PROTOCOL_VERSION: u32 = 196608; // 3 << 16
+/// PostgreSQL protocol version (3.2)
+pub const PROTOCOL_VERSION: u32 = 196610; // (3 << 16) | 2
 
 /// Frontend message types (client -> server)
 pub const FrontendMessage = enum(u8) {
@@ -71,6 +71,8 @@ pub const BackendMessage = enum(u8) {
     no_data = 'n',
     /// NoticeResponse (N)
     notice = 'N',
+    /// NegotiateProtocolVersion (v)
+    negotiate_protocol_version = 'v',
     /// NotificationResponse (A)
     notification = 'A',
     /// ParameterDescription (t)
@@ -160,7 +162,7 @@ pub const ErrorInfo = struct {
 
 // Tests
 test "protocol version" {
-    try std.testing.expectEqual(@as(u32, 196608), PROTOCOL_VERSION);
+    try std.testing.expectEqual(@as(u32, 196610), PROTOCOL_VERSION);
 }
 
 test "frontend message types" {
@@ -173,4 +175,5 @@ test "backend message types" {
     try std.testing.expectEqual(@as(u8, 'D'), @intFromEnum(BackendMessage.data_row));
     try std.testing.expectEqual(@as(u8, 'T'), @intFromEnum(BackendMessage.row_description));
     try std.testing.expectEqual(@as(u8, 'Z'), @intFromEnum(BackendMessage.ready_for_query));
+    try std.testing.expectEqual(@as(u8, 'v'), @intFromEnum(BackendMessage.negotiate_protocol_version));
 }

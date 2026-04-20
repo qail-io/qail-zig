@@ -220,6 +220,46 @@ test "raw policy rejects expr.raw in public ast commands" {
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 
+test "raw policy rejects distinct on escape hatch expressions in public ast commands" {
+    const distinct_on = [_]Expr{.{ .exists_subquery = .{ .sql = "SELECT 1 FROM pg_class LIMIT 1" } }};
+    const cmd = QailCmd.get("users").select(&.{Expr.col("id")}).distinctOn(&distinct_on);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects returning escape hatch expressions in public ast commands" {
+    const returning = [_]Expr{.{ .subquery = .{ .sql = "SELECT pg_sleep(1)" } }};
+    const cmd = QailCmd.get("users").returningCols(&returning);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects where escape hatch expressions in public ast commands" {
+    const left: Expr = .{ .exists_subquery = .{ .sql = "SELECT 1 FROM pg_roles LIMIT 1" } };
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .left = left,
+            .op = .eq,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects having escape hatch expressions in public ast commands" {
+    const left: Expr = .{ .subquery = .{ .sql = "SELECT count(*) FROM pg_class" } };
+    const having = [_]ast.WhereClause{.{
+        .condition = .{
+            .left = left,
+            .op = .eq,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users")
+        .groupBy(&.{"id"})
+        .havingClauses(&having);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
 test "raw policy rejects subquery expressions in public ast commands" {
     const cols = [_]Expr{.{ .subquery = .{ .sql = "SELECT count(*) FROM users" } }};
     const cmd = QailCmd.get("users").select(&cols);
@@ -287,6 +327,25 @@ test "raw policy allows typed set op queries in public ast commands" {
     const rhs = QailCmd.get("admins").select(&.{Expr.col("id")});
     const set_ops = [_]ast.SetOpDef{ast.SetOpDef.fromQuery(.union_all, &rhs)};
     const cmd = QailCmd.get("users").withSetOps(&set_ops);
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
+test "raw policy allows typed distinct on, returning, and having clauses" {
+    const distinct_on = [_]Expr{Expr.col("id")};
+    const returning = [_]Expr{Expr.col("id"), Expr.col("name")};
+    const having = [_]ast.WhereClause{.{
+        .condition = .{
+            .left = Expr.col("id"),
+            .op = .eq,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users")
+        .select(&.{ Expr.col("id"), Expr.col("name") })
+        .distinctOn(&distinct_on)
+        .groupBy(&.{"id"})
+        .havingClauses(&having)
+        .returningCols(&returning);
     try rejectPublicRuntimeCmd(&cmd);
 }
 
