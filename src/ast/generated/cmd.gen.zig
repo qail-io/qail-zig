@@ -8,9 +8,9 @@ pub const ConflictAction = union(enum) {
     /// DO UPDATE SET.
     do_update: struct {
         assignments: []const struct {
-    f0: []const u8,
-    f1: Expr,
-},
+            f0: []const u8,
+            f1: Expr,
+        },
     },
 };
 
@@ -34,9 +34,9 @@ pub const QailCmd = struct {
     table_constraints: []const TableConstraint = &.{},
     /// UNION / INTERSECT / EXCEPT operations.
     set_ops: []const struct {
-    f0: SetOp,
-    f1: ?*const QailCmd,
-} = &.{},
+        f0: SetOp,
+        f1: ?*const QailCmd,
+    } = &.{},
     /// HAVING clause conditions.
     having: []const Condition = &.{},
     /// GROUP BY mode (simple, rollup, cube, grouping sets).
@@ -67,24 +67,24 @@ pub const QailCmd = struct {
     skip_locked: bool = false,
     /// FETCH FIRST n ROWS [ONLY|WITH TIES].
     fetch: ?struct {
-    f0: u64,
-    f1: bool,
-} = null,
+        f0: u64,
+        f1: bool,
+    } = null,
     /// INSERT with DEFAULT VALUES.
     default_values: bool = false,
     /// OVERRIDING clause for generated columns.
     overriding: ?OverridingKind = null,
     /// TABLESAMPLE method, percentage, and optional seed.
     sample: ?struct {
-    f0: SampleMethod,
-    f1: f64,
-    f2: ?u64,
-} = null,
+        f0: SampleMethod,
+        f1: f64,
+        f2: ?u64,
+    } = null,
     /// SELECT FROM ONLY (exclude inheritance).
     only_table: bool = false,
     // Vector database fields (Qdrant)
     /// Search vector for similarity queries.
-    pub vector: ?[]const f32 = null,
+    vector: ?[]const f32 = null,
     /// Minimum score threshold.
     score_threshold: ?f32 = null,
     /// Named vector in multi-vector collections.
@@ -99,7 +99,7 @@ pub const QailCmd = struct {
     on_disk: ?bool = null,
     // PostgreSQL procedural objects
     /// Function definition.
-    pub function_def: ?FunctionDef = null,
+    function_def: ?FunctionDef = null,
     /// Trigger definition.
     trigger_def: ?TriggerDef = null,
     /// RLS policy definition.
@@ -127,4 +127,3 @@ pub const OnConflict = struct {
     /// What to do on conflict.
     action: ConflictAction,
 };
-

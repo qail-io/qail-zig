@@ -12,15 +12,15 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 const Assignment = qail.ast.Assignment;
-const Connection = qail.driver.Connection;
-const Pipeline = qail.driver.Pipeline;
-const PgPool = qail.driver.PgPool;
-const PgDriver = qail.driver.PgDriver;
+const Connection = qail.driver.connection.Connection;
+const Pipeline = qail.driver.pipeline.Pipeline;
+const PgPool = qail.driver.pool.PgPool;
+const PgDriver = qail.driver.driver.PgDriver;
 
 const TOTAL_QUERIES: usize = 100_000;
 const BATCH_SIZE: usize = 500;
@@ -173,7 +173,7 @@ pub fn main() !void {
             }
         }
         const end = time.now() catch unreachable;
-        const elapsed_ns = end.since(start);
+        const elapsed_ns = time.since(end, start);
         const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(TOTAL_QUERIES))) / 1000.0;
         const qps = @as(f64, @floatFromInt(TOTAL_QUERIES)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);
         std.debug.print("  {s:<32} {d:>7.1} μs/q  {d:>10.0} qps\n", .{ "M1 — Single (fetchOne)", us_per, qps });
@@ -221,7 +221,7 @@ pub fn main() !void {
             total += n;
         }
         const end = time.now() catch unreachable;
-        const elapsed_ns = end.since(start);
+        const elapsed_ns = time.since(end, start);
         if (total > 0) {
             const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total))) / 1000.0;
             const qps = @as(f64, @floatFromInt(total)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);
@@ -266,7 +266,7 @@ pub fn main() !void {
 
         const end = time.now() catch unreachable;
         const total_done = counter.load(.acquire);
-        const elapsed_ns = end.since(start);
+        const elapsed_ns = time.since(end, start);
         if (total_done > 0) {
             const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total_done))) / 1000.0;
             const qps = @as(f64, @floatFromInt(total_done)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);

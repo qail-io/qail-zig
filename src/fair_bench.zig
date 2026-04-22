@@ -4,8 +4,8 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const net = qail.compat.net;
-const time = qail.compat.time;
+const net = qail.runtime.net;
+const time = qail.runtime.time;
 
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;
@@ -95,7 +95,7 @@ pub fn main() !void {
         // Progress every 1M
         if (completed % 1_000_000 == 0) {
             const now = time.now() catch unreachable;
-            const elapsed_ns = now.since(start);
+            const elapsed_ns = time.since(now, start);
             const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
             const qps = @as(f64, @floatFromInt(completed)) / elapsed_s;
             const remaining = TOTAL_QUERIES - completed;
@@ -113,7 +113,7 @@ pub fn main() !void {
     }
 
     const end = time.now() catch unreachable;
-    const total_ns = end.since(start);
+    const total_ns = time.since(end, start);
     const total_s = @as(f64, @floatFromInt(total_ns)) / 1_000_000_000.0;
     const final_qps = @as(f64, @floatFromInt(TOTAL_QUERIES)) / total_s;
     const per_query_ns = @as(f64, @floatFromInt(total_ns)) / @as(f64, @floatFromInt(TOTAL_QUERIES));

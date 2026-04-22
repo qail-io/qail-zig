@@ -78,9 +78,9 @@ pub const Expr = union(enum) {
     /// CASE WHEN expression
     case: struct {
         when_clauses: []const struct {
-    f0: Condition,
-    f1: ?*const Expr,
-},
+            f0: Condition,
+            f1: ?*const Expr,
+        },
         else_value: ?*const Expr,
         alias: ?[]const u8,
     },
@@ -88,9 +88,9 @@ pub const Expr = union(enum) {
     json_access: struct {
         column: []const u8,
         path_segments: []const struct {
-    f0: []const u8,
-    f1: bool,
-},
+            f0: []const u8,
+            f1: bool,
+        },
         alias: ?[]const u8,
     },
     /// Function call expression (COALESCE, NULLIF, etc.)
@@ -104,9 +104,9 @@ pub const Expr = union(enum) {
     special_function: struct {
         name: []const u8,
         args: []const struct {
-    f0: ?[]const u8,
-    f1: ?*const Expr,
-},
+            f0: ?[]const u8,
+            f1: ?*const Expr,
+        },
         alias: ?[]const u8,
     },
     /// Binary expression (left op right)
@@ -289,4 +289,3 @@ pub const TriggerDef = struct {
     /// Function to execute.
     execute_function: []const u8 = "",
 };
-

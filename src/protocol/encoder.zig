@@ -7,9 +7,15 @@ const wire = @import("wire.zig");
 
 const FrontendMessage = wire.FrontendMessage;
 const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
+const max_wire_message_len: usize = std.math.maxInt(i32);
 
 /// Protocol encoder - writes PostgreSQL wire format messages
 pub const Encoder = struct {
+    /// PostgreSQL wire format code for text parameters/results.
+    pub const FORMAT_TEXT: i16 = 0;
+    /// PostgreSQL wire format code for binary parameters/results.
+    pub const FORMAT_BINARY: i16 = 1;
+
     pub const StartupParam = struct {
         name: []const u8,
         value: []const u8,
@@ -20,7 +26,7 @@ pub const Encoder = struct {
 
     pub fn init(allocator: std.mem.Allocator) Encoder {
         return .{
-            .buffer = .{},
+            .buffer = .empty,
             .allocator = allocator,
         };
     }
@@ -69,6 +75,7 @@ pub const Encoder = struct {
 
     /// Write a null-terminated string
     fn writeCString(self: *Encoder, str: []const u8) !void {
+        if (std.mem.indexOfScalar(u8, str, 0) != null) return error.NullByte;
         try self.buffer.appendSlice(self.allocator, str);
         try self.buffer.append(self.allocator, 0);
     }
@@ -81,6 +88,51 @@ pub const Encoder = struct {
     /// Write a single byte
     fn writeByte(self: *Encoder, byte: u8) !void {
         try self.buffer.append(self.allocator, byte);
+    }
+
+    fn addLenChecked(total: *usize, add: usize) !void {
+        total.* = std.math.add(usize, total.*, add) catch return error.MessageTooLarge;
+    }
+
+    fn addCStringLenChecked(total: *usize, s: []const u8) !void {
+        try addLenChecked(total, s.len);
+        try addLenChecked(total, 1);
+    }
+
+    fn toWireLen(total: usize) !u32 {
+        if (total > max_wire_message_len) return error.MessageTooLarge;
+        return @intCast(total);
+    }
+
+    fn toWireI32Len(total: usize) !i32 {
+        if (total > max_wire_message_len) return error.MessageTooLarge;
+        return @intCast(total);
+    }
+
+    fn paramFormatWireLen(param_format: i16) usize {
+        return if (param_format == FORMAT_TEXT) 2 else 4;
+    }
+
+    fn resultFormatWireLen(result_format: i16) usize {
+        return if (result_format == FORMAT_TEXT) 2 else 4;
+    }
+
+    fn writeParamFormats(self: *Encoder, param_format: i16) !void {
+        if (param_format == FORMAT_TEXT) {
+            try self.writeI16(0);
+            return;
+        }
+        try self.writeI16(1);
+        try self.writeI16(param_format);
+    }
+
+    fn writeResultFormats(self: *Encoder, result_format: i16) !void {
+        if (result_format == FORMAT_TEXT) {
+            try self.writeI16(0);
+            return;
+        }
+        try self.writeI16(1);
+        try self.writeI16(result_format);
     }
 
     // ==================== Frontend Messages ====================
@@ -100,10 +152,19 @@ pub const Encoder = struct {
         self.reset();
 
         // length(4) + version(4) + mandatory params + extra params + final terminator
-        var msg_len: u32 = 4 + 4 + 5 + @as(u32, @intCast(user.len)) + 1 + 9 + @as(u32, @intCast(database.len)) + 1 + 1;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, "user");
+        try addCStringLenChecked(&msg_len_usize, user);
+        try addCStringLenChecked(&msg_len_usize, "database");
+        try addCStringLenChecked(&msg_len_usize, database);
         for (extra_params) |param| {
-            msg_len += @as(u32, @intCast(param.name.len + 1 + param.value.len + 1));
+            try addCStringLenChecked(&msg_len_usize, param.name);
+            try addCStringLenChecked(&msg_len_usize, param.value);
         }
+        try addLenChecked(&msg_len_usize, 1);
+        const msg_len = try toWireLen(msg_len_usize);
 
         try self.writeU32(msg_len);
         try self.writeU32(PROTOCOL_VERSION);
@@ -122,7 +183,10 @@ pub const Encoder = struct {
     pub fn encodePassword(self: *Encoder, password: []const u8) !void {
         self.reset();
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(password.len)) + 1;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, password);
+        const msg_len = try toWireLen(msg_len_usize);
         try self.writeByte(@intFromEnum(FrontendMessage.password));
         try self.writeU32(msg_len);
         try self.writeCString(password);
@@ -139,13 +203,18 @@ pub const Encoder = struct {
     ) !void {
         self.reset();
 
-        var msg_len: u32 = 4 + @as(u32, @intCast(mechanism.len)) + 1 + 4;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, mechanism);
+        try addLenChecked(&msg_len_usize, 4);
+
         var response_len: i32 = -1;
 
         if (initial_response) |response| {
-            msg_len += @as(u32, @intCast(response.len));
-            response_len = @intCast(response.len);
+            try addLenChecked(&msg_len_usize, response.len);
+            response_len = try toWireI32Len(response.len);
         }
+        const msg_len = try toWireLen(msg_len_usize);
 
         try self.writeByte(@intFromEnum(FrontendMessage.password));
         try self.writeU32(msg_len);
@@ -164,7 +233,10 @@ pub const Encoder = struct {
     pub fn encodeSaslResponse(self: *Encoder, response: []const u8) !void {
         self.reset();
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(response.len));
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addLenChecked(&msg_len_usize, response.len);
+        const msg_len = try toWireLen(msg_len_usize);
         try self.writeByte(@intFromEnum(FrontendMessage.password));
         try self.writeU32(msg_len);
         try self.writeBytes(response);
@@ -174,7 +246,10 @@ pub const Encoder = struct {
     pub fn encodeQuery(self: *Encoder, sql: []const u8) !void {
         self.reset();
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(sql.len)) + 1;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, sql);
+        const msg_len = try toWireLen(msg_len_usize);
         try self.writeByte(@intFromEnum(FrontendMessage.query));
         try self.writeU32(msg_len);
         try self.writeCString(sql);
@@ -183,9 +258,21 @@ pub const Encoder = struct {
     /// Encode Parse (Extended Query Protocol)
     pub fn encodeParse(self: *Encoder, stmt_name: []const u8, sql: []const u8, param_types: []const u32) !void {
         self.reset();
+        try self.appendParse(stmt_name, sql, param_types);
+    }
+
+    /// Append Parse (no reset - for batched writes)
+    pub fn appendParse(self: *Encoder, stmt_name: []const u8, sql: []const u8, param_types: []const u32) !void {
         if (param_types.len > std.math.maxInt(i16)) return error.TooManyParameters;
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(stmt_name.len)) + 1 + @as(u32, @intCast(sql.len)) + 1 + 2 + @as(u32, @intCast(param_types.len * 4));
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, stmt_name);
+        try addCStringLenChecked(&msg_len_usize, sql);
+        try addLenChecked(&msg_len_usize, 2);
+        const param_type_bytes = std.math.mul(usize, param_types.len, 4) catch return error.MessageTooLarge;
+        try addLenChecked(&msg_len_usize, param_type_bytes);
+        const msg_len = try toWireLen(msg_len_usize);
 
         try self.writeByte(@intFromEnum(FrontendMessage.parse));
         try self.writeU32(msg_len);
@@ -206,42 +293,107 @@ pub const Encoder = struct {
         params: []const ?[]const u8,
     ) !void {
         self.reset();
+        try self.appendBindWithFormats(portal, stmt_name, params, FORMAT_TEXT, FORMAT_TEXT);
+    }
+
+    /// Encode Bind with explicit parameter/result wire formats.
+    ///
+    /// `param_format` / `result_format`: `0 = text`, `1 = binary`.
+    pub fn encodeBindWithFormats(
+        self: *Encoder,
+        portal: []const u8,
+        stmt_name: []const u8,
+        params: []const ?[]const u8,
+        param_format: i16,
+        result_format: i16,
+    ) !void {
+        self.reset();
+        try self.appendBindWithFormats(portal, stmt_name, params, param_format, result_format);
+    }
+
+    /// Encode Bind with explicit result wire format.
+    pub fn encodeBindWithResultFormat(
+        self: *Encoder,
+        portal: []const u8,
+        stmt_name: []const u8,
+        params: []const ?[]const u8,
+        result_format: i16,
+    ) !void {
+        self.reset();
+        try self.appendBindWithFormats(portal, stmt_name, params, FORMAT_TEXT, result_format);
+    }
+
+    /// Append Bind (no reset - for pipelining)
+    pub fn appendBind(
+        self: *Encoder,
+        portal: []const u8,
+        stmt_name: []const u8,
+        params: []const ?[]const u8,
+    ) !void {
+        try self.appendBindWithFormats(portal, stmt_name, params, FORMAT_TEXT, FORMAT_TEXT);
+    }
+
+    /// Append Bind with explicit parameter/result wire formats.
+    pub fn appendBindWithFormats(
+        self: *Encoder,
+        portal: []const u8,
+        stmt_name: []const u8,
+        params: []const ?[]const u8,
+        param_format: i16,
+        result_format: i16,
+    ) !void {
         if (params.len > std.math.maxInt(i16)) return error.TooManyParameters;
 
-        var params_size: u32 = 0;
+        var params_size: usize = 0;
         for (params) |param| {
-            params_size += 4;
+            try addLenChecked(&params_size, 4);
             if (param) |p| {
-                params_size += @intCast(p.len);
+                _ = try toWireI32Len(p.len);
+                try addLenChecked(&params_size, p.len);
             }
         }
 
-        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + @as(u32, @intCast(stmt_name.len)) + 1 + 2 + 2 + params_size + 2;
+        const param_formats_size = paramFormatWireLen(param_format);
+        const result_formats_size = resultFormatWireLen(result_format);
+
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        try addCStringLenChecked(&msg_len_usize, stmt_name);
+        try addLenChecked(&msg_len_usize, param_formats_size);
+        try addLenChecked(&msg_len_usize, 2);
+        try addLenChecked(&msg_len_usize, params_size);
+        try addLenChecked(&msg_len_usize, result_formats_size);
+        const msg_len = try toWireLen(msg_len_usize);
 
         try self.writeByte(@intFromEnum(FrontendMessage.bind));
         try self.writeU32(msg_len);
         try self.writeCString(portal);
         try self.writeCString(stmt_name);
-        try self.writeU16(0);
+        try self.writeParamFormats(param_format);
         try self.writeU16(@intCast(params.len));
 
         for (params) |param| {
             if (param) |p| {
-                try self.writeI32(@intCast(p.len));
+                try self.writeI32(try toWireI32Len(p.len));
                 try self.writeBytes(p);
             } else {
                 try self.writeI32(-1);
             }
         }
 
-        try self.writeU16(0);
+        try self.writeResultFormats(result_format);
     }
 
     /// Encode Describe (portal)
     pub fn encodeDescribePortal(self: *Encoder, portal: []const u8) !void {
         self.reset();
 
-        const msg_len: u32 = 4 + 1 + @as(u32, @intCast(portal.len)) + 1;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addLenChecked(&msg_len_usize, 1);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        const msg_len = try toWireLen(msg_len_usize);
         try self.writeByte(@intFromEnum(FrontendMessage.describe));
         try self.writeU32(msg_len);
         try self.writeByte('P');
@@ -256,7 +408,11 @@ pub const Encoder = struct {
 
     /// Append Execute (no reset - for pipelining)
     pub fn appendExecute(self: *Encoder, portal: []const u8, max_rows: u32) !void {
-        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + 4;
+        var msg_len_usize: usize = 0;
+        try addLenChecked(&msg_len_usize, 4);
+        try addCStringLenChecked(&msg_len_usize, portal);
+        try addLenChecked(&msg_len_usize, 4);
+        const msg_len = try toWireLen(msg_len_usize);
         try self.writeByte(@intFromEnum(FrontendMessage.execute));
         try self.writeU32(msg_len);
         try self.writeCString(portal);
@@ -287,43 +443,6 @@ pub const Encoder = struct {
         self.reset();
         try self.writeByte(@intFromEnum(FrontendMessage.flush));
         try self.writeU32(4);
-    }
-
-    /// Append Bind (no reset - for pipelining)
-    pub fn appendBind(
-        self: *Encoder,
-        portal: []const u8,
-        stmt_name: []const u8,
-        params: []const ?[]const u8,
-    ) !void {
-        if (params.len > std.math.maxInt(i16)) return error.TooManyParameters;
-        var params_size: u32 = 0;
-        for (params) |param| {
-            params_size += 4;
-            if (param) |p| {
-                params_size += @intCast(p.len);
-            }
-        }
-
-        const msg_len: u32 = 4 + @as(u32, @intCast(portal.len)) + 1 + @as(u32, @intCast(stmt_name.len)) + 1 + 2 + 2 + params_size + 2;
-
-        try self.writeByte(@intFromEnum(FrontendMessage.bind));
-        try self.writeU32(msg_len);
-        try self.writeCString(portal);
-        try self.writeCString(stmt_name);
-        try self.writeU16(0);
-        try self.writeU16(@intCast(params.len));
-
-        for (params) |param| {
-            if (param) |p| {
-                try self.writeI32(@intCast(p.len));
-                try self.writeBytes(p);
-            } else {
-                try self.writeI32(-1);
-            }
-        }
-
-        try self.writeU16(0);
     }
 };
 
@@ -421,4 +540,102 @@ test "encode sasl response" {
         std.mem.readInt(u32, bytes[1..5], .big),
     );
     try std.testing.expectEqualStrings("c=biws,r=nonce,p=proof", bytes[5..]);
+}
+
+test "encode query rejects oversized payload" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const sql = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.MessageTooLarge, encoder.encodeQuery(sql));
+}
+
+test "encode bind rejects oversized parameter payload" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const huge_param = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+    const params = [_]?[]const u8{huge_param};
+
+    try std.testing.expectError(error.MessageTooLarge, encoder.encodeBind("", "", &params));
+}
+
+test "encode startup rejects oversized startup fields" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const too_large_len: usize = @as(usize, std.math.maxInt(i32)) + 1;
+    const huge_user = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.MessageTooLarge, encoder.encodeStartupWithParams(huge_user, "db", &.{}));
+}
+
+test "append parse matches encode parse bytes" {
+    var encoded = Encoder.init(std.testing.allocator);
+    defer encoded.deinit();
+    try encoded.encodeParse("stmt", "SELECT $1::int4", &.{23});
+
+    var appended = Encoder.init(std.testing.allocator);
+    defer appended.deinit();
+    try appended.encodeQuery("SELECT 1");
+    const prefix_len = appended.getWritten().len;
+    try appended.appendParse("stmt", "SELECT $1::int4", &.{23});
+
+    try std.testing.expectEqualSlices(u8, encoded.getWritten(), appended.getWritten()[prefix_len..]);
+}
+
+test "append parse rejects embedded nul in sql cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try std.testing.expectError(error.NullByte, encoder.appendParse("s", "SELECT 1\x00", &.{}));
+}
+
+test "encode bind with binary param and result format" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try encoder.encodeBindWithFormats("", "", &.{}, Encoder.FORMAT_BINARY, Encoder.FORMAT_BINARY);
+    const bytes = encoder.getWritten();
+
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0, 1 }, bytes[7..11]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, bytes[11..13]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0, 1 }, bytes[13..17]);
+}
+
+test "encode bind with text param and binary result format" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try encoder.encodeBindWithFormats("", "", &.{}, Encoder.FORMAT_TEXT, Encoder.FORMAT_BINARY);
+    const bytes = encoder.getWritten();
+
+    // portal + statement + param-format-count(0)
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, bytes[7..9]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, bytes[9..11]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0, 1 }, bytes[11..15]);
+}
+
+test "encode parse rejects embedded nul in sql cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try std.testing.expectError(error.NullByte, encoder.encodeParse("s", "SELECT 1\x00", &.{}));
+}
+
+test "encode query rejects embedded nul in query cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try std.testing.expectError(error.NullByte, encoder.encodeQuery("SELECT 1\x00"));
+}
+
+test "encode startup rejects embedded nul in startup params" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try std.testing.expectError(error.NullByte, encoder.encodeStartupWithParams("po\x00stgres", "db", &.{}));
 }

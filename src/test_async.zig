@@ -4,10 +4,10 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
-const AsyncConnection = qail.driver.AsyncConnection;
-const Connection = qail.driver.Connection;
+const AsyncConnection = qail.driver.async_connection.AsyncConnection;
+const Connection = qail.driver.connection.Connection;
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
@@ -24,7 +24,7 @@ pub fn main() !void {
         const start = time.now() catch unreachable;
         const result = AsyncConnection.connect(allocator, "10.255.255.1", 5432, 500);
         const end = time.now() catch unreachable;
-        const elapsed_ms = @as(f64, @floatFromInt(end.since(start))) / 1_000_000.0;
+        const elapsed_ms = @as(f64, @floatFromInt(time.since(end, start))) / 1_000_000.0;
 
         if (result) |*conn| {
             var c = conn.*;
@@ -50,7 +50,7 @@ pub fn main() !void {
         defer conn.close();
 
         const end = time.now() catch unreachable;
-        const elapsed_ms = @as(f64, @floatFromInt(end.since(start))) / 1_000_000.0;
+        const elapsed_ms = @as(f64, @floatFromInt(time.since(end, start))) / 1_000_000.0;
         std.debug.print("   ✅ Connected in {d:.2}ms\n", .{elapsed_ms});
 
         std.debug.print("   📡 Starting up with auth...\n", .{});
@@ -72,7 +72,7 @@ pub fn main() !void {
         defer conn.close();
 
         const end = time.now() catch unreachable;
-        const elapsed_ms = @as(f64, @floatFromInt(end.since(start))) / 1_000_000.0;
+        const elapsed_ms = @as(f64, @floatFromInt(time.since(end, start))) / 1_000_000.0;
         std.debug.print("   ✅ Connected in {d:.2}ms\n", .{elapsed_ms});
 
         conn.startup("orion", "postgres", null) catch |err| {

@@ -9,11 +9,11 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var driver = try qail.PgDriver.connect(allocator, "127.0.0.1", 5432, "postgres", "mydb");
+    var driver = try qail.driver.driver.PgDriver.connect(allocator, "127.0.0.1", 5432, "postgres", "mydb");
     defer driver.deinit();
 
-    const cmd = qail.QailCmd.get("users")
-        .select(&.{ qail.Expr.col("id"), qail.Expr.col("email") })
+    const cmd = qail.ast.QailCmd.get("users")
+        .select(&.{ qail.ast.Expr.col("id"), qail.ast.Expr.col("email") })
         .where(&.{.{ .condition = .{ .column = "active", .op = .eq, .value = .{ .bool = true } } }})
         .limit(10);
 
@@ -27,9 +27,9 @@ pub fn main() !void {
 
 ## High-Level Entry Points
 
-- `qail.PgDriver.connect(...)`
-- `qail.driver.PgPool.init(...)`
-- `qail.driver.Pipeline.init(...)`
+- `qail.driver.driver.PgDriver.connect(...)`
+- `qail.driver.pool.PgPool.init(...)`
+- `qail.driver.pipeline.Pipeline.init(...)`
 - `qail.validateAst(...)`
 
 ## Practical Direction

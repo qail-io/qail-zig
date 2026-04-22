@@ -20,8 +20,8 @@ pub fn main() !void {
 
     // ==================== Example 1: Simple SELECT ====================
     print("📦 Example 1: Simple SELECT\n", .{});
-    const cols1 = [_]qail.Expr{ qail.Expr.col("id"), qail.Expr.col("name"), qail.Expr.col("email") };
-    const query1 = qail.QailCmd.get("users")
+    const cols1 = [_]qail.ast.Expr{ qail.ast.Expr.col("id"), qail.ast.Expr.col("name"), qail.ast.Expr.col("email") };
+    const query1 = qail.ast.QailCmd.get("users")
         .select(&cols1)
         .limit(10);
 
@@ -32,12 +32,12 @@ pub fn main() !void {
 
     // ==================== Example 2: Aggregates ====================
     print("📦 Example 2: Aggregate Query\n", .{});
-    const cols2 = [_]qail.Expr{
-        qail.Expr.count(),
-        qail.Expr.sum("amount"),
-        qail.Expr.avg("price"),
+    const cols2 = [_]qail.ast.Expr{
+        qail.ast.Expr.count(),
+        qail.ast.Expr.sum("amount"),
+        qail.ast.Expr.avg("price"),
     };
-    const query2 = qail.QailCmd.get("orders")
+    const query2 = qail.ast.QailCmd.get("orders")
         .select(&cols2)
         .distinct_();
 
@@ -47,7 +47,7 @@ pub fn main() !void {
 
     // ==================== Example 3: Complex Query ====================
     print("📦 Example 3: Complex Query with JOIN\n", .{});
-    const cols3 = [_]qail.Expr{ qail.Expr.col("u.name"), qail.Expr.col("o.total") };
+    const cols3 = [_]qail.ast.Expr{ qail.ast.Expr.col("u.name"), qail.ast.Expr.col("o.total") };
     const joins = [_]qail.ast.Join{.{
         .kind = .inner,
         .table = "orders",
@@ -55,7 +55,7 @@ pub fn main() !void {
         .on_left = "u.id",
         .on_right = "o.user_id",
     }};
-    const query3 = qail.QailCmd.get("users")
+    const query3 = qail.ast.QailCmd.get("users")
         .alias("u")
         .select(&cols3)
         .join(&joins)

@@ -6,9 +6,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const compat = @import("../compat/mod.zig");
-const net = compat.net;
-const process = compat.process;
+const runtime = @import("../runtime/mod.zig");
+const net = runtime.net;
+const process = runtime.process;
 const posix = std.posix;
 const linux = std.os.linux;
 
@@ -59,13 +59,11 @@ pub fn detect() Backend {
 ///
 /// Accepted values:
 /// - `auto`
-/// - `sync`, `tokio`, `blocking`
+/// - `sync`
 /// - `io_uring`
 pub fn parsePolicy(value: []const u8) ?Policy {
     if (std.ascii.eqlIgnoreCase(value, "auto")) return .auto;
     if (std.ascii.eqlIgnoreCase(value, "sync")) return .sync;
-    if (std.ascii.eqlIgnoreCase(value, "tokio")) return .sync;
-    if (std.ascii.eqlIgnoreCase(value, "blocking")) return .sync;
     if (std.ascii.eqlIgnoreCase(value, "io_uring")) return .io_uring;
     return null;
 }
@@ -123,7 +121,7 @@ const IoUringStream = if (builtin.os.tag == .linux) struct {
         if (self.closed) return;
         self.closed = true;
         self.ring.deinit();
-        posix.close(self.fd);
+        _ = linux.close(self.fd);
     }
 
     pub fn read(self: *Self, buffer: []u8) !usize {
@@ -311,8 +309,9 @@ pub fn connectToHostWithTimeout(
 test "policy parse" {
     try std.testing.expectEqual(@as(?Policy, .auto), parsePolicy("auto"));
     try std.testing.expectEqual(@as(?Policy, .sync), parsePolicy("sync"));
-    try std.testing.expectEqual(@as(?Policy, .sync), parsePolicy("TOKIO"));
     try std.testing.expectEqual(@as(?Policy, .io_uring), parsePolicy("io_uring"));
+    try std.testing.expect(parsePolicy("TOKIO") == null);
+    try std.testing.expect(parsePolicy("blocking") == null);
     try std.testing.expect(parsePolicy("invalid") == null);
 }
 

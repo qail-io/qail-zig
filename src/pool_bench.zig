@@ -13,7 +13,7 @@ const ast = @import("ast/mod.zig");
 
 const PgPool = driver.pool.PgPool;
 const PoolConfig = driver.pool.PoolConfig;
-const Pipeline = driver.Pipeline;
+const Pipeline = driver.pipeline.Pipeline;
 const Encoder = protocol.Encoder;
 
 const TOTAL_QUERIES: usize = 150_000_000;
@@ -62,7 +62,7 @@ pub fn main() !void {
     var counter = std.atomic.Value(usize).init(0);
     var rows_counter = std.atomic.Value(usize).init(0);
 
-    const start = std.time.milliTimestamp();
+    const start = nowMillis();
 
     // Spawn worker threads
     var threads: [NUM_WORKERS]std.Thread = undefined;
@@ -78,7 +78,7 @@ pub fn main() !void {
         thread.join();
     }
 
-    const end = std.time.milliTimestamp();
+    const end = nowMillis();
     const elapsed_ms = end - start;
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
     const total = counter.load(.acquire);
@@ -214,12 +214,16 @@ fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std
 
 fn progressFn(counter: *std.atomic.Value(usize), start: i64) void {
     while (true) {
-        std.Thread.sleep(2 * std.time.ns_per_s);
+        std.Io.sleep(
+            std.Io.Threaded.global_single_threaded.io(),
+            std.Io.Duration.fromSeconds(2),
+            .awake,
+        ) catch {};
 
         const count = counter.load(.acquire);
         if (count >= TOTAL_QUERIES) break;
 
-        const now = std.time.milliTimestamp();
+        const now = nowMillis();
         const elapsed_ms = now - start;
         const elapsed_s = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
         const qps = @as(f64, @floatFromInt(count)) / elapsed_s;
@@ -228,4 +232,8 @@ fn progressFn(counter: *std.atomic.Value(usize), start: i64) void {
 
         std.debug.print("   {} queries |  {d:.0} q/s | ETA: {}s\n", .{ count, qps, eta });
     }
+}
+
+fn nowMillis() i64 {
+    return std.Io.Clock.now(.real, std.Io.Threaded.global_single_threaded.io()).toMilliseconds();
 }

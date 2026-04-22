@@ -3,7 +3,7 @@
 // TCP socket connection to PostgreSQL server.
 
 const std = @import("std");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const io_backend_mod = @import("io_backend.zig");
 
@@ -14,19 +14,22 @@ const auth = protocol.auth;
 const StartupParam = Encoder.StartupParam;
 const auth_options_mod = @import("auth_options.zig");
 pub const AuthOptions = auth_options_mod.AuthOptions;
+const read_buffer_size = 524_288;
 
 /// PostgreSQL connection over TCP
 pub const Connection = struct {
     stream: io_backend_mod.Stream,
     allocator: std.mem.Allocator,
     io_backend: io_backend_mod.Backend = .sync,
-    read_buffer: [8192]u8 = undefined,
+    read_buffer: [read_buffer_size]u8 = undefined,
     read_pos: usize = 0,
     read_len: usize = 0,
 
     // Connection state
     process_id: u32 = 0,
     secret_key: u32 = 0,
+    cancel_key_len: u16 = 0,
+    cancel_key: [256]u8 = [_]u8{0} ** 256,
     ready: bool = false,
     in_transaction: bool = false,
 
@@ -70,37 +73,118 @@ pub const Connection = struct {
     /// Read a complete message from server
     /// Returns: (message_type, payload)
     pub fn readMessage(self: *Connection) !struct { msg_type: BackendMessage, payload: []const u8 } {
-        // Ensure we have at least 5 bytes (type + length)
-        try self.ensureRead(5);
-
-        const msg_type: BackendMessage = @enumFromInt(self.read_buffer[self.read_pos]);
-        const length = std.mem.readInt(u32, self.read_buffer[self.read_pos + 1 ..][0..4], .big);
-
-        // Read full payload
-        const payload_len = length - 4;
-        try self.ensureRead(5 + payload_len);
-
-        const payload = self.read_buffer[self.read_pos + 5 .. self.read_pos + 5 + payload_len];
-        self.read_pos += 5 + payload_len;
-
-        return .{ .msg_type = msg_type, .payload = payload };
+        const raw = try self.readMessageRawFast();
+        return .{
+            .msg_type = @enumFromInt(raw.msg_type),
+            .payload = raw.payload,
+        };
     }
 
-    fn ensureRead(self: *Connection, needed: usize) !void {
-        while (self.read_len - self.read_pos < needed) {
-            // Compact buffer if needed
-            if (self.read_pos > 0) {
-                const remaining = self.read_len - self.read_pos;
-                std.mem.copyForwards(u8, self.read_buffer[0..remaining], self.read_buffer[self.read_pos..self.read_len]);
-                self.read_len = remaining;
-                self.read_pos = 0;
+    pub const CompletionDrain = struct {
+        completed: usize,
+        saw_error: bool,
+    };
+
+    /// Consume backend frames until `ReadyForQuery`, counting `CommandComplete`
+    /// and `NoData` completions in a tight in-buffer loop.
+    pub fn countCompletionsUntilReadyFast(self: *Connection, expected: usize) !CompletionDrain {
+        var completed: usize = 0;
+        var saw_error = false;
+
+        while (true) {
+            while (self.read_len - self.read_pos >= 5) {
+                const pos = self.read_pos;
+                const length = std.mem.readInt(u32, self.read_buffer[pos + 1 ..][0..4], .big);
+                const len_field: usize = @intCast(length);
+
+                if (len_field < 4) return error.InvalidMessageLength;
+                if (len_field > self.read_buffer.len - 1) return error.MessageTooLarge;
+
+                const total_len = len_field + 1;
+                if (self.read_len - pos < total_len) break;
+
+                const msg_type = self.read_buffer[pos];
+                self.read_pos = pos + total_len;
+
+                switch (msg_type) {
+                    'C', 'n' => {
+                        completed += 1;
+                        if (completed > expected) return error.UnexpectedCompletionCount;
+                    },
+                    'E' => saw_error = true,
+                    'Z' => return .{ .completed = completed, .saw_error = saw_error },
+                    else => {},
+                }
             }
 
-            // Read more data
-            const n = try self.stream.read(self.read_buffer[self.read_len..]);
-            if (n == 0) return error.ConnectionClosed;
-            self.read_len += n;
+            try self.readMore();
         }
+    }
+
+    /// Read and skip a complete message, returning only message type.
+    ///
+    /// Useful for throughput-oriented loops that only need completion counting.
+    pub fn readMessageTypeFast(self: *Connection) !u8 {
+        while (true) {
+            const available = self.read_len - self.read_pos;
+            if (available >= 5) {
+                const pos = self.read_pos;
+                const msg_type = self.read_buffer[pos];
+                const length = std.mem.readInt(u32, self.read_buffer[pos + 1 ..][0..4], .big);
+                const len_field: usize = @intCast(length);
+
+                if (len_field < 4) return error.InvalidMessageLength;
+                if (len_field > self.read_buffer.len - 1) return error.MessageTooLarge;
+
+                const total_len = len_field + 1;
+                if (available >= total_len) {
+                    self.read_pos = pos + total_len;
+                    return msg_type;
+                }
+            }
+
+            try self.readMore();
+        }
+    }
+
+    /// Read a complete message and return raw wire message type byte.
+    ///
+    /// This avoids enum conversion in high-throughput loops.
+    pub fn readMessageRawFast(self: *Connection) !struct { msg_type: u8, payload: []const u8 } {
+        while (true) {
+            const available = self.read_len - self.read_pos;
+            if (available >= 5) {
+                const pos = self.read_pos;
+                const msg_type = self.read_buffer[pos];
+                const length = std.mem.readInt(u32, self.read_buffer[pos + 1 ..][0..4], .big);
+                const len_field: usize = @intCast(length);
+
+                if (len_field < 4) return error.InvalidMessageLength;
+                if (len_field > self.read_buffer.len - 1) return error.MessageTooLarge;
+
+                const total_len = len_field + 1;
+                if (available >= total_len) {
+                    const payload = self.read_buffer[pos + 5 .. pos + total_len];
+                    self.read_pos = pos + total_len;
+                    return .{ .msg_type = msg_type, .payload = payload };
+                }
+            }
+
+            try self.readMore();
+        }
+    }
+
+    fn readMore(self: *Connection) !void {
+        if (self.read_len == self.read_buffer.len and self.read_pos > 0) {
+            const remaining = self.read_len - self.read_pos;
+            std.mem.copyForwards(u8, self.read_buffer[0..remaining], self.read_buffer[self.read_pos..self.read_len]);
+            self.read_len = remaining;
+            self.read_pos = 0;
+        }
+
+        const n = try self.stream.read(self.read_buffer[self.read_len..]);
+        if (n == 0) return error.ConnectionClosed;
+        self.read_len += n;
     }
 
     /// Perform startup handshake
@@ -140,6 +224,7 @@ pub const Connection = struct {
         var gss_mechanism: ?auth_options_mod.GssMechanism = null;
         var gss_session_id: ?u64 = null;
         var gss_roundtrips: u32 = 0;
+        const requested_protocol_minor: u16 = @intCast(protocol.wire.PROTOCOL_VERSION & 0xFFFF);
         const AuthFlow = enum { none, cleartext, md5, sasl, gss };
         var auth_flow: AuthFlow = .none;
         var auth_ok = false;
@@ -282,6 +367,14 @@ pub const Connection = struct {
                         else => return error.UnsupportedAuth,
                     }
                 },
+                .negotiate_protocol_version => {
+                    if (auth_ok) return error.NegotiateProtocolVersionAfterAuthOk;
+                    var decoder = Decoder.init(msg.payload);
+                    const negotiate = try decoder.parseNegotiateProtocolVersion(self.allocator);
+                    defer self.allocator.free(negotiate.unrecognized_options);
+                    const negotiated_minor = try Decoder.parseProtocolMinorFromNegotiate(negotiate.newest_minor_supported);
+                    if (negotiated_minor > requested_protocol_minor) return error.ProtocolMinorAboveRequested;
+                },
                 .parameter_status => {
                     // Ignore parameter status messages
                     if (!auth_ok) return error.ParameterStatusBeforeAuthOk;
@@ -292,6 +385,11 @@ pub const Connection = struct {
                     const key_data = try decoder.parseBackendKeyData();
                     self.process_id = key_data.process_id;
                     self.secret_key = key_data.secret_key;
+                    self.cancel_key_len = @intCast(key_data.secret_key_bytes.len);
+                    @memcpy(
+                        self.cancel_key[0..key_data.secret_key_bytes.len],
+                        key_data.secret_key_bytes,
+                    );
                 },
                 .ready_for_query => {
                     if (!auth_ok) return error.StartupCompletedWithoutAuthOk;
@@ -306,7 +404,8 @@ pub const Connection = struct {
                     std.debug.print("Server error: {s}\n", .{err_info.message orelse "unknown"});
                     return error.ServerError;
                 },
-                else => {},
+                .notice => {},
+                else => return error.UnexpectedStartupMessageType,
             }
         }
     }

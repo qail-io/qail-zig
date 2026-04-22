@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 
 /// GSSENC Request code (80877104 = version 1234.5680)
 pub const GSSENC_REQUEST_CODE: u32 = 80877104;
@@ -44,10 +44,7 @@ pub fn tryGssEncRequestStream(
             defer net.setStreamBlocking(stream, true) catch {};
 
             var extra: [1]u8 = undefined;
-            const extra_n = net.readStream(stream, &extra) catch |err| switch (err) {
-                error.WouldBlock => 0,
-                else => return err,
-            };
+            const extra_n = net.readStream(stream, &extra) catch 0;
             if (extra_n > 0) return error.GssEncBufferStuffingDetected;
 
             handoff = true;

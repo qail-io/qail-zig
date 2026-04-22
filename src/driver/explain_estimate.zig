@@ -28,7 +28,7 @@ fn extractJsonNumber(json: []const u8, key: []const u8) ?f64 {
 
     const start = std.mem.indexOf(u8, json, pattern) orelse return null;
     const after_key = json[start + pattern.len ..];
-    const trimmed = std.mem.trimLeft(u8, after_key, " \t\r\n");
+    const trimmed = std.mem.trimStart(u8, after_key, " \t\r\n");
 
     var end: usize = 0;
     while (end < trimmed.len and isJsonNumberByte(trimmed[end])) : (end += 1) {}

@@ -6,8 +6,9 @@
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const protocol = @import("../protocol/mod.zig");
+const message_limits = @import("message_limits.zig");
 
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
@@ -28,6 +29,8 @@ pub const AsyncConnection = struct {
     // Connection state
     process_id: u32 = 0,
     secret_key: u32 = 0,
+    cancel_key_len: u16 = 0,
+    cancel_key: [256]u8 = [_]u8{0} ** 256,
     ready: bool = false,
     in_transaction: bool = false,
 
@@ -45,7 +48,7 @@ pub const AsyncConnection = struct {
     }
 
     pub fn close(self: *AsyncConnection) void {
-        posix.close(self.fd);
+        _ = posix.system.close(self.fd);
     }
 
     /// Send bytes with timeout
@@ -57,7 +60,7 @@ pub const AsyncConnection = struct {
                 return error.WriteTimeout;
             }
 
-            const n = posix.write(self.fd, bytes[sent..]) catch |err| {
+            const n = fdWrite(self.fd, bytes[sent..]) catch |err| {
                 if (err == error.WouldBlock) continue;
                 return err;
             };
@@ -77,7 +80,7 @@ pub const AsyncConnection = struct {
             return error.ReadTimeout;
         }
 
-        const n = posix.read(self.fd, buf) catch |err| {
+        const n = fdRead(self.fd, buf) catch |err| {
             if (err == error.WouldBlock) return 0;
             return err;
         };
@@ -101,7 +104,7 @@ pub const AsyncConnection = struct {
         const length = std.mem.readInt(u32, self.read_buffer[self.read_pos + 1 ..][0..4], .big);
 
         // Read full payload
-        const payload_len = length - 4;
+        const payload_len = try message_limits.validateLengthField(length, self.read_buffer.len - 1);
         try self.ensureReadWithTimeout(5 + payload_len, timeout_ms);
 
         const payload = self.read_buffer[self.read_pos + 5 .. self.read_pos + 5 + payload_len];
@@ -111,6 +114,7 @@ pub const AsyncConnection = struct {
     }
 
     fn ensureReadWithTimeout(self: *AsyncConnection, needed: usize, timeout_ms: i32) !void {
+        if (needed > self.read_buffer.len) return error.MessageTooLarge;
         while (self.read_len - self.read_pos < needed) {
             // Compact buffer if needed
             if (self.read_pos > 0) {
@@ -126,12 +130,36 @@ pub const AsyncConnection = struct {
             }
 
             // Read more data
-            const n = posix.read(self.fd, self.read_buffer[self.read_len..]) catch |err| {
+            const n = fdRead(self.fd, self.read_buffer[self.read_len..]) catch |err| {
                 if (err == error.WouldBlock) continue;
                 return err;
             };
             if (n == 0) return error.ConnectionClosed;
             self.read_len += n;
+        }
+    }
+
+    fn fdWrite(fd: posix.fd_t, bytes: []const u8) !usize {
+        while (true) {
+            const rc = posix.system.write(fd, bytes.ptr, bytes.len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => |err| return posix.unexpectedErrno(err),
+            }
+        }
+    }
+
+    fn fdRead(fd: posix.fd_t, buf: []u8) !usize {
+        while (true) {
+            const rc = posix.system.read(fd, buf.ptr, buf.len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                .AGAIN => return error.WouldBlock,
+                else => |err| return posix.unexpectedErrno(err),
+            }
         }
     }
 
@@ -160,6 +188,7 @@ pub const AsyncConnection = struct {
         var gss_mechanism: ?auth_options_mod.GssMechanism = null;
         var gss_session_id: ?u64 = null;
         var gss_roundtrips: u32 = 0;
+        const requested_protocol_minor: u16 = @intCast(protocol.wire.PROTOCOL_VERSION & 0xFFFF);
         const AuthFlow = enum { none, cleartext, md5, sasl, gss };
         var auth_flow: AuthFlow = .none;
         var auth_ok = false;
@@ -302,6 +331,14 @@ pub const AsyncConnection = struct {
                         else => return error.UnsupportedAuth,
                     }
                 },
+                .negotiate_protocol_version => {
+                    if (auth_ok) return error.NegotiateProtocolVersionAfterAuthOk;
+                    var decoder = Decoder.init(msg.payload);
+                    const negotiate = try decoder.parseNegotiateProtocolVersion(self.allocator);
+                    defer self.allocator.free(negotiate.unrecognized_options);
+                    const negotiated_minor = try Decoder.parseProtocolMinorFromNegotiate(negotiate.newest_minor_supported);
+                    if (negotiated_minor > requested_protocol_minor) return error.ProtocolMinorAboveRequested;
+                },
                 .parameter_status => {
                     if (!auth_ok) return error.ParameterStatusBeforeAuthOk;
                 },
@@ -311,6 +348,11 @@ pub const AsyncConnection = struct {
                     const key_data = try decoder.parseBackendKeyData();
                     self.process_id = key_data.process_id;
                     self.secret_key = key_data.secret_key;
+                    self.cancel_key_len = @intCast(key_data.secret_key_bytes.len);
+                    @memcpy(
+                        self.cancel_key[0..key_data.secret_key_bytes.len],
+                        key_data.secret_key_bytes,
+                    );
                 },
                 .ready_for_query => {
                     if (!auth_ok) return error.StartupCompletedWithoutAuthOk;
@@ -325,7 +367,8 @@ pub const AsyncConnection = struct {
                     std.debug.print("Server error: {s}\n", .{err_info.message orelse "unknown"});
                     return error.ServerError;
                 },
-                else => {},
+                .notice => {},
+                else => return error.UnexpectedStartupMessageType,
             }
         }
     }

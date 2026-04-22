@@ -3,7 +3,7 @@
 // Port of Rust qail-core/src/ast/values.rs
 
 const std = @import("std");
-const io = @import("../compat/io.zig");
+const io = @import("../runtime/io.zig");
 
 /// Time interval unit for duration expressions
 pub const IntervalUnit = enum {
@@ -178,7 +178,7 @@ test "value format null" {
     var buf: [64]u8 = undefined;
     var writer = io.FixedBufferWriter.init(&buf);
     const v: Value = .null;
-    try std.fmt.format(writer.writer(), "{f}", .{v});
+    try writer.writer().print("{f}", .{v});
     try std.testing.expectEqualStrings("NULL", writer.getWritten());
 }
 
@@ -186,7 +186,7 @@ test "value format string escapes quotes" {
     var buf: [64]u8 = undefined;
     var writer = io.FixedBufferWriter.init(&buf);
     const v: Value = .{ .string = "it's" };
-    try std.fmt.format(writer.writer(), "{f}", .{v});
+    try writer.writer().print("{f}", .{v});
     try std.testing.expectEqualStrings("'it''s'", writer.getWritten());
 }
 

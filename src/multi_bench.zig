@@ -7,7 +7,7 @@ const std = @import("std");
 const driver = @import("driver/mod.zig");
 const protocol = @import("protocol/mod.zig");
 
-const Connection = driver.Connection;
+const Connection = driver.connection.Connection;
 const Encoder = protocol.Encoder;
 
 const TOTAL_QUERIES: usize = 10_000_000;
@@ -35,7 +35,7 @@ pub fn main() !void {
     const batches_per_worker = TOTAL_QUERIES / NUM_WORKERS / QUERIES_PER_BATCH;
     var counter = std.atomic.Value(usize).init(0);
 
-    const start = std.time.milliTimestamp();
+    const start = nowMillis();
 
     // Spawn worker threads
     var threads: [NUM_WORKERS]std.Thread = undefined;
@@ -55,7 +55,7 @@ pub fn main() !void {
         std.debug.print("  Thread {} finished\n", .{i});
     }
 
-    const end = std.time.milliTimestamp();
+    const end = nowMillis();
     const elapsed_ms = end - start;
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
     const total = counter.load(.acquire);
@@ -169,15 +169,23 @@ fn workerFn(id: usize, counter: *std.atomic.Value(usize), batches: usize, alloca
 
 fn progressFn(counter: *std.atomic.Value(usize), start: i64) void {
     while (true) {
-        std.Thread.sleep(2 * std.time.ns_per_s);
+        std.Io.sleep(
+            std.Io.Threaded.global_single_threaded.io(),
+            std.Io.Duration.fromSeconds(2),
+            .awake,
+        ) catch {};
 
         const count = counter.load(.acquire);
         if (count >= TOTAL_QUERIES) break;
 
-        const now = std.time.milliTimestamp();
+        const now = nowMillis();
         const elapsed_s = @as(f64, @floatFromInt(now - start)) / 1000.0;
         const qps = @as(f64, @floatFromInt(count)) / elapsed_s;
 
         std.debug.print("   {} queries |  {d:.0} q/s\n", .{ count, qps });
     }
+}
+
+fn nowMillis() i64 {
+    return std.Io.Clock.now(.real, std.Io.Threaded.global_single_threaded.io()).toMilliseconds();
 }

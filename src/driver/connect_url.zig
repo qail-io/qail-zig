@@ -3,6 +3,7 @@ const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
 const auth_options_mod = @import("auth_options.zig");
 const tls_driver_mod = @import("tls.zig");
+const io_compat = @import("../runtime/io.zig");
 
 const StartupParam = protocol.Encoder.StartupParam;
 const AuthOptions = conn_mod.AuthOptions;
@@ -292,10 +293,6 @@ fn parseAuthMode(value: []const u8) !AuthOptions {
         };
     }
 
-    if (std.ascii.eqlIgnoreCase(value, "compat") or std.ascii.eqlIgnoreCase(value, "default")) {
-        return .{};
-    }
-
     return error.InvalidAuthMode;
 }
 
@@ -317,11 +314,13 @@ fn loadCaBundleFromPath(
     allocator: std.mem.Allocator,
     path: []const u8,
 ) !std.crypto.Certificate.Bundle {
-    var bundle: std.crypto.Certificate.Bundle = .{};
+    const io_iface = io_compat.runtimeIo();
+    const now = std.Io.Clock.real.now(io_iface);
+    var bundle: std.crypto.Certificate.Bundle = .empty;
     if (std.fs.path.isAbsolute(path)) {
-        try bundle.addCertsFromFilePathAbsolute(allocator, path);
+        try bundle.addCertsFromFilePathAbsolute(allocator, io_iface, now, path);
     } else {
-        try bundle.addCertsFromFilePath(allocator, std.fs.cwd(), path);
+        try bundle.addCertsFromFilePath(allocator, io_iface, now, std.Io.Dir.cwd(), path);
     }
     return bundle;
 }
@@ -331,12 +330,12 @@ fn readFileAllocAnyPath(
     path: []const u8,
     max_bytes: usize,
 ) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) {
-        var file = try std.fs.openFileAbsolute(path, .{});
-        defer file.close();
-        return try file.readToEndAlloc(allocator, max_bytes);
-    }
-    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+    return std.Io.Dir.cwd().readFileAlloc(
+        io_compat.runtimeIo(),
+        path,
+        allocator,
+        std.Io.Limit.limited(max_bytes),
+    );
 }
 
 fn parseBoolParam(value: []const u8) ?bool {
@@ -361,7 +360,7 @@ fn percentDecodeAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
         return allocator.dupe(u8, text);
     }
 
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     var i: usize = 0;

@@ -4,23 +4,25 @@
 
 const std = @import("std");
 const qail = @import("qail.zig");
-const net = @import("compat/net.zig");
+const net = @import("runtime/net.zig");
+const process_compat = @import("runtime/process.zig");
+const time_compat = @import("runtime/time.zig");
 
 const QUERIES: usize = 10_000;
 const BATCH_SIZE: usize = 100;
 
 pub fn main() !void {
-    const host = std.process.getEnvVarOwned(std.heap.page_allocator, "PG_HOST") catch "127.0.0.1";
+    const host = process_compat.getEnvVarOwned(std.heap.page_allocator, "PG_HOST") catch "127.0.0.1";
     defer if (!std.mem.eql(u8, host, "127.0.0.1")) std.heap.page_allocator.free(host);
 
-    const port_str = std.process.getEnvVarOwned(std.heap.page_allocator, "PG_PORT") catch "5432";
+    const port_str = process_compat.getEnvVarOwned(std.heap.page_allocator, "PG_PORT") catch "5432";
     defer if (!std.mem.eql(u8, port_str, "5432")) std.heap.page_allocator.free(port_str);
     const port = std.fmt.parseInt(u16, port_str, 10) catch 5432;
 
-    const user = std.process.getEnvVarOwned(std.heap.page_allocator, "PG_USER") catch "orion";
+    const user = process_compat.getEnvVarOwned(std.heap.page_allocator, "PG_USER") catch "orion";
     defer if (!std.mem.eql(u8, user, "orion")) std.heap.page_allocator.free(user);
 
-    const database = std.process.getEnvVarOwned(std.heap.page_allocator, "PG_DATABASE") catch "postgres";
+    const database = process_compat.getEnvVarOwned(std.heap.page_allocator, "PG_DATABASE") catch "postgres";
     defer if (!std.mem.eql(u8, database, "postgres")) std.heap.page_allocator.free(database);
 
     std.debug.print("🏁 QAIL-ZIG I/O BENCHMARK (v2)\n", .{});
@@ -55,7 +57,7 @@ pub fn main() !void {
     std.debug.print("📊 [1/2] Individual Queries...\n", .{});
 
     var read_buf: [65536]u8 = undefined;
-    const start1 = std.time.nanoTimestamp();
+    const start1 = try time_compat.now();
 
     var i: usize = 0;
     while (i < QUERIES) : (i += 1) {
@@ -76,7 +78,7 @@ pub fn main() !void {
         }
     }
 
-    const elapsed1 = @as(f64, @floatFromInt(@as(u64, @intCast(std.time.nanoTimestamp() - start1)))) / 1_000_000.0;
+    const elapsed1 = @as(f64, @floatFromInt(time_compat.since(try time_compat.now(), start1))) / 1_000_000.0;
     const qps1 = @as(f64, @floatFromInt(QUERIES)) / (elapsed1 / 1000.0);
     std.debug.print("   {d:.0} q/s\n\n", .{qps1});
 
@@ -89,7 +91,7 @@ pub fn main() !void {
     }
 
     const batches = QUERIES / BATCH_SIZE;
-    const start2 = std.time.nanoTimestamp();
+    const start2 = try time_compat.now();
 
     var batch: usize = 0;
     while (batch < batches) : (batch += 1) {
@@ -119,7 +121,7 @@ pub fn main() !void {
         }
     }
 
-    const elapsed2 = @as(f64, @floatFromInt(@as(u64, @intCast(std.time.nanoTimestamp() - start2)))) / 1_000_000.0;
+    const elapsed2 = @as(f64, @floatFromInt(time_compat.since(try time_compat.now(), start2))) / 1_000_000.0;
     const qps2 = @as(f64, @floatFromInt(QUERIES)) / (elapsed2 / 1000.0);
     std.debug.print("   {d:.0} q/s\n\n", .{qps2});
 

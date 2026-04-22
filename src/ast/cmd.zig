@@ -164,12 +164,6 @@ pub const QailCmd = struct {
         return .{ .kind = .truncate, .table = table };
     }
 
-    /// Create a raw SQL command.
-    /// Trusted/internal use only; public execution paths reject it.
-    pub fn raw(sql: []const u8) QailCmd {
-        return .{ .kind = .raw, .raw_sql = sql };
-    }
-
     // ==================== Transaction Commands ====================
 
     /// BEGIN TRANSACTION

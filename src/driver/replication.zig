@@ -1,5 +1,6 @@
 const std = @import("std");
 const row_mod = @import("row.zig");
+const io_compat = @import("../runtime/io.zig");
 
 const PgRow = row_mod.PgRow;
 
@@ -114,7 +115,7 @@ pub fn buildCreateLogicalReplicationSlotSql(
     try validateIdent("slot_name", slot_name);
     try validateIdent("output_plugin", output_plugin);
 
-    var sql: std.ArrayListUnmanaged(u8) = .{};
+    var sql: std.ArrayListUnmanaged(u8) = .empty;
     errdefer sql.deinit(allocator);
 
     try sql.appendSlice(allocator, "CREATE_REPLICATION_SLOT ");
@@ -134,7 +135,7 @@ pub fn buildDropReplicationSlotSql(
 ) ![]u8 {
     try validateIdent("slot_name", slot_name);
 
-    var sql: std.ArrayListUnmanaged(u8) = .{};
+    var sql: std.ArrayListUnmanaged(u8) = .empty;
     errdefer sql.deinit(allocator);
 
     try sql.appendSlice(allocator, "DROP_REPLICATION_SLOT ");
@@ -154,7 +155,7 @@ pub fn buildStartLogicalReplicationSql(
 
     if (options.len > MAX_REPLICATION_OPTIONS) return error.InvalidReplicationOption;
 
-    var sql: std.ArrayListUnmanaged(u8) = .{};
+    var sql: std.ArrayListUnmanaged(u8) = .empty;
     errdefer sql.deinit(allocator);
 
     try sql.appendSlice(allocator, "START_REPLICATION SLOT ");
@@ -306,7 +307,7 @@ pub fn buildStandbyStatusUpdatePayload(
 }
 
 pub fn sendCopyData(conn: anytype, data: []const u8) !void {
-    if (data.len > std.math.maxInt(u32) - 4) return error.CopyDataTooLarge;
+    if (data.len > std.math.maxInt(i32) - 4) return error.CopyDataTooLarge;
     const len: u32 = @intCast(data.len + 4);
     var header: [5]u8 = undefined;
     header[0] = 'd';
@@ -332,7 +333,7 @@ fn validateIdent(kind: []const u8, ident: []const u8) !void {
 fn quoteSingleLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidReplicationOption;
 
-    var out: std.ArrayListUnmanaged(u8) = .{};
+    var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     for (value) |ch| {
@@ -348,7 +349,8 @@ fn quoteSingleLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u
 
 fn postgresEpochMicrosNow() i64 {
     const pg_unix_epoch_diff_secs: i64 = 946_684_800;
-    return std.time.microTimestamp() - (pg_unix_epoch_diff_secs * 1_000_000);
+    const now_us = std.Io.Clock.now(.real, io_compat.runtimeIo()).toMicroseconds();
+    return now_us - (pg_unix_epoch_diff_secs * 1_000_000);
 }
 
 test "parse lsn text" {
@@ -409,7 +411,7 @@ test "sendCopyData rejects oversized payload" {
     };
 
     var conn = MockConn{};
-    const too_large_len = @as(usize, std.math.maxInt(u32)) - 3;
+    const too_large_len = @as(usize, std.math.maxInt(i32)) - 3;
     const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
 
     try std.testing.expectError(error.CopyDataTooLarge, sendCopyData(&conn, payload));

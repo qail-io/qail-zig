@@ -4,10 +4,10 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
-const QailCmd = qail.QailCmd;
-const Expr = qail.Expr;
+const QailCmd = qail.ast.QailCmd;
+const Expr = qail.ast.Expr;
 const AstEncoder = qail.protocol.AstEncoder;
 
 pub fn main() !void {
@@ -52,7 +52,7 @@ fn benchmarkEncoding(allocator: std.mem.Allocator, iterations: u64) !u64 {
     }
 
     const end = time.now() catch unreachable;
-    return end.since(start);
+    return time.since(end, start);
 }
 
 fn printResult(iterations: u64, nanos: u64) void {

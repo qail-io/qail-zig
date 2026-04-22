@@ -54,7 +54,7 @@ pub const TableDef = struct {
     }
 
     pub fn toDdl(self: *const TableDef, allocator: Allocator) ![]const u8 {
-        const io = @import("../../compat/io.zig");
+        const io = @import("../../runtime/io.zig");
         var ddl_writer = io.AllocatingWriter.init(allocator);
         defer ddl_writer.deinit();
         const writer = ddl_writer.writer();

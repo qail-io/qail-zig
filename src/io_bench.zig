@@ -12,12 +12,12 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 const Assignment = qail.ast.Assignment;
-const PgDriver = qail.driver.PgDriver;
+const PgDriver = qail.driver.driver.PgDriver;
 
 const READ_ITERS: u64 = 1_000_000;
 const WRITE_ITERS: u64 = 100_000;
@@ -247,7 +247,7 @@ fn benchFetchOne(driver: *PgDriver, label: []const u8, cmd: *const QailCmd) u64 
     }
 
     const end = time.now() catch unreachable;
-    const elapsed_ns = end.since(start);
+    const elapsed_ns = time.since(end, start);
     const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iters))) / 1000.0;
     const qps = @as(f64, @floatFromInt(iters)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);
 
@@ -280,7 +280,7 @@ fn benchWriteCycle(driver: *PgDriver, label: []const u8) u64 {
     }
 
     const end = time.now() catch unreachable;
-    const elapsed_ns = end.since(start);
+    const elapsed_ns = time.since(end, start);
     const total_ops = WRITE_ITERS * 2;
     const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(WRITE_ITERS))) / 1000.0;
     const qps = @as(f64, @floatFromInt(total_ops)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);
@@ -320,7 +320,7 @@ fn benchUpdate(driver: *PgDriver, label: []const u8) u64 {
     }
 
     const end = time.now() catch unreachable;
-    const elapsed_ns = end.since(start);
+    const elapsed_ns = time.since(end, start);
     const us_per = (@as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(WRITE_ITERS))) / 1000.0;
     const qps = @as(f64, @floatFromInt(WRITE_ITERS)) / (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0);
 

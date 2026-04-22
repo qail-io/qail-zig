@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const io = @import("../compat/io.zig");
+const io = @import("../runtime/io.zig");
 const schema = @import("schema.zig");
 const compare = @import("differ/compare.zig");
 const differ_types = @import("differ/types.zig");

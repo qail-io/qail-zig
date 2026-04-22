@@ -12,8 +12,9 @@
 //!   zig build-exe src/qail_pgx_modes_once.zig -target aarch64-macos.15.0 -O ReleaseFast -femit-bin=/tmp/qail_zig_modes_once
 
 const std = @import("std");
-const process_compat = @import("compat/process.zig");
-const time = @import("compat/time.zig");
+const io_compat = @import("runtime/io.zig");
+const process_compat = @import("runtime/process.zig");
+const time = @import("runtime/time.zig");
 const ast = @import("ast/mod.zig");
 const Connection = @import("driver/connection.zig").Connection;
 const pool_mod = @import("driver/pool.zig");
@@ -38,7 +39,6 @@ const STMT_NAME = "qail_zig_modes_stmt";
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 1099511628211;
 const BENCH_PAYLOAD_TARGET_ROWS: usize = 20_000;
-const BENCH_MANY_PARAMS_TARGET_ROWS: usize = 512;
 const BENCH_SETUP_LOCK_SQL = "SELECT pg_advisory_lock(60119029)";
 const BENCH_SETUP_UNLOCK_SQL = "SELECT pg_advisory_unlock(60119029)";
 const CREATE_BENCH_PAYLOAD_SQL =
@@ -53,14 +53,16 @@ const CREATE_BENCH_PAYLOAD_SQL =
     "optional_note TEXT NULL" ++
     ")";
 const MANY_PARAMS_PARAM_COUNT: usize = 32;
-const MANY_PARAM_COLUMNS = buildManyParamColumns();
-const CREATE_BENCH_MANY_PARAMS_SQL = buildManyParamsCreateSql();
-const CREATE_BENCH_MANY_PARAMS_INDEX_SQL = buildManyParamsIndexSql();
-const MANY_PARAMS_SUM_COEFF: usize = blk: {
-    var sum: usize = 0;
-    for (1..MANY_PARAMS_PARAM_COUNT + 1) |idx| sum += idx;
-    break :blk sum;
+
+const PipelineProfile = struct {
+    enabled: bool = false,
+    encode_ns: u128 = 0,
+    send_ns: u128 = 0,
+    consume_ns: u128 = 0,
+    calls: usize = 0,
 };
+
+var g_pipeline_profile = PipelineProfile{};
 
 const Mode = enum {
     single,
@@ -87,16 +89,17 @@ const Workload = enum {
         if (std.mem.eql(u8, input, "wide_rows") or std.mem.eql(u8, input, "wide")) return .wide_rows;
         if (std.mem.eql(u8, input, "large_rows") or std.mem.eql(u8, input, "large")) return .large_rows;
         if (std.mem.eql(u8, input, "many_params") or std.mem.eql(u8, input, "params")) return .many_params;
-        if (std.mem.eql(u8, input, "aggregate") or std.mem.eql(u8, input, "agg") or std.mem.eql(u8, input, "server_heavy")) return .aggregate;
+        // Legacy aliases (`monster_cte` / `cte`) now route to native AST aggregate workload.
+        if (std.mem.eql(u8, input, "aggregate") or std.mem.eql(u8, input, "agg") or std.mem.eql(u8, input, "server_heavy") or std.mem.eql(u8, input, "monster_cte") or std.mem.eql(u8, input, "cte")) return .aggregate;
         return null;
     }
 };
 
 const ResultMode = enum {
+    complete_only,
     point_rows,
     wide_rows,
     scalar_int,
-    aggregate_scalars,
 };
 
 const ParamSet = []const ?[]const u8;
@@ -155,13 +158,6 @@ const PAYLOAD_COLS = [_]Expr{
     Expr.col("ratio"),
     Expr.col("optional_note"),
 };
-const AGGREGATE_COLS = [_]Expr{
-    Expr.sum("visits").withAlias("sum_visits"),
-    Expr.max("visits").withAlias("max_visits"),
-    Expr.count().withAlias("row_count"),
-    .{ .raw = "SUM(CASE WHEN active THEN 1 ELSE 0 END) AS active_count" },
-};
-const MANY_PARAMS_SELECT = [_]Expr{Expr.col("total")};
 const POINT_WHERE = [_]WhereClause{.{
     .condition = .{ .column = "id", .op = .eq, .value = .{ .param = 1 } },
 }};
@@ -169,7 +165,13 @@ const PAYLOAD_WHERE = [_]WhereClause{.{
     .condition = .{ .column = "id", .op = .lte, .value = .{ .param = 1 } },
 }};
 const PAYLOAD_ORDER = [_]OrderBy{.{ .column = "id", .order = .asc }};
+const AGGREGATE_COLS = [_]Expr{
+    Expr.sum("visits").withAlias("sum_visits"),
+    Expr.max("visits").withAlias("max_visits"),
+    Expr.count().withAlias("row_count"),
+};
 const MANY_PARAM_CLAUSES = buildManyParamClauses();
+const MANY_PARAM_SELECT = [_]Expr{Expr.count()};
 
 const POINT_CMD = QailCmd.get("harbors")
     .select(&POINT_COLS)
@@ -180,14 +182,14 @@ const PAYLOAD_ROWS_CMD = QailCmd.get("qail_bench_payload")
     .where(&PAYLOAD_WHERE)
     .orderBy(&PAYLOAD_ORDER);
 
+const WIDE_ROWS_CMD = PAYLOAD_ROWS_CMD;
 const AGGREGATE_CMD = QailCmd.get("qail_bench_payload")
     .select(&AGGREGATE_COLS)
     .where(&PAYLOAD_WHERE);
 
-const MANY_PARAMS_CMD = QailCmd.get("qail_bench_many_params")
-    .select(&MANY_PARAMS_SELECT)
-    .where(MANY_PARAM_CLAUSES[0..])
-    .limit(1);
+const MANY_PARAMS_CMD = QailCmd.get("qail_bench_payload")
+    .select(&MANY_PARAM_SELECT)
+    .where(&MANY_PARAM_CLAUSES);
 
 const PoolSync = struct {
     ready_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -208,13 +210,12 @@ const PoolWorkerCtx = struct {
     result: *WorkerResult,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
 
-    const args = try process_compat.argsAlloc(allocator);
+    const args = try init.args.toSlice(allocator);
 
     var mode: ?Mode = null;
     var workload: Workload = .point;
@@ -256,17 +257,23 @@ pub fn main() !void {
     };
 
     if (plain) {
-        try stdout.print("{d:.3}\n", .{result.qps});
+        try stdoutPrint("{d:.3}\n", .{result.qps});
     } else {
-        try stdout.print("qail-zig(native) {s}/{s}: {d:.0} q/s", .{ @tagName(selected_mode), spec.name, result.qps });
+        try stdoutPrint("qail-zig(native) {s}/{s}: {d:.0} q/s", .{ @tagName(selected_mode), spec.name, result.qps });
         if (result.rows_per_sec) |rows_per_sec| {
-            try stdout.print(" | {d:.0} rows/s", .{rows_per_sec});
+            try stdoutPrint(" | {d:.0} rows/s", .{rows_per_sec});
         }
         if (result.mib_per_sec) |mib_per_sec| {
-            try stdout.print(" | {d:.2} MiB/s", .{mib_per_sec});
+            try stdoutPrint(" | {d:.2} MiB/s", .{mib_per_sec});
         }
-        try stdout.print(" | checksum=0x{x}\n", .{result.checksum});
+        try stdoutPrint(" | checksum=0x{x}\n", .{result.checksum});
     }
+}
+
+fn stdoutPrint(comptime fmt: []const u8, args: anytype) !void {
+    var buffer: [1024]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buffer, fmt, args);
+    try io_compat.writeAllStdout(line);
 }
 
 fn usageAndExit(reason: []const u8) noreturn {
@@ -285,7 +292,7 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .name = "point",
             .total_queries = POINT_TOTAL_QUERIES,
             .iterations = POINT_ITERATIONS,
-            .result_mode = .point_rows,
+            .result_mode = .complete_only,
             .requires_payload = false,
             .requires_many_params = false,
             .cmd = &POINT_CMD,
@@ -298,7 +305,7 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .result_mode = .wide_rows,
             .requires_payload = true,
             .requires_many_params = false,
-            .cmd = &PAYLOAD_ROWS_CMD,
+            .cmd = &WIDE_ROWS_CMD,
         },
         .large_rows => .{
             .workload = .large_rows,
@@ -316,8 +323,8 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .total_queries = MANY_PARAMS_TOTAL_QUERIES,
             .iterations = MANY_PARAMS_ITERATIONS,
             .result_mode = .scalar_int,
-            .requires_payload = false,
-            .requires_many_params = true,
+            .requires_payload = true,
+            .requires_many_params = false,
             .cmd = &MANY_PARAMS_CMD,
         },
         .aggregate => .{
@@ -325,7 +332,7 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .name = "aggregate",
             .total_queries = AGGREGATE_TOTAL_QUERIES,
             .iterations = AGGREGATE_ITERATIONS,
-            .result_mode = .aggregate_scalars,
+            .result_mode = .scalar_int,
             .requires_payload = true,
             .requires_many_params = false,
             .cmd = &AGGREGATE_CMD,
@@ -388,12 +395,17 @@ fn buildAggregateParams(allocator: std.mem.Allocator, total: usize) ![]ParamSet 
 }
 
 fn buildManyParamsBatch(allocator: std.mem.Allocator, total: usize) ![]ParamSet {
+    const cache = try allocator.alloc([]const u8, 256);
+    for (cache, 0..) |*slot, i| {
+        slot.* = try std.fmt.allocPrint(allocator, "{d}", .{i + 1});
+    }
+
     const params = try allocator.alloc(ParamSet, total);
     for (params, 0..) |*slot, query_idx| {
         const inner = try allocator.alloc(?[]const u8, MANY_PARAMS_PARAM_COUNT);
-        const row_slot = (query_idx % BENCH_MANY_PARAMS_TARGET_ROWS) + 1;
         for (0..MANY_PARAMS_PARAM_COUNT) |param_idx| {
-            inner[param_idx] = try std.fmt.allocPrint(allocator, "{d}", .{row_slot * (param_idx + 1)});
+            const value_idx = (query_idx + (param_idx * 7)) % cache.len;
+            inner[param_idx] = cache[value_idx];
         }
         slot.* = inner;
     }
@@ -411,7 +423,6 @@ fn ensureWorkloadReady(spec: WorkloadSpec) !void {
     errdefer executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL) catch {};
 
     if (spec.requires_payload) try ensureBenchPayload(&conn);
-    if (spec.requires_many_params) try ensureBenchManyParams(&conn);
 
     try executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL);
 }
@@ -442,20 +453,6 @@ fn ensureBenchPayload(conn: *Connection) !void {
 
     try executeSimpleQuery(conn, insert_sql);
     _ = executeSimpleQuery(conn, "ANALYZE qail_bench_payload") catch {};
-}
-
-fn ensureBenchManyParams(conn: *Connection) !void {
-    try executeSimpleQuery(conn, CREATE_BENCH_MANY_PARAMS_SQL);
-    try executeSimpleQuery(conn, CREATE_BENCH_MANY_PARAMS_INDEX_SQL);
-
-    const current_rows = try querySingleInt(conn, "SELECT COALESCE(MAX(slot), 0) FROM qail_bench_many_params");
-    if (current_rows >= BENCH_MANY_PARAMS_TARGET_ROWS) return;
-
-    const insert_sql = try buildManyParamsInsertSql(std.heap.page_allocator, @intCast(current_rows + 1), BENCH_MANY_PARAMS_TARGET_ROWS);
-    defer std.heap.page_allocator.free(insert_sql);
-
-    try executeSimpleQuery(conn, insert_sql);
-    _ = executeSimpleQuery(conn, "ANALYZE qail_bench_many_params") catch {};
 }
 
 fn executeSimpleQuery(conn: *Connection, sql: []const u8) !void {
@@ -530,86 +527,38 @@ fn parseFirstDataRowUInt(payload: []const u8) !usize {
     return std.fmt.parseInt(usize, payload[pos .. pos + len], 10);
 }
 
-fn buildManyParamColumns() [MANY_PARAMS_PARAM_COUNT][]const u8 {
-    var columns: [MANY_PARAMS_PARAM_COUNT][]const u8 = undefined;
-    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        columns[idx] = if (idx + 1 < 10)
-            std.fmt.comptimePrint("p0{d}", .{idx + 1})
-        else
-            std.fmt.comptimePrint("p{d}", .{idx + 1});
-    }
-    return columns;
-}
-
 fn buildManyParamClauses() [MANY_PARAMS_PARAM_COUNT]WhereClause {
     var clauses: [MANY_PARAMS_PARAM_COUNT]WhereClause = undefined;
     inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
         clauses[idx] = .{
             .condition = .{
-                .column = MANY_PARAM_COLUMNS[idx],
+                .column = "id",
                 .op = .eq,
                 .value = .{ .param = idx + 1 },
             },
+            .logical_op = if (idx == 0) .@"and" else .@"or",
         };
     }
     return clauses;
-}
-
-fn buildManyParamsCreateSql() []const u8 {
-    comptime var sql: []const u8 = "CREATE TABLE IF NOT EXISTS qail_bench_many_params (slot INTEGER PRIMARY KEY, total BIGINT NOT NULL";
-    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        sql = sql ++ ", " ++ MANY_PARAM_COLUMNS[idx] ++ " INTEGER NOT NULL";
-    }
-    sql = sql ++ ")";
-    return sql;
-}
-
-fn buildManyParamsIndexSql() []const u8 {
-    comptime var sql: []const u8 = "CREATE UNIQUE INDEX IF NOT EXISTS qail_bench_many_params_lookup_idx ON qail_bench_many_params (";
-    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        if (idx > 0) sql = sql ++ ", ";
-        sql = sql ++ MANY_PARAM_COLUMNS[idx];
-    }
-    sql = sql ++ ")";
-    return sql;
-}
-
-fn buildManyParamsInsertSql(allocator: std.mem.Allocator, start_slot: usize, end_slot: usize) ![]u8 {
-    var sql = std.ArrayList(u8){};
-    defer sql.deinit(allocator);
-    const writer = sql.writer(allocator);
-
-    try writer.writeAll("INSERT INTO qail_bench_many_params (slot, total");
-    for (MANY_PARAM_COLUMNS) |column| {
-        try writer.writeAll(", ");
-        try writer.writeAll(column);
-    }
-    try writer.writeAll(") SELECT gs, ");
-    try writer.print("(gs * {d})::bigint", .{MANY_PARAMS_SUM_COEFF});
-    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        try writer.print(", gs * {d}", .{idx + 1});
-    }
-    try writer.print(" FROM generate_series({d}, {d}) AS gs ON CONFLICT (slot) DO NOTHING", .{ start_slot, end_slot });
-    return sql.toOwnedSlice(allocator);
 }
 
 fn runSingleMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult {
     var conn = try Connection.connect(std.heap.page_allocator, HOST, PORT);
     defer conn.close();
     try conn.startup(USER, DATABASE, null);
-    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd);
+    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd, std.heap.page_allocator);
 
-    var encoder = Encoder.init(std.heap.page_allocator);
-    defer encoder.deinit();
+    const wire_batch = try buildPreparedSinglesWireBatch(std.heap.page_allocator, STMT_NAME, params);
+    defer freePreparedSinglesWireBatch(std.heap.page_allocator, wire_batch);
 
-    const warmup = try runPreparedSingles(&conn, &encoder, STMT_NAME, params, spec.result_mode);
+    const warmup = try runPreparedSinglesEncoded(&conn, wire_batch, spec.result_mode);
     if (warmup.completed != params.len) return error.UnexpectedCompletionCount;
 
     var total_ns: u64 = 0;
     var aggregate = BatchStats{};
     for (0..spec.iterations) |_| {
         const start = try time.now();
-        const stats = try runPreparedSingles(&conn, &encoder, STMT_NAME, params, spec.result_mode);
+        const stats = try runPreparedSinglesEncoded(&conn, wire_batch, spec.result_mode);
         const end = try time.now();
         if (stats.completed != params.len) return error.UnexpectedCompletionCount;
         total_ns += time.since(end, start);
@@ -620,26 +569,47 @@ fn runSingleMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult 
 }
 
 fn runPipelineMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult {
+    g_pipeline_profile = .{ .enabled = wantPipelineProfile() };
     var conn = try Connection.connect(std.heap.page_allocator, HOST, PORT);
     defer conn.close();
     try conn.startup(USER, DATABASE, null);
-    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd);
+    try prepareNamedAstStatement(&conn, STMT_NAME, spec.cmd, std.heap.page_allocator);
 
     var encoder = Encoder.init(std.heap.page_allocator);
     defer encoder.deinit();
 
-    const warmup = try runPreparedPipeline(&conn, &encoder, STMT_NAME, params, spec.result_mode);
+    encoder.reset();
+    for (params) |param_set| {
+        try encoder.appendBind("", STMT_NAME, param_set);
+        try encoder.appendExecute("", 0);
+    }
+    try encoder.appendSync();
+    const pipeline_wire = try std.heap.page_allocator.dupe(u8, encoder.getWritten());
+    defer std.heap.page_allocator.free(pipeline_wire);
+
+    const warmup = try runPreparedPipelineEncoded(&conn, pipeline_wire, params.len, spec.result_mode);
     if (warmup.completed != params.len) return error.UnexpectedCompletionCount;
 
     var total_ns: u64 = 0;
     var aggregate = BatchStats{};
     for (0..spec.iterations) |_| {
         const start = try time.now();
-        const stats = try runPreparedPipeline(&conn, &encoder, STMT_NAME, params, spec.result_mode);
+        const stats = try runPreparedPipelineEncoded(&conn, pipeline_wire, params.len, spec.result_mode);
         const end = try time.now();
         if (stats.completed != params.len) return error.UnexpectedCompletionCount;
         total_ns += time.since(end, start);
         aggregate.add(stats);
+    }
+
+    if (g_pipeline_profile.enabled and g_pipeline_profile.calls > 0) {
+        const calls_f = @as(f64, @floatFromInt(g_pipeline_profile.calls));
+        const enc = @as(f64, @floatFromInt(g_pipeline_profile.encode_ns)) / calls_f / 1_000_000.0;
+        const snd = @as(f64, @floatFromInt(g_pipeline_profile.send_ns)) / calls_f / 1_000_000.0;
+        const cns = @as(f64, @floatFromInt(g_pipeline_profile.consume_ns)) / calls_f / 1_000_000.0;
+        std.debug.print(
+            "pipeline split avg/call: encode={d:.3}ms send={d:.3}ms consume={d:.3}ms calls={d}\n",
+            .{ enc, snd, cns, g_pipeline_profile.calls },
+        );
     }
 
     return makeBenchmarkResult(aggregate, total_ns);
@@ -706,6 +676,10 @@ fn runPool10Mode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult 
 fn poolWorkerMain(ctx: *PoolWorkerCtx) void {
     var local_err: ?anyerror = null;
 
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const worker_allocator = arena_state.allocator();
+
     var pooled = ctx.pool.acquire() catch |err| {
         local_err = err;
         signalReady(ctx, local_err);
@@ -715,37 +689,46 @@ fn poolWorkerMain(ctx: *PoolWorkerCtx) void {
     };
     defer pooled.release();
 
-    var encoder = Encoder.init(std.heap.page_allocator);
-    defer encoder.deinit();
-
     if (local_err == null) {
         const conn = pooled.get();
-        prepareNamedAstStatement(conn, STMT_NAME, ctx.spec.cmd) catch |err| {
+        prepareNamedAstStatement(conn, STMT_NAME, ctx.spec.cmd, worker_allocator) catch |err| {
             local_err = err;
         };
         if (local_err == null) {
-            _ = runPreparedSingles(conn, &encoder, STMT_NAME, ctx.params, ctx.spec.result_mode) catch |err| {
+            const wire_batch = buildPreparedSinglesWireBatch(worker_allocator, STMT_NAME, ctx.params) catch |err| {
+                local_err = err;
+                signalReady(ctx, local_err);
+                waitForStart(ctx.sync);
+                signalDone(ctx, local_err);
+                return;
+            };
+
+            _ = runPreparedSinglesEncoded(conn, wire_batch, ctx.spec.result_mode) catch |err| {
                 local_err = err;
             };
+
+            signalReady(ctx, local_err);
+            waitForStart(ctx.sync);
+
+            if (local_err == null) {
+                var measured = BatchStats{};
+                for (0..ctx.spec.iterations) |_| {
+                    const stats = runPreparedSinglesEncoded(conn, wire_batch, ctx.spec.result_mode) catch |err| {
+                        local_err = err;
+                        break;
+                    };
+                    measured.add(stats);
+                }
+                ctx.result.stats = measured;
+            }
+
+            signalDone(ctx, local_err);
+            return;
         }
     }
 
     signalReady(ctx, local_err);
     waitForStart(ctx.sync);
-
-    if (local_err == null) {
-        const conn = pooled.get();
-        var measured = BatchStats{};
-        for (0..ctx.spec.iterations) |_| {
-            const stats = runPreparedSingles(conn, &encoder, STMT_NAME, ctx.params, ctx.spec.result_mode) catch |err| {
-                local_err = err;
-                break;
-            };
-            measured.add(stats);
-        }
-        ctx.result.stats = measured;
-    }
-
     signalDone(ctx, local_err);
 }
 
@@ -761,18 +744,27 @@ fn signalDone(ctx: *PoolWorkerCtx, local_err: ?anyerror) void {
 
 fn waitForStart(sync: *PoolSync) void {
     while (!sync.start_flag.load(.acquire)) {
-        std.Thread.yield() catch std.Thread.sleep(100_000);
+        std.Io.sleep(io_compat.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {
+            std.Thread.yield() catch {};
+        };
     }
 }
 
 fn waitForCounter(counter: *std.atomic.Value(usize), expected: usize) void {
     while (counter.load(.acquire) < expected) {
-        std.Thread.yield() catch std.Thread.sleep(100_000);
+        std.Io.sleep(io_compat.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {
+            std.Thread.yield() catch {};
+        };
     }
 }
 
-fn prepareNamedAstStatement(conn: *Connection, stmt_name: []const u8, cmd: *const QailCmd) !void {
-    var encoder = AstEncoder.init(std.heap.page_allocator);
+fn prepareNamedAstStatement(
+    conn: *Connection,
+    stmt_name: []const u8,
+    cmd: *const QailCmd,
+    allocator: std.mem.Allocator,
+) !void {
+    var encoder = AstEncoder.init(allocator);
     defer encoder.deinit();
 
     try encoder.encodePrepare(stmt_name, cmd);
@@ -780,18 +772,18 @@ fn prepareNamedAstStatement(conn: *Connection, stmt_name: []const u8, cmd: *cons
 
     var saw_parse_complete = false;
     while (true) {
-        const msg = try conn.readMessage();
-        switch (msg.msg_type) {
-            .parse_complete => saw_parse_complete = true,
-            .ready_for_query => {
+        const msg_type = try conn.readMessageTypeFast();
+        switch (msg_type) {
+            '1' => saw_parse_complete = true,
+            'Z' => {
                 if (!saw_parse_complete) return error.PrepareDidNotComplete;
                 return;
             },
-            .error_response => {
-                _ = drainUntilReady(conn) catch {};
+            'E' => {
+                _ = drainUntilReadyFast(conn) catch {};
                 return error.PrepareError;
             },
-            .notice, .parameter_status, .notification => {},
+            'N', 'S', 'A' => {},
             else => {},
         }
     }
@@ -817,6 +809,52 @@ fn runPreparedSingles(
     return stats;
 }
 
+fn runPreparedSinglesEncoded(
+    conn: *Connection,
+    wire_batch: []const []const u8,
+    result_mode: ResultMode,
+) !BatchStats {
+    var stats = BatchStats{};
+    for (wire_batch) |wire_bytes| {
+        try conn.send(wire_bytes);
+        const result = try consumeSingleResult(conn, result_mode);
+        stats.add(result);
+    }
+    return stats;
+}
+
+fn buildPreparedSinglesWireBatch(
+    allocator: std.mem.Allocator,
+    stmt_name: []const u8,
+    params_batch: []const ParamSet,
+) ![][]u8 {
+    var encoder = Encoder.init(allocator);
+    defer encoder.deinit();
+
+    const wires = try allocator.alloc([]u8, params_batch.len);
+    var written: usize = 0;
+    errdefer {
+        for (wires[0..written]) |wire| allocator.free(wire);
+        allocator.free(wires);
+    }
+
+    for (params_batch, 0..) |params, idx| {
+        encoder.reset();
+        try encoder.appendBind("", stmt_name, params);
+        try encoder.appendExecute("", 0);
+        try encoder.appendSync();
+        wires[idx] = try allocator.dupe(u8, encoder.getWritten());
+        written = idx + 1;
+    }
+
+    return wires;
+}
+
+fn freePreparedSinglesWireBatch(allocator: std.mem.Allocator, wire_batch: [][]u8) void {
+    for (wire_batch) |wire| allocator.free(wire);
+    allocator.free(wire_batch);
+}
+
 fn runPreparedPipeline(
     conn: *Connection,
     encoder: *Encoder,
@@ -824,34 +862,89 @@ fn runPreparedPipeline(
     params_batch: []const ParamSet,
     result_mode: ResultMode,
 ) !BatchStats {
+    var t0: time.Instant = undefined;
+    if (g_pipeline_profile.enabled) t0 = try time.now();
+
     encoder.reset();
     for (params_batch) |params| {
         try encoder.appendBind("", stmt_name, params);
         try encoder.appendExecute("", 0);
     }
     try encoder.appendSync();
+
+    var t1: time.Instant = t0;
+    if (g_pipeline_profile.enabled) {
+        t1 = try time.now();
+        g_pipeline_profile.encode_ns += @as(u128, @intCast(time.since(t1, t0)));
+    }
+
     try conn.send(encoder.getWritten());
-    return try consumePipelineResults(conn, params_batch.len, result_mode);
+
+    var t2: time.Instant = t1;
+    if (g_pipeline_profile.enabled) {
+        t2 = try time.now();
+        g_pipeline_profile.send_ns += @as(u128, @intCast(time.since(t2, t1)));
+    }
+
+    const stats = try consumePipelineResults(conn, params_batch.len, result_mode);
+    if (g_pipeline_profile.enabled) {
+        const t3 = try time.now();
+        g_pipeline_profile.consume_ns += @as(u128, @intCast(time.since(t3, t2)));
+        g_pipeline_profile.calls += 1;
+    }
+    return stats;
+}
+
+fn runPreparedPipelineEncoded(
+    conn: *Connection,
+    wire_bytes: []const u8,
+    expected: usize,
+    result_mode: ResultMode,
+) !BatchStats {
+    var t2: time.Instant = undefined;
+    if (g_pipeline_profile.enabled) t2 = try time.now();
+
+    try conn.send(wire_bytes);
+
+    var t3: time.Instant = t2;
+    if (g_pipeline_profile.enabled) {
+        t3 = try time.now();
+        g_pipeline_profile.send_ns += @as(u128, @intCast(time.since(t3, t2)));
+    }
+
+    const stats = try consumePipelineResults(conn, expected, result_mode);
+    if (g_pipeline_profile.enabled) {
+        const t4 = try time.now();
+        g_pipeline_profile.consume_ns += @as(u128, @intCast(time.since(t4, t3)));
+        g_pipeline_profile.calls += 1;
+    }
+    return stats;
 }
 
 fn consumeSingleResult(conn: *Connection, result_mode: ResultMode) !BatchStats {
+    if (result_mode == .complete_only) {
+        return consumeSingleResultCompleteOnly(conn);
+    }
+
     var completed = false;
     var stats = BatchStats{};
     while (true) {
-        const msg = try conn.readMessage();
+        const msg = try conn.readMessageRawFast();
         switch (msg.msg_type) {
-            .bind_complete, .row_description, .notice, .parameter_status, .notification => {},
-            .data_row => try consumeDataRow(result_mode, msg.payload, &stats),
-            .command_complete, .no_data => {
+            '2', 'T', 'N', 'S', 'A' => {},
+            'D' => try consumeDataRow(result_mode, msg.payload, &stats),
+            'C', 'n' => {
                 completed = true;
                 stats.completed += 1;
             },
-            .ready_for_query => {
+            'Z' => {
                 if (!completed) return error.QueryDidNotComplete;
+                conn.ready = true;
+                conn.in_transaction = msg.payload.len > 0 and msg.payload[0] == 'T';
                 return stats;
             },
-            .error_response => {
-                _ = drainUntilReady(conn) catch {};
+            'E' => {
+                _ = drainUntilReadyFast(conn) catch {};
                 return error.QueryError;
             },
             else => {},
@@ -860,22 +953,43 @@ fn consumeSingleResult(conn: *Connection, result_mode: ResultMode) !BatchStats {
 }
 
 fn consumePipelineResults(conn: *Connection, expected: usize, result_mode: ResultMode) !BatchStats {
+    if (result_mode == .complete_only) {
+        return consumePipelineResultsCompleteOnly(conn, expected);
+    }
+
     var stats = BatchStats{};
     while (true) {
-        const msg = try conn.readMessage();
+        const msg = try conn.readMessageRawFast();
         switch (msg.msg_type) {
-            .bind_complete, .row_description, .notice, .parameter_status, .notification => {},
-            .data_row => try consumeDataRow(result_mode, msg.payload, &stats),
-            .command_complete, .no_data => stats.completed += 1,
-            .ready_for_query => return stats,
-            .error_response => {
-                _ = drainUntilReady(conn) catch {};
+            '2', 'T', 'N', 'S', 'A' => {},
+            'D' => try consumeDataRow(result_mode, msg.payload, &stats),
+            'C', 'n' => stats.completed += 1,
+            'Z' => {
+                conn.ready = true;
+                conn.in_transaction = msg.payload.len > 0 and msg.payload[0] == 'T';
+                return stats;
+            },
+            'E' => {
+                _ = drainUntilReadyFast(conn) catch {};
                 return error.QueryError;
             },
             else => {},
         }
         if (stats.completed > expected) return error.UnexpectedCompletionCount;
     }
+}
+
+fn consumeSingleResultCompleteOnly(conn: *Connection) !BatchStats {
+    const result = try conn.countCompletionsUntilReadyFast(1);
+    if (result.saw_error) return error.QueryError;
+    if (result.completed != 1) return error.QueryDidNotComplete;
+    return .{ .completed = 1 };
+}
+
+fn consumePipelineResultsCompleteOnly(conn: *Connection, expected: usize) !BatchStats {
+    const result = try conn.countCompletionsUntilReadyFast(expected);
+    if (result.saw_error) return error.QueryError;
+    return .{ .completed = result.completed };
 }
 
 fn drainUntilReady(conn: *Connection) !void {
@@ -885,10 +999,28 @@ fn drainUntilReady(conn: *Connection) !void {
     }
 }
 
+fn drainUntilReadyFast(conn: *Connection) !void {
+    while (true) {
+        if (try conn.readMessageTypeFast() == 'Z') return;
+    }
+}
+
 fn qpsFrom(total_queries: usize, elapsed_ns: u64) f64 {
     const total = @as(f64, @floatFromInt(total_queries));
     const seconds = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
     return total / seconds;
+}
+
+fn wantPipelineProfile() bool {
+    const value = process_compat.getEnvVarOwned(std.heap.page_allocator, "QAIL_PROFILE_PIPELINE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return false,
+        else => return false,
+    };
+    defer std.heap.page_allocator.free(value);
+    if (value.len == 0) return false;
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.ascii.eqlIgnoreCase(value, "false")) return false;
+    return true;
 }
 
 fn makeBenchmarkResult(stats: BatchStats, elapsed_ns: u64) BenchmarkResult {
@@ -903,10 +1035,10 @@ fn makeBenchmarkResult(stats: BatchStats, elapsed_ns: u64) BenchmarkResult {
 
 fn consumeDataRow(result_mode: ResultMode, payload: []const u8, stats: *BatchStats) !void {
     switch (result_mode) {
+        .complete_only => {},
         .point_rows => try consumePointDataRow(payload, stats),
         .wide_rows => try consumeWideDataRow(payload, stats),
         .scalar_int => try consumeScalarDataRow(payload, stats),
-        .aggregate_scalars => try consumeAggregateDataRow(payload, stats),
     }
 }
 
@@ -937,7 +1069,7 @@ fn consumePointDataRow(payload: []const u8, stats: *BatchStats) !void {
 
         switch (idx) {
             0 => {
-                const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+                const parsed = parseAsciiI64OrLen(value);
                 row_hash +%= @as(u64, @intCast(parsed));
             },
             else => row_hash = mixHash(row_hash, value),
@@ -982,41 +1114,11 @@ fn consumeScalarDataRow(payload: []const u8, stats: *BatchStats) !void {
 
     if (first_value) |value| {
         stats.bytes += value.len;
-        const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+        const parsed = parseAsciiI64OrLen(value);
         stats.checksum +%= @as(u64, @intCast(parsed));
     } else {
         stats.checksum +%= 1;
     }
-}
-
-fn consumeAggregateDataRow(payload: []const u8, stats: *BatchStats) !void {
-    if (payload.len < 2) return error.InvalidDataRow;
-
-    const column_count = std.mem.readInt(u16, payload[0..2], .big);
-    var pos: usize = 2;
-    var row_hash: u64 = FNV_OFFSET;
-
-    for (0..column_count) |_| {
-        if (pos + 4 > payload.len) return error.InvalidDataRow;
-        const raw_len = std.mem.readInt(i32, payload[pos..][0..4], .big);
-        pos += 4;
-
-        if (raw_len < 0) continue;
-
-        const len: usize = @intCast(raw_len);
-        if (pos + len > payload.len) return error.InvalidDataRow;
-
-        const value = payload[pos .. pos + len];
-        pos += len;
-        stats.bytes += value.len;
-
-        const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
-        row_hash +%= @as(u64, @intCast(parsed));
-    }
-
-    if (pos != payload.len) return error.InvalidDataRow;
-    stats.rows += 1;
-    stats.checksum +%= row_hash;
 }
 
 fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
@@ -1046,7 +1148,7 @@ fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
 
         switch (idx) {
             0, 4 => {
-                const parsed = std.fmt.parseInt(i64, value, 10) catch @as(i64, @intCast(value.len));
+                const parsed = parseAsciiI64OrLen(value);
                 row_hash +%= @as(u64, @intCast(parsed));
             },
             5 => {
@@ -1065,6 +1167,30 @@ fn consumeWideDataRow(payload: []const u8, stats: *BatchStats) !void {
     if (pos != payload.len) return error.InvalidDataRow;
     stats.rows += 1;
     stats.checksum +%= row_hash;
+}
+
+fn parseAsciiI64OrLen(value: []const u8) i64 {
+    if (value.len == 0) return 0;
+
+    var idx: usize = 0;
+    var negative = false;
+    if (value[0] == '-') {
+        negative = true;
+        idx = 1;
+        if (idx == value.len) return @as(i64, @intCast(value.len));
+    }
+
+    var acc: i64 = 0;
+    while (idx < value.len) : (idx += 1) {
+        const c = value[idx];
+        if (c < '0' or c > '9') return @as(i64, @intCast(value.len));
+
+        const digit: i64 = @as(i64, @intCast(c - '0'));
+        acc = std.math.mul(i64, acc, 10) catch return @as(i64, @intCast(value.len));
+        acc = std.math.add(i64, acc, digit) catch return @as(i64, @intCast(value.len));
+    }
+
+    return if (negative) -acc else acc;
 }
 
 fn mixHash(seed: u64, bytes: []const u8) u64 {

@@ -30,4 +30,3 @@ pub const Cage = struct {
     /// Logical operator joining conditions.
     logical_op: LogicalOp,
 };
-

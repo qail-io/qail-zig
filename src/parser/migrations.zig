@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const io_compat = @import("../runtime/io.zig");
 
 const QailCmd = @import("../ast/cmd.zig").QailCmd;
 const Expr = @import("../ast/expr.zig").Expr;
@@ -30,7 +31,7 @@ pub const MIGRATION_TABLE_SCHEMA =
 
 /// Generate DDL for the migration table
 pub fn getMigrationTableDdl() []const u8 {
-    return 
+    return
     \\CREATE TABLE IF NOT EXISTS _qail_migrations (
     \\  id serial PRIMARY KEY,
     \\  version varchar(255) NOT NULL UNIQUE,
@@ -70,7 +71,7 @@ pub fn getMigrationStatusCmd() QailCmd {
 
 /// Generate a migration version string (timestamp-based)
 pub fn generateVersion() [14]u8 {
-    const timestamp = std.time.timestamp();
+    const timestamp = std.Io.Clock.now(.real, io_compat.runtimeIo()).toSeconds();
     const secs = @as(u64, @intCast(timestamp));
 
     // Convert to datetime components

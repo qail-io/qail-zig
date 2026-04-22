@@ -1,12 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const qail = @import("qail");
+const process_compat = qail.runtime.process;
 
-const QailCmd = qail.QailCmd;
-const Expr = qail.Expr;
-const PgDriver = qail.PgDriver;
-const ConnectOptions = qail.ConnectOptions;
-const LinuxKrb5ProviderConfig = qail.LinuxKrb5ProviderConfig;
+const QailCmd = qail.ast.QailCmd;
+const Expr = qail.ast.Expr;
+const PgDriver = qail.driver.driver.PgDriver;
+const ConnectOptions = qail.driver.connect_url.ConnectOptions;
+const LinuxKrb5ProviderConfig = qail.driver.kerberos_preflight.LinuxKrb5ProviderConfig;
 
 const DEFAULT_HOST = "pgkerb.local";
 const DEFAULT_PORT: u16 = 5432;
@@ -30,8 +31,8 @@ pub fn main() !void {
         return;
     }
 
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
+    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(gpa_state.deinit() == .ok);
     const allocator = gpa_state.allocator();
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -40,7 +41,7 @@ pub fn main() !void {
 
     const cfg = try loadConfig(arena);
 
-    var provider = try qail.linuxKrb5TokenProvider(allocator, LinuxKrb5ProviderConfig{
+    var provider = try qail.driver.kerberos_provider.linuxKrb5TokenProvider(allocator, LinuxKrb5ProviderConfig{
         .host = cfg.host,
         .service = cfg.service,
         .target_name = cfg.target_name,
@@ -63,7 +64,8 @@ pub fn main() !void {
     );
     defer driver.deinit();
 
-    const table_name = try std.fmt.allocPrint(allocator, "qail_gssenc_smoke_{d}", .{@abs(std.time.nanoTimestamp())});
+    const now_ns = std.Io.Clock.now(.real, qail.runtime.io.runtimeIo()).toNanoseconds();
+    const table_name = try std.fmt.allocPrint(allocator, "qail_gssenc_smoke_{d}", .{now_ns});
     defer allocator.free(table_name);
 
     const drop_cmd = QailCmd.drop(table_name);
@@ -123,18 +125,18 @@ fn loadConfig(allocator: std.mem.Allocator) !SmokeConfig {
 }
 
 fn readEnvOwnedOptional(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, name);
+    return process_compat.getEnvVarOwned(allocator, name);
 }
 
 fn readEnvOwnedOrDefault(allocator: std.mem.Allocator, name: []const u8, fallback: []const u8) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+    return process_compat.getEnvVarOwned(allocator, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => allocator.dupe(u8, fallback),
         else => err,
     };
 }
 
 fn readEnvU16OrDefault(allocator: std.mem.Allocator, name: []const u8, fallback: u16) !u16 {
-    const value = std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+    const value = process_compat.getEnvVarOwned(allocator, name) catch |err| switch (err) {
         error.EnvironmentVariableNotFound => return fallback,
         else => return err,
     };

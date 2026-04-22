@@ -4,8 +4,8 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const net = qail.compat.net;
-const time = qail.compat.time;
+const net = qail.runtime.net;
+const time = qail.runtime.time;
 
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;
@@ -110,7 +110,7 @@ fn runPipelinedBenchmark(stream: *net.Stream, encoder: *Encoder, read_buf: *[819
     }
 
     const end = time.now() catch unreachable;
-    return end.since(start);
+    return time.since(end, start);
 }
 
 fn readBatchResponses(stream: *net.Stream, buf: *[8192]u8, expected: u64) !void {

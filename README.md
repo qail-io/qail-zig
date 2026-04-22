@@ -2,7 +2,7 @@
 
 **Zig-first PostgreSQL driver with AST-native query building, codegen, CLI, and optional Linux Kerberos/GSSENC integration.**
 
-[![Zig](https://img.shields.io/badge/Zig-0.15+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
+[![Zig](https://img.shields.io/badge/Zig-0.16+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.7.3-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.7.3)
@@ -71,7 +71,7 @@ zig build ast-bench          # AST benchmark on healthy Zig toolchains
 zig build pgzig-bench -- qail single --workload point
 zig build pgzig-bench -- pgzig pool10 --workload many_params
 
-# macOS 26 + Zig 0.15.x workaround wrapper
+# Optional convenience wrapper (equivalent commands)
 ./scripts/zigw pgzig-bench qail single --workload point
 ./scripts/zigw pgzig-bench pgzig pool10 --workload many_params
 ```
@@ -79,12 +79,12 @@ zig build pgzig-bench -- pgzig pool10 --workload many_params
 ## Installation
 
 ```bash
-# Requires Zig 0.15+ and PostgreSQL 14+
+# Requires Zig 0.16+ and PostgreSQL 14+
 git clone https://github.com/qail-io/qail-zig.git
 cd qail-zig
 zig build -Doptimize=ReleaseFast
 
-# On the known macOS 26 build-runner issue path:
+# Optional wrapper for the common build/test commands:
 ./scripts/zigw doctor
 ./scripts/zigw test
 ```
@@ -100,11 +100,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Connect
-    var driver = try qail.PgDriver.connect(allocator, "127.0.0.1", 5432, "postgres", "mydb");
+    var driver = try qail.driver.driver.PgDriver.connect(allocator, "127.0.0.1", 5432, "postgres", "mydb");
     defer driver.deinit();
 
     // AST-native query
-    const cmd = qail.QailCmd.get("users").limit(10);
+    const cmd = qail.ast.QailCmd.get("users").limit(10);
     const rows = try driver.fetchAll(&cmd);
     defer allocator.free(rows);
 
@@ -214,11 +214,11 @@ const cmd = QailCmd.get("orders")
 ### Connection Pool
 
 ```zig
-const config = qail.driver.PoolConfig.new("localhost", 5432, "postgres", "mydb")
+const config = qail.driver.pool.PoolConfig.new("localhost", 5432, "postgres", "mydb")
     .password("secret")
     .max_connections(20);
 
-var pool = try qail.driver.PgPool.connect(config);
+var pool = try qail.driver.pool.PgPool.connect(config);
 defer pool.deinit();
 
 var conn = try pool.acquire();
@@ -230,9 +230,9 @@ const rows = try conn.fetchAll(&cmd);
 ### RLS Context (Centralized)
 
 ```zig
-const token = qail.SuperAdminToken.forSystemProcess("migration");
-const admin_ctx = qail.RlsContext.superAdmin(token);
-const tenant_ctx = qail.RlsContext.tenant("550e8400-e29b-41d4-a716-446655440000");
+const token = qail.driver.rls.SuperAdminToken.forSystemProcess("migration");
+const admin_ctx = qail.driver.rls.RlsContext.superAdmin(token);
+const tenant_ctx = qail.driver.rls.RlsContext.tenant("550e8400-e29b-41d4-a716-446655440000");
 
 // Direct driver path
 try driver.setRlsContext(&tenant_ctx);
@@ -253,7 +253,7 @@ const rows = try driver.fetchPrepared(&stmt, &[_]?[]const u8{"42"});
 ### COPY Protocol
 
 ```zig
-const rows_copied = try qail.driver.copyIn(&driver.connection, "users", &.{"id", "name"}, data);
+const rows_copied = try qail.driver.copy.copyIn(&driver.connection, "users", &.{"id", "name"}, data);
 ```
 
 ## CLI

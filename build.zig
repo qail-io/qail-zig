@@ -3,7 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const pg_mod = b.dependency("pg", .{}).module("pg");
 
     // ==================== Library Module ====================
     // The main QAIL Zig library (pure Zig, no FFI)
@@ -185,27 +184,11 @@ pub fn build(b: *std.Build) void {
     fair_step.dependOn(&run_fair.step);
 
     // ==================== pg.zig Comparison Benchmark ====================
-    const pgzig_compare = b.addExecutable(.{
-        .name = "qail-pgzig-bench",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/qail_pgzig_bench.zig"),
-            .target = target,
-            .optimize = .ReleaseFast,
-            .imports = &.{
-                .{ .name = "qail", .module = qail_mod },
-                .{ .name = "pg", .module = pg_mod },
-            },
-        }),
-    });
-    b.installArtifact(pgzig_compare);
-
-    const run_pgzig_compare = b.addRunArtifact(pgzig_compare);
-    run_pgzig_compare.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_pgzig_compare.addArgs(args);
-    }
     const pgzig_compare_step = b.step("pgzig-bench", "Run qail-zig vs pg.zig benchmark");
-    pgzig_compare_step.dependOn(&run_pgzig_compare.step);
+    const fail = b.addFail(
+        "pgzig-bench is temporarily disabled on Zig 0.16 until the pg.zig dependency build script is updated.",
+    );
+    pgzig_compare_step.dependOn(&fail.step);
 
     // ==================== AST Bench Executable ====================
     const ast_bench = b.addExecutable(.{
@@ -244,6 +227,25 @@ pub fn build(b: *std.Build) void {
     run_e2e.step.dependOn(b.getInstallStep());
     const e2e_step = b.step("e2e", "Run E2E integration test against real PostgreSQL");
     e2e_step.dependOn(&run_e2e.step);
+
+    // ==================== Adversarial Integration Test ====================
+    const adversarial_test = b.addExecutable(.{
+        .name = "qail-adversarial-test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/adversarial_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    b.installArtifact(adversarial_test);
+
+    const run_adversarial = b.addRunArtifact(adversarial_test);
+    run_adversarial.step.dependOn(b.getInstallStep());
+    const adversarial_step = b.step("adversarial-test", "Run adversarial integration tests against local PostgreSQL");
+    adversarial_step.dependOn(&run_adversarial.step);
 
     // ==================== Linux Kerberos/GSSENC Smoke Test ====================
     const gssenc_smoke = b.addExecutable(.{

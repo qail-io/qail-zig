@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const crypto = std.crypto;
+const rand_compat = @import("../runtime/rand.zig");
 
 const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
 const Sha256 = crypto.hash.sha2.Sha256;
@@ -43,7 +44,7 @@ pub const ScramClient = struct {
             .password = password,
             .client_nonce = undefined,
         };
-        crypto.random.bytes(&client.client_nonce);
+        rand_compat.bytes(&client.client_nonce);
         return client;
     }
 

@@ -72,3 +72,43 @@ test "wire: bind encodes null param length as -1" {
     const marker = std.mem.readInt(i32, payload[param_data_start..][0..4], .big);
     try std.testing.expectEqual(@as(i32, -1), marker);
 }
+
+test "wire: parse rejects embedded nul in statement name cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const result = encoder.encodeParse("stmt\x00name", "SELECT 1", &.{});
+    try std.testing.expectError(error.NullByte, result);
+}
+
+test "wire: bind rejects embedded nul in portal cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const result = encoder.encodeBind("po\x00rtal", "stmt", &.{});
+    try std.testing.expectError(error.NullByte, result);
+}
+
+test "wire: bind rejects embedded nul in statement cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const result = encoder.encodeBind("portal", "st\x00mt", &.{});
+    try std.testing.expectError(error.NullByte, result);
+}
+
+test "wire: describe portal rejects embedded nul in portal cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const result = encoder.encodeDescribePortal("po\x00rtal");
+    try std.testing.expectError(error.NullByte, result);
+}
+
+test "wire: execute rejects embedded nul in portal cstring" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const result = encoder.encodeExecute("po\x00rtal", 0);
+    try std.testing.expectError(error.NullByte, result);
+}

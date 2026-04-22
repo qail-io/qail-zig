@@ -3,7 +3,7 @@
 // PostgreSQL JSON and JSONB parsing utilities.
 
 const std = @import("std");
-const io = @import("../../compat/io.zig");
+const io = @import("../../runtime/io.zig");
 
 /// Parse JSONB wire format to JSON value
 /// JSONB starts with a version byte (currently 1)

@@ -16,10 +16,10 @@ QAIL Zig implements PostgreSQL directly over the wire protocol. The active surfa
 
 ## Primary Types
 
-- `qail.PgDriver`
-- `qail.driver.Connection`
-- `qail.driver.Pipeline`
-- `qail.driver.PgPool`
+- `qail.driver.driver.PgDriver`
+- `qail.driver.connection.Connection`
+- `qail.driver.pipeline.Pipeline`
+- `qail.driver.pool.PgPool`
 
 ## Driver Direction
 

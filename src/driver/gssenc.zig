@@ -1,10 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const auth_options_mod = @import("auth_options.zig");
 const io_backend_mod = @import("io_backend.zig");
 const kerberos_provider_mod = @import("kerberos_provider.zig");
+const message_limits = @import("message_limits.zig");
 
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
@@ -32,6 +33,8 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 
     process_id: u32 = 0,
     secret_key: u32 = 0,
+    cancel_key_len: u16 = 0,
+    cancel_key: [256]u8 = [_]u8{0} ** 256,
     ready: bool = false,
     in_transaction: bool = false,
 
@@ -125,7 +128,7 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 
         const msg_type: BackendMessage = @enumFromInt(self.read_plain.items[self.read_pos]);
         const length = std.mem.readInt(u32, self.read_plain.items[self.read_pos + 1 ..][0..4], .big);
-        const payload_len = length - 4;
+        const payload_len = try message_limits.validateLengthField(length, message_limits.max_backend_message_len_field);
         try self.ensureRead(5 + payload_len);
 
         const payload = self.read_plain.items[self.read_pos + 5 .. self.read_pos + 5 + payload_len];
@@ -151,6 +154,7 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
         var gss_mechanism: ?auth_options_mod.GssMechanism = null;
         var gss_session_id: ?u64 = null;
         var gss_roundtrips: u32 = 0;
+        const requested_protocol_minor: u16 = @intCast(protocol.wire.PROTOCOL_VERSION & 0xFFFF);
         const AuthFlow = enum { none, cleartext, md5, sasl, gss };
         var auth_flow: AuthFlow = .none;
         var auth_ok = false;
@@ -289,6 +293,14 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
                         else => return error.UnsupportedAuth,
                     }
                 },
+                .negotiate_protocol_version => {
+                    if (auth_ok) return error.NegotiateProtocolVersionAfterAuthOk;
+                    var decoder = Decoder.init(msg.payload);
+                    const negotiate = try decoder.parseNegotiateProtocolVersion(self.allocator);
+                    defer self.allocator.free(negotiate.unrecognized_options);
+                    const negotiated_minor = try Decoder.parseProtocolMinorFromNegotiate(negotiate.newest_minor_supported);
+                    if (negotiated_minor > requested_protocol_minor) return error.ProtocolMinorAboveRequested;
+                },
                 .parameter_status => {
                     if (!auth_ok) return error.ParameterStatusBeforeAuthOk;
                 },
@@ -298,6 +310,11 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
                     const key_data = try decoder.parseBackendKeyData();
                     self.process_id = key_data.process_id;
                     self.secret_key = key_data.secret_key;
+                    self.cancel_key_len = @intCast(key_data.secret_key_bytes.len);
+                    @memcpy(
+                        self.cancel_key[0..key_data.secret_key_bytes.len],
+                        key_data.secret_key_bytes,
+                    );
                 },
                 .ready_for_query => {
                     if (!auth_ok) return error.StartupCompletedWithoutAuthOk;
@@ -312,7 +329,8 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
                     std.debug.print("Server error: {s}\n", .{err_info.message orelse "unknown"});
                     return error.ServerError;
                 },
-                else => {},
+                .notice => {},
+                else => return error.UnexpectedStartupMessageType,
             }
         }
     }
@@ -348,6 +366,8 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 } else struct {
     process_id: u32 = 0,
     secret_key: u32 = 0,
+    cancel_key_len: u16 = 0,
+    cancel_key: [256]u8 = [_]u8{0} ** 256,
     ready: bool = false,
     in_transaction: bool = false,
 
@@ -388,6 +408,7 @@ pub const GssEncConnection = if (builtin.os.tag == .linux) struct {
 };
 
 fn writeFrame(stream: net.Stream, bytes: []const u8) !void {
+    if (bytes.len > std.math.maxInt(u32)) return error.MessageTooLarge;
     var len_buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_buf, @intCast(bytes.len), .big);
     try net.writeAllStream(stream, &len_buf);
@@ -474,6 +495,14 @@ test "gssenc writeFrame prefixes length and payload" {
     try std.testing.expect(ctx.ok);
     try std.testing.expectEqual(@as(u32, 5), ctx.frame_len);
     try std.testing.expectEqualStrings("hello", ctx.payload[0..ctx.payload_len]);
+}
+
+test "gssenc writeFrame rejects oversized payload length" {
+    const stream: net.Stream = undefined;
+    const too_large_len: usize = @as(usize, std.math.maxInt(u32)) + 1;
+    const payload = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
+
+    try std.testing.expectError(error.MessageTooLarge, writeFrame(stream, payload));
 }
 
 test "gssenc readHandshakeFrame reads length-prefixed payload" {

@@ -220,6 +220,46 @@ test "raw policy rejects expr.raw in public ast commands" {
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 
+test "raw policy rejects distinct on escape hatch expressions in public ast commands" {
+    const distinct_on = [_]Expr{.{ .exists_subquery = .{ .sql = "SELECT 1 FROM pg_class LIMIT 1" } }};
+    const cmd = QailCmd.get("users").select(&.{Expr.col("id")}).distinctOn(&distinct_on);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects returning escape hatch expressions in public ast commands" {
+    const returning = [_]Expr{.{ .subquery = .{ .sql = "SELECT pg_sleep(1)" } }};
+    const cmd = QailCmd.get("users").returningCols(&returning);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects where escape hatch expressions in public ast commands" {
+    const left: Expr = .{ .exists_subquery = .{ .sql = "SELECT 1 FROM pg_roles LIMIT 1" } };
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .left = left,
+            .op = .eq,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects having escape hatch expressions in public ast commands" {
+    const left: Expr = .{ .subquery = .{ .sql = "SELECT count(*) FROM pg_class" } };
+    const having = [_]ast.WhereClause{.{
+        .condition = .{
+            .left = left,
+            .op = .eq,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users")
+        .groupBy(&.{"id"})
+        .havingClauses(&having);
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
 test "raw policy rejects subquery expressions in public ast commands" {
     const cols = [_]Expr{.{ .subquery = .{ .sql = "SELECT count(*) FROM users" } }};
     const cmd = QailCmd.get("users").select(&cols);
@@ -290,6 +330,25 @@ test "raw policy allows typed set op queries in public ast commands" {
     try rejectPublicRuntimeCmd(&cmd);
 }
 
+test "raw policy allows typed distinct on, returning, and having clauses" {
+    const distinct_on = [_]Expr{Expr.col("id")};
+    const returning = [_]Expr{ Expr.col("id"), Expr.col("name") };
+    const having = [_]ast.WhereClause{.{
+        .condition = .{
+            .left = Expr.col("id"),
+            .op = .eq,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users")
+        .select(&.{ Expr.col("id"), Expr.col("name") })
+        .distinctOn(&distinct_on)
+        .groupBy(&.{"id"})
+        .havingClauses(&having)
+        .returningCols(&returning);
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
 test "raw policy allows typed policy predicates in public ast commands" {
     const left = Expr.col("tenant_id");
     const right = Expr.int(42);
@@ -337,24 +396,21 @@ test "raw policy allows typed lock table mode" {
 }
 
 test "source: public driver raw runtime api is not re-exported" {
-    const allocator = std.testing.allocator;
-
-    const ast_mod = try std.fs.cwd().readFileAlloc(allocator, "src/ast/mod.zig", 32 * 1024);
-    defer allocator.free(ast_mod);
+    const ast_mod = @embedFile("../ast/mod.zig");
     try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const raw_cmd =") == null);
     try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const trusted_policy_sql =") == null);
     try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const trusted_nested_query =") == null);
 
-    const expr_src = try std.fs.cwd().readFileAlloc(allocator, "src/ast/expr.zig", 48 * 1024);
-    defer allocator.free(expr_src);
+    const expr_src = @embedFile("../ast/expr.zig");
     try std.testing.expect(std.mem.indexOf(u8, expr_src, "pub fn raw(") == null);
 
-    const driver_mod = try std.fs.cwd().readFileAlloc(allocator, "src/driver/mod.zig", 32 * 1024);
-    defer allocator.free(driver_mod);
+    const cmd_src = @embedFile("../ast/cmd.zig");
+    try std.testing.expect(std.mem.indexOf(u8, cmd_src, "pub fn raw(") == null);
+
+    const driver_mod = @embedFile("mod.zig");
     try std.testing.expect(std.mem.indexOf(u8, driver_mod, "pub const raw_sql =") == null);
     try std.testing.expect(std.mem.indexOf(u8, driver_mod, "pub const raw_cmd =") == null);
 
-    const driver_src = try std.fs.cwd().readFileAlloc(allocator, "src/driver/driver.zig", 96 * 1024);
-    defer allocator.free(driver_src);
+    const driver_src = @embedFile("driver.zig");
     try std.testing.expect(std.mem.indexOf(u8, driver_src, "pub fn executeRaw(") == null);
 }

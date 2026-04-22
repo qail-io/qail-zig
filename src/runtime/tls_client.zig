@@ -11,6 +11,7 @@ const Certificate = std.crypto.Certificate;
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
 const channel_binding = @import("../driver/tls/channel_binding.zig");
+const io_compat = @import("io.zig");
 
 const max_ciphertext_len = tls.max_ciphertext_len;
 const hmacExpandLabel = tls.hmacExpandLabel;
@@ -198,7 +199,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
     const host_len: u16 = @intCast(host.len);
 
     var random_buffer: [176]u8 = undefined;
-    crypto.random.bytes(&random_buffer);
+    std.Io.random(io_compat.runtimeIo(), &random_buffer);
     const client_hello_rand = random_buffer[0..32].*;
     var key_seq: u64 = 0;
     var server_hello_rand: [32]u8 = undefined;
@@ -328,7 +329,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
     var handshake_state: HandshakeState = .hello;
     var handshake_cipher: tls.HandshakeCipher = undefined;
     var main_cert_pub_key: CertificatePublicKey = undefined;
-    const now_sec = std.time.timestamp();
+    const now_sec = std.Io.Clock.now(.real, io_compat.runtimeIo()).toSeconds();
     var tls_server_end_point_binding: ?[]u8 = null;
     errdefer if (tls_server_end_point_binding) |binding| {
         if (options.channel_binding_allocator) |allocator| allocator.free(binding);
@@ -341,6 +342,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
         // Ensure the input buffer pointer is stable in this scope.
         input.rebase(tls.max_ciphertext_record_len) catch |err| switch (err) {
             error.EndOfStream => {}, // We have assurance the remainder of stream can be buffered.
+            error.ReadFailed => return error.ReadFailed,
         };
         const record_header = input.peek(tls.record_header_len) catch |err| switch (err) {
             error.EndOfStream => return error.TlsConnectionTruncated,
@@ -1164,7 +1166,7 @@ fn readIndirect(c: *Client) Reader.Error!usize {
                 P.AEAD.decrypt(cleartext, ciphertext, auth_tag, ad, nonce, pv.server_key) catch
                     return failRead(c, error.TlsBadRecordMac);
                 // TODO use scalar, non-slice version
-                const msg = mem.trimRight(u8, cleartext, "\x00");
+                const msg = mem.trimEnd(u8, cleartext, "\x00");
                 break :cleartext .{ msg.len - 1, @enumFromInt(msg[msg.len - 1]) };
             },
             .tls_1_2 => {
@@ -1338,7 +1340,7 @@ const KeyShare = struct {
 
     fn init(seed: [112]u8) error{IdentityElement}!KeyShare {
         return .{
-            .ml_kem768_kp = .generate(),
+            .ml_kem768_kp = .generate(io_compat.runtimeIo()),
             .secp256r1_kp = try .generateDeterministic(seed[0..32].*),
             .secp384r1_kp = try .generateDeterministic(seed[32..80].*),
             .x25519_kp = try .generateDeterministic(seed[80..112].*),

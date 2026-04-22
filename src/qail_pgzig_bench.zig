@@ -14,18 +14,17 @@ const qail = @import("qail");
 const bench = @import("qail_pgzig_bench/workloads.zig");
 const bench_runner = @import("qail_pgzig_bench/runner.zig");
 
-const process_compat = qail.compat.process;
+const io_compat = qail.runtime.io;
 const Mode = bench.Mode;
 const Runner = bench.Runner;
 const Workload = bench.Workload;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
     const allocator = arena_state.allocator();
-    const stdout = std.fs.File.stdout().deprecatedWriter();
 
-    const args = try process_compat.argsAlloc(allocator);
+    const args = try init.args.toSlice(allocator);
 
     var runner: ?Runner = null;
     var mode: ?Mode = null;
@@ -75,23 +74,29 @@ pub fn main() !void {
     };
 
     if (plain) {
-        try stdout.print("{d:.3}\n", .{result.qps});
+        try stdoutPrint("{d:.3}\n", .{result.qps});
         return;
     }
 
-    try stdout.print("{s} {s}/{s}: {d:.0} q/s", .{
+    try stdoutPrint("{s} {s}/{s}: {d:.0} q/s", .{
         @tagName(selected_runner),
         @tagName(selected_mode),
         @tagName(workload),
         result.qps,
     });
     if (result.rows_per_sec) |rows_per_sec| {
-        try stdout.print(" | {d:.0} rows/s", .{rows_per_sec});
+        try stdoutPrint(" | {d:.0} rows/s", .{rows_per_sec});
     }
     if (result.mib_per_sec) |mib_per_sec| {
-        try stdout.print(" | {d:.2} MiB/s", .{mib_per_sec});
+        try stdoutPrint(" | {d:.2} MiB/s", .{mib_per_sec});
     }
-    try stdout.print(" | checksum=0x{x}\n", .{result.checksum});
+    try stdoutPrint(" | checksum=0x{x}\n", .{result.checksum});
+}
+
+fn stdoutPrint(comptime fmt: []const u8, args: anytype) !void {
+    var buffer: [1024]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buffer, fmt, args);
+    try io_compat.writeAllStdout(line);
 }
 
 fn usageAndExit(reason: []const u8) noreturn {

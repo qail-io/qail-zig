@@ -13,4 +13,3 @@ pub const Condition = struct {
     /// Whether to unnest array values.
     is_array_unnest: bool = false,
 };
-

@@ -9,7 +9,7 @@
 const std = @import("std");
 const Decoder = @import("../protocol/decoder.zig").Decoder;
 
-fn fuzzDecoder(_: @TypeOf(.{}), input: []const u8) anyerror!void {
+fn fuzzDecoderInput(input: []const u8) anyerror!void {
     // 1) readHeader — parses message type byte + u32 length
     {
         var decoder = Decoder.init(input);
@@ -79,6 +79,12 @@ fn fuzzDecoder(_: @TypeOf(.{}), input: []const u8) anyerror!void {
             }
         } else |_| {}
     }
+}
+
+fn fuzzDecoder(_: @TypeOf(.{}), smith: *std.testing.Smith) anyerror!void {
+    var buf: [4096]u8 = undefined;
+    const n: usize = @intCast(smith.slice(&buf));
+    try fuzzDecoderInput(buf[0..n]);
 }
 
 test "fuzz: protocol decoder never panics on arbitrary bytes" {

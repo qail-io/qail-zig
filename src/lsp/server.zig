@@ -6,7 +6,7 @@
 const std = @import("std");
 const json = std.json;
 const protocol = @import("protocol.zig");
-const io = @import("qail").compat.io;
+const io = @import("qail").runtime.io;
 const grammar = @import("qail").parser.grammar;
 
 pub const QailServer = struct {
@@ -364,8 +364,8 @@ pub const QailServer = struct {
 // ==================== Main Entry Point ====================
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(gpa.deinit() == .ok);
     const allocator = gpa.allocator();
 
     var server = QailServer.init(allocator);
