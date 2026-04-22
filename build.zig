@@ -10,6 +10,7 @@ fn passEnvironment(run: *std.Build.Step.Run, b: *std.Build, names: []const []con
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const target_os = target.result.os.tag;
 
     // ==================== Library Module ====================
     // The main QAIL Zig library (pure Zig, no FFI)
@@ -456,23 +457,30 @@ pub fn build(b: *std.Build) void {
     pipeline_step.dependOn(&run_pipeline.step);
 
     // ==================== Async Connection Test ====================
-    const async_test = b.addExecutable(.{
-        .name = "qail-async-test",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test_async.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "qail", .module = qail_mod },
-            },
-        }),
-    });
-    b.installArtifact(async_test);
-
-    const run_async = b.addRunArtifact(async_test);
-    run_async.step.dependOn(b.getInstallStep());
     const async_step = b.step("async", "Run async connection test");
-    async_step.dependOn(&run_async.step);
+    if (target_os == .windows) {
+        const async_unavailable = b.addFail(
+            "qail-async-test is not supported on Windows yet.",
+        );
+        async_step.dependOn(&async_unavailable.step);
+    } else {
+        const async_test = b.addExecutable(.{
+            .name = "qail-async-test",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/test_async.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "qail", .module = qail_mod },
+                },
+            }),
+        });
+        b.installArtifact(async_test);
+
+        const run_async = b.addRunArtifact(async_test);
+        run_async.step.dependOn(b.getInstallStep());
+        async_step.dependOn(&run_async.step);
+    }
 
     // ==================== Check Step (fast compile check) ====================
     const check = b.addTest(.{
