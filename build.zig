@@ -1,5 +1,12 @@
 const std = @import("std");
 
+fn passEnvironment(run: *std.Build.Step.Run, b: *std.Build, names: []const []const u8) void {
+    for (names) |name| {
+        const value = b.graph.environ_map.get(name) orelse continue;
+        run.setEnvironmentVariable(name, value);
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -264,11 +271,56 @@ pub fn build(b: *std.Build) void {
     gssenc_smoke.root_module.link_libc = true;
 
     const run_gssenc_smoke = b.addRunArtifact(gssenc_smoke);
+    passEnvironment(run_gssenc_smoke, b, &.{
+        "PGHOST",
+        "PGPORT",
+        "PGUSER",
+        "PGDATABASE",
+        "PGPASSWORD",
+        "KRB5_CONFIG",
+        "KRB5CCNAME",
+        "QAIL_KRB5_SERVICE",
+        "QAIL_KRB5_TARGET_NAME",
+        "QAIL_GSS_DEBUG",
+    });
     if (b.args) |args| {
         run_gssenc_smoke.addArgs(args);
     }
     const gssenc_smoke_step = b.step("gssenc-smoke", "Run Linux Kerberos/GSSENC smoke test against real PostgreSQL");
     gssenc_smoke_step.dependOn(&run_gssenc_smoke.step);
+
+    // ==================== TLS/SCRAM Smoke Test ====================
+    const tls_smoke = b.addExecutable(.{
+        .name = "qail-tls-smoke",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tls_smoke_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "qail", .module = qail_mod },
+            },
+        }),
+    });
+    // The smoke test reads connection settings from the process environment,
+    // which currently relies on libc-backed `environ` on Linux.
+    tls_smoke.root_module.link_libc = true;
+
+    const run_tls_smoke = b.addRunArtifact(tls_smoke);
+    passEnvironment(run_tls_smoke, b, &.{
+        "PGHOST",
+        "PGPORT",
+        "PGUSER",
+        "PGDATABASE",
+        "PGPASSWORD",
+        "QAIL_TLS_SERVER_NAME",
+        "QAIL_TLS_VERIFY",
+        "QAIL_SCRAM_CHANNEL_BINDING",
+    });
+    if (b.args) |args| {
+        run_tls_smoke.addArgs(args);
+    }
+    const tls_smoke_step = b.step("tls-smoke", "Run TLS/SCRAM smoke test against real PostgreSQL");
+    tls_smoke_step.dependOn(&run_tls_smoke.step);
 
     // ==================== I/O Benchmark (real DB queries) ====================
     const io_bench = b.addExecutable(.{
