@@ -4,7 +4,7 @@
 //! Port of qail.rs/qail-pg/src/driver/cancel.rs
 
 const std = @import("std");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 
 /// PostgreSQL CancelRequest code: 80877102
 const CANCEL_REQUEST_CODE: i32 = 80877102;

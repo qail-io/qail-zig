@@ -3,7 +3,7 @@
 // TCP socket connection to PostgreSQL server.
 
 const std = @import("std");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const io_backend_mod = @import("io_backend.zig");
 

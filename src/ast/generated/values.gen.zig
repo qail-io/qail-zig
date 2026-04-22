@@ -64,4 +64,3 @@ pub const Value = union(enum) {
     /// JSON data.
     json: []const u8,
 };
-

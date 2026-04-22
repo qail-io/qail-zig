@@ -13,7 +13,7 @@ const qail = @import("qail");
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
-const PgDriver = qail.driver.PgDriver;
+const PgDriver = qail.driver.driver.PgDriver;
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;

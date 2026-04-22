@@ -7,7 +7,7 @@
 // The primary path is AST → Wire Protocol via ast_encoder.zig
 
 const std = @import("std");
-const io = @import("../compat/io.zig");
+const io = @import("../runtime/io.zig");
 const commands = @import("postgres/commands.zig");
 const render = @import("postgres/render.zig");
 const ast = struct {

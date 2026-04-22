@@ -2,12 +2,12 @@ const std = @import("std");
 const qail = @import("qail");
 const pg = @import("pg");
 const bench = @import("workloads.zig");
-const process_compat = @import("../compat/process.zig");
+const process_compat = @import("../runtime/process.zig");
 
-const time = qail.compat.time;
-const Connection = qail.driver.Connection;
-const PgPool = qail.driver.PgPool;
-const PoolConfig = qail.driver.PoolConfig;
+const time = qail.runtime.time;
+const Connection = qail.driver.connection.Connection;
+const PgPool = qail.driver.pool.PgPool;
+const PoolConfig = qail.driver.pool.PoolConfig;
 const Encoder = qail.protocol.Encoder;
 
 pub const DbConfig = bench.DbConfig;
@@ -516,7 +516,7 @@ fn signalDone(sync: *WorkerSync, result: *WorkerResult, err: ?anyerror) void {
 fn waitForStart(sync: *WorkerSync) void {
     while (!sync.start_flag.load(.acquire)) {
         std.Thread.yield() catch {
-            std.Io.sleep(qail.compat.io.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {};
+            std.Io.sleep(qail.runtime.io.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {};
         };
     }
 }
@@ -524,7 +524,7 @@ fn waitForStart(sync: *WorkerSync) void {
 fn waitForCounter(counter: *std.atomic.Value(usize), expected: usize) void {
     while (counter.load(.acquire) < expected) {
         std.Thread.yield() catch {
-            std.Io.sleep(qail.compat.io.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {};
+            std.Io.sleep(qail.runtime.io.runtimeIo(), std.Io.Duration.fromMicroseconds(100), .awake) catch {};
         };
     }
 }

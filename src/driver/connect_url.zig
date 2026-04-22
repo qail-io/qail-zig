@@ -3,7 +3,7 @@ const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
 const auth_options_mod = @import("auth_options.zig");
 const tls_driver_mod = @import("tls.zig");
-const io_compat = @import("../compat/io.zig");
+const io_compat = @import("../runtime/io.zig");
 
 const StartupParam = protocol.Encoder.StartupParam;
 const AuthOptions = conn_mod.AuthOptions;
@@ -291,10 +291,6 @@ fn parseAuthMode(value: []const u8) !AuthOptions {
             .allow_sspi = true,
             .scram_channel_binding = .prefer,
         };
-    }
-
-    if (std.ascii.eqlIgnoreCase(value, "compat") or std.ascii.eqlIgnoreCase(value, "default")) {
-        return .{};
     }
 
     return error.InvalidAuthMode;

@@ -12,15 +12,15 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 const Assignment = qail.ast.Assignment;
-const Connection = qail.driver.Connection;
-const Pipeline = qail.driver.Pipeline;
-const PgPool = qail.driver.PgPool;
-const PgDriver = qail.driver.PgDriver;
+const Connection = qail.driver.connection.Connection;
+const Pipeline = qail.driver.pipeline.Pipeline;
+const PgPool = qail.driver.pool.PgPool;
+const PgDriver = qail.driver.driver.PgDriver;
 
 const TOTAL_QUERIES: usize = 100_000;
 const BATCH_SIZE: usize = 500;

@@ -21,7 +21,7 @@ pub const Action = enum {
     /// DROP TABLE.
     drop,
     /// ALTER TABLE (add column).
-    @"mod",
+    mod,
     /// UPSERT / ON CONFLICT … DO UPDATE.
     over,
     /// CTE / WITH clause.
@@ -51,7 +51,7 @@ pub const Action = enum {
     /// JSONB_TO_RECORDSET.
     json_table,
     /// COPY … TO STDOUT.
-    export,
+    @"export",
     /// TRUNCATE TABLE.
     truncate,
     /// EXPLAIN.
@@ -356,4 +356,3 @@ pub const Distance = enum {
     /// Dot product.
     dot,
 };
-

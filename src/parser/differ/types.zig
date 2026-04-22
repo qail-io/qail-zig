@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const io = @import("../../compat/io.zig");
+const io = @import("../../runtime/io.zig");
 const render = @import("../../transpiler/postgres/render.zig");
 const schema = @import("../schema.zig");
 

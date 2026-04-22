@@ -1,14 +1,14 @@
 const std = @import("std");
 const qail = @import("qail");
 
-const process_compat = qail.compat.process;
-const QailCmd = qail.QailCmd;
-const Expr = qail.Expr;
-const WhereClause = qail.cmd.WhereClause;
-const PgDriver = qail.PgDriver;
-const PgBytesRow = qail.PgBytesRow;
-const CancelToken = qail.CancelToken;
-const Connection = qail.driver.Connection;
+const process_compat = qail.runtime.process;
+const QailCmd = qail.ast.QailCmd;
+const Expr = qail.ast.Expr;
+const WhereClause = qail.ast.cmd.WhereClause;
+const PgDriver = qail.driver.driver.PgDriver;
+const PgBytesRow = qail.driver.row.PgBytesRow;
+const CancelToken = qail.driver.driver.CancelToken;
+const Connection = qail.driver.connection.Connection;
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;
 const AstEncoder = qail.protocol.AstEncoder;
@@ -615,7 +615,7 @@ fn caseMidQueryCancelRecovery(allocator: std.mem.Allocator, cfg: *const DbConfig
     };
     const long_cmd = QailCmd.get("pg_database").select(&.{sleep_expr}).limit(1);
 
-    const start_ms = std.Io.Clock.now(.real, qail.compat.io.runtimeIo()).toMilliseconds();
+    const start_ms = std.Io.Clock.now(.real, qail.runtime.io.runtimeIo()).toMilliseconds();
     if (driver.fetchAll(&long_cmd)) |rows| {
         for (rows) |*row| row.deinit();
         allocator.free(rows);
@@ -631,7 +631,7 @@ fn caseMidQueryCancelRecovery(allocator: std.mem.Allocator, cfg: *const DbConfig
     worker_joined = true;
     if (cancel_ctx.send_err) |send_err| return send_err;
 
-    const elapsed_ms = std.Io.Clock.now(.real, qail.compat.io.runtimeIo()).toMilliseconds() - start_ms;
+    const elapsed_ms = std.Io.Clock.now(.real, qail.runtime.io.runtimeIo()).toMilliseconds() - start_ms;
     if (elapsed_ms >= 7_000) return error.CancellationTooLate;
 
     const health_cmd = QailCmd.get("pg_database").select(&.{Expr.count()});

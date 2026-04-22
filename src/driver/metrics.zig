@@ -4,7 +4,7 @@
 //! latency histogram, and Prometheus export.
 
 const std = @import("std");
-const io = @import("../compat/io.zig");
+const io = @import("../runtime/io.zig");
 
 /// Latency bucket boundaries in nanoseconds
 const BUCKET_BOUNDS_NS = [_]u64{

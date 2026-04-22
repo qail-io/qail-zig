@@ -4,20 +4,20 @@ The high-signal public surface for qail-zig currently centers on the PostgreSQL 
 
 ## Core Exports
 
-- `qail.PgDriver`
-- `qail.QailCmd`
-- `qail.Expr`
+- `qail.driver.driver.PgDriver`
+- `qail.ast.QailCmd`
+- `qail.ast.Expr`
 - `qail.validateAst`
 
 ## Driver Module
 
-- `qail.driver.Connection`
-- `qail.driver.Pipeline`
-- `qail.driver.PgPool`
-- `qail.driver.TlsConnection`
-- `qail.driver.ConnectOptions`
-- `qail.driver.AuthOptions`
-- `qail.driver.RlsContext`
+- `qail.driver.connection.Connection`
+- `qail.driver.pipeline.Pipeline`
+- `qail.driver.pool.PgPool`
+- `qail.driver.tls.TlsConnection`
+- `qail.driver.connect_url.ConnectOptions`
+- `qail.driver.auth_options.AuthOptions`
+- `qail.driver.rls.RlsContext`
 
 ## Tooling
 

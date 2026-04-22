@@ -6,7 +6,7 @@
 const std = @import("std");
 const posix = std.posix;
 const builtin = @import("builtin");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const message_limits = @import("message_limits.zig");
 

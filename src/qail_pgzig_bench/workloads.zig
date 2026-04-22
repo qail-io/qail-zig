@@ -1,8 +1,8 @@
 const std = @import("std");
 const qail = @import("qail");
 
-const Expr = qail.Expr;
-const QailCmd = qail.QailCmd;
+const Expr = qail.ast.Expr;
+const QailCmd = qail.ast.QailCmd;
 const WhereClause = qail.ast.WhereClause;
 
 pub const DEFAULT_HOST = "127.0.0.1";

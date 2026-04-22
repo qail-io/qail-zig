@@ -4,10 +4,10 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
-const AsyncConnection = qail.driver.AsyncConnection;
-const Connection = qail.driver.Connection;
+const AsyncConnection = qail.driver.async_connection.AsyncConnection;
+const Connection = qail.driver.connection.Connection;
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;

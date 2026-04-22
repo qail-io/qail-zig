@@ -3,7 +3,7 @@
 // Port of Rust qail-core/src/ast/values.rs
 
 const std = @import("std");
-const io = @import("../compat/io.zig");
+const io = @import("../runtime/io.zig");
 
 /// Time interval unit for duration expressions
 pub const IntervalUnit = enum {

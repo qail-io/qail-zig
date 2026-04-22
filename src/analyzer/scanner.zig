@@ -4,7 +4,7 @@
 // used by your application, for migration impact analysis.
 
 const std = @import("std");
-const io_compat = @import("../compat/io.zig");
+const io_compat = @import("../runtime/io.zig");
 
 /// Type of query found in source code
 pub const QueryType = enum {

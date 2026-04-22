@@ -1,13 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const qail = @import("qail");
-const process_compat = qail.compat.process;
+const process_compat = qail.runtime.process;
 
-const QailCmd = qail.QailCmd;
-const Expr = qail.Expr;
-const PgDriver = qail.PgDriver;
-const ConnectOptions = qail.ConnectOptions;
-const LinuxKrb5ProviderConfig = qail.LinuxKrb5ProviderConfig;
+const QailCmd = qail.ast.QailCmd;
+const Expr = qail.ast.Expr;
+const PgDriver = qail.driver.driver.PgDriver;
+const ConnectOptions = qail.driver.connect_url.ConnectOptions;
+const LinuxKrb5ProviderConfig = qail.driver.kerberos_preflight.LinuxKrb5ProviderConfig;
 
 const DEFAULT_HOST = "pgkerb.local";
 const DEFAULT_PORT: u16 = 5432;
@@ -41,7 +41,7 @@ pub fn main() !void {
 
     const cfg = try loadConfig(arena);
 
-    var provider = try qail.linuxKrb5TokenProvider(allocator, LinuxKrb5ProviderConfig{
+    var provider = try qail.driver.kerberos_provider.linuxKrb5TokenProvider(allocator, LinuxKrb5ProviderConfig{
         .host = cfg.host,
         .service = cfg.service,
         .target_name = cfg.target_name,
@@ -64,7 +64,7 @@ pub fn main() !void {
     );
     defer driver.deinit();
 
-    const now_ns = std.Io.Clock.now(.real, qail.compat.io.runtimeIo()).toNanoseconds();
+    const now_ns = std.Io.Clock.now(.real, qail.runtime.io.runtimeIo()).toNanoseconds();
     const table_name = try std.fmt.allocPrint(allocator, "qail_gssenc_smoke_{d}", .{now_ns});
     defer allocator.free(table_name);
 

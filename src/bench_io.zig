@@ -4,9 +4,9 @@
 
 const std = @import("std");
 const qail = @import("qail.zig");
-const net = @import("compat/net.zig");
-const process_compat = @import("compat/process.zig");
-const time_compat = @import("compat/time.zig");
+const net = @import("runtime/net.zig");
+const process_compat = @import("runtime/process.zig");
+const time_compat = @import("runtime/time.zig");
 
 const QUERIES: usize = 10_000;
 const BATCH_SIZE: usize = 100;

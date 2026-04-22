@@ -4,7 +4,7 @@
 //! messages during connection startup/authentication.
 
 const std = @import("std");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const Connection = @import("../driver/connection.zig").Connection;
 const AuthOptions = @import("../driver/auth_options.zig").AuthOptions;
 
