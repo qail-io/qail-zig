@@ -4,16 +4,30 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+## v0.8.0 — 2026-04-22
+
+### Breaking
+
+- qail-zig now targets Zig `0.16+` only; Zig `0.15` compatibility shims and the older std-I/O fallback path were removed.
+- The public compatibility modules moved from `src/compat/*` to `src/runtime/*`; downstream imports should switch to the new runtime namespace.
+- Std-I/O runtime selection now uses `QAIL_STD_IO_MODE=threaded|evented`; the earlier evented toggle path is no longer the supported contract.
+- `scripts/zigw` is now a thin convenience wrapper around `zig build`; workflows that depended on the older direct-build workaround behavior should update.
+
 ### Changed
 
-- The project now targets Zig `0.16+` only; legacy Zig `0.15` compatibility shims have been removed from the std-I/O compatibility layer.
-- `compat/io` now targets Zig 0.16 `std.Io` only, using the threaded runtime by default with optional evented runtime enablement via `QAIL_STD_IO_EVENTED`.
-- `scripts/zigw` is now a thin convenience wrapper over `zig build`; the old Zig `0.15` direct-build workaround path was removed.
+- PostgreSQL protocol processing now runs through the lower-level raw backend-message path, reducing parsing overhead and tightening startup/query handling around the driver core.
+- Benchmark-heavy README tables were removed in favor of the canonical website pages at `/zig` and `/zig/benchmarks`.
 
 ### Fixed
 
+- Linux TLS startup/auth flows now complete cleanly on a real PostgreSQL server, including live `SCRAM-SHA-256` over TLS and `channel_binding=require` validation.
+- TLS transport state is now kept in stable heap-backed storage, fixing connection-move pointer invalidation in the local TLS client path.
+- Linux `GSSENCRequest` handling no longer trips the Zig 0.16 nonblocking `EAGAIN` panic path during request probing.
+- Prepared execution now accepts backend `.no_data` responses in the GSSENC path, fixing the cached prepared-statement flow validated against the Linux Kerberos/PostgreSQL smoke environment.
+- Added and refreshed release validation coverage with the real-DB TLS smoke path, the Linux enterprise-auth smoke workflow, and regenerated AST files to restore parity CI.
 - Analyzer scanner parity with qail.rs was improved for Rust-style builder chains (`Qail::get(...).columns(...).eq(...).order_by(...)`), including resolution of const/let table and column bindings.
 - Scanner preprocessing now preserves line boundaries when joining multiline `let`/`const` statements, preventing inline `//` comments inside const column arrays from swallowing the remainder of the statement.
+- Release workflow localhost socket hangs were fixed, and timeout connects now use the runtime socket domain cast correctly.
 
 ## v0.7.3 — 2026-04-01
 

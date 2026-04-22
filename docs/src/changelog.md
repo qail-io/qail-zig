@@ -2,12 +2,12 @@
 
 QAIL Zig now tracks its own release notes separately from qail.rs.
 
-## Current Highlights (`v0.7.3`)
+## Current Highlights (`v0.8.0`)
 
-- The PostgreSQL driver track now includes a real Linux Kerberos/GSSENC smoke workflow against a provisioned PostgreSQL service principal.
-- The smoke path is now validated on CI with the correct Linux runtime shape: RFC hostbased-service OID fallback plus libc-backed `dlopen`/`dlsym` for GSSAPI loading.
-- README/docs wording now reflects the real implementation boundary: Zig-first core runtime, with optional Linux libc/GSSAPI integration for Kerberos/GSSENC instead of a blanket "pure Zig, zero FFI" claim.
-- Package metadata, readme, and changelog references are aligned on `v0.7.3`.
+- qail-zig is now Zig `0.16+` only, with the older compatibility layer consolidated into the `runtime/*` namespace.
+- The Linux TLS path was fixed and live-validated against a real PostgreSQL server, including TLS SCRAM channel binding.
+- The Linux Kerberos/GSSENC smoke path remains green in CI and now shares the same tightened release validation story.
+- Package metadata, readme, and changelog references are aligned on `v0.8.0`.
 
 For the repository changelog, see:
 

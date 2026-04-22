@@ -5,7 +5,7 @@
 [![Zig](https://img.shields.io/badge/Zig-0.16+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.7.3-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.7.3)
+[![Version](https://img.shields.io/badge/version-0.8.0-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.8.0)
 
 > **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
