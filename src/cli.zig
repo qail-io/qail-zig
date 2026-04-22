@@ -14,7 +14,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const QailCmd = @import("ast/cmd.zig").QailCmd;
 const Expr = @import("ast/expr.zig").Expr;
-const io_compat = @import("compat/io.zig");
+const io_compat = @import("runtime/io.zig");
 
 const print = std.debug.print;
 const data_safety = @import("data_safety.zig");
@@ -316,7 +316,7 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             };
 
             const driver = @import("driver/mod.zig");
-            var pg = driver.PgDriver.connect(
+            var pg = driver.driver.PgDriver.connect(
                 allocator,
                 conn_info.host,
                 conn_info.port,
@@ -495,7 +495,7 @@ fn runMigrate(allocator: Allocator, action: MigrateAction) !void {
             };
 
             const driver = @import("driver/mod.zig");
-            var pg = driver.PgDriver.connect(
+            var pg = driver.driver.PgDriver.connect(
                 allocator,
                 conn_info.host,
                 conn_info.port,

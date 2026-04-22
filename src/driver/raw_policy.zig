@@ -332,7 +332,7 @@ test "raw policy allows typed set op queries in public ast commands" {
 
 test "raw policy allows typed distinct on, returning, and having clauses" {
     const distinct_on = [_]Expr{Expr.col("id")};
-    const returning = [_]Expr{Expr.col("id"), Expr.col("name")};
+    const returning = [_]Expr{ Expr.col("id"), Expr.col("name") };
     const having = [_]ast.WhereClause{.{
         .condition = .{
             .left = Expr.col("id"),
@@ -396,24 +396,21 @@ test "raw policy allows typed lock table mode" {
 }
 
 test "source: public driver raw runtime api is not re-exported" {
-    const allocator = std.testing.allocator;
-
-    const ast_mod = try std.fs.cwd().readFileAlloc(allocator, "src/ast/mod.zig", 32 * 1024);
-    defer allocator.free(ast_mod);
+    const ast_mod = @embedFile("../ast/mod.zig");
     try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const raw_cmd =") == null);
     try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const trusted_policy_sql =") == null);
     try std.testing.expect(std.mem.indexOf(u8, ast_mod, "pub const trusted_nested_query =") == null);
 
-    const expr_src = try std.fs.cwd().readFileAlloc(allocator, "src/ast/expr.zig", 48 * 1024);
-    defer allocator.free(expr_src);
+    const expr_src = @embedFile("../ast/expr.zig");
     try std.testing.expect(std.mem.indexOf(u8, expr_src, "pub fn raw(") == null);
 
-    const driver_mod = try std.fs.cwd().readFileAlloc(allocator, "src/driver/mod.zig", 32 * 1024);
-    defer allocator.free(driver_mod);
+    const cmd_src = @embedFile("../ast/cmd.zig");
+    try std.testing.expect(std.mem.indexOf(u8, cmd_src, "pub fn raw(") == null);
+
+    const driver_mod = @embedFile("mod.zig");
     try std.testing.expect(std.mem.indexOf(u8, driver_mod, "pub const raw_sql =") == null);
     try std.testing.expect(std.mem.indexOf(u8, driver_mod, "pub const raw_cmd =") == null);
 
-    const driver_src = try std.fs.cwd().readFileAlloc(allocator, "src/driver/driver.zig", 96 * 1024);
-    defer allocator.free(driver_src);
+    const driver_src = @embedFile("driver.zig");
     try std.testing.expect(std.mem.indexOf(u8, driver_src, "pub fn executeRaw(") == null);
 }

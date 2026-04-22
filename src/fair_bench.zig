@@ -4,8 +4,8 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const net = qail.compat.net;
-const time = qail.compat.time;
+const net = qail.runtime.net;
+const time = qail.runtime.time;
 
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;

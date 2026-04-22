@@ -4,7 +4,7 @@
 // NO SQL STRING GENERATION - this is the core of QAIL's philosophy.
 
 const std = @import("std");
-const io = @import("../compat/io.zig");
+const io = @import("../runtime/io.zig");
 const ast = struct {
     pub const cmd = @import("../ast/cmd.zig");
     pub const expr = @import("../ast/expr.zig");

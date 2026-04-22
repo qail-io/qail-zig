@@ -12,9 +12,9 @@
 //!   zig build-exe src/qail_pgx_modes_once.zig -target aarch64-macos.15.0 -O ReleaseFast -femit-bin=/tmp/qail_zig_modes_once
 
 const std = @import("std");
-const io_compat = @import("compat/io.zig");
-const process_compat = @import("compat/process.zig");
-const time = @import("compat/time.zig");
+const io_compat = @import("runtime/io.zig");
+const process_compat = @import("runtime/process.zig");
+const time = @import("runtime/time.zig");
 const ast = @import("ast/mod.zig");
 const Connection = @import("driver/connection.zig").Connection;
 const pool_mod = @import("driver/pool.zig");
@@ -39,7 +39,6 @@ const STMT_NAME = "qail_zig_modes_stmt";
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 1099511628211;
 const BENCH_PAYLOAD_TARGET_ROWS: usize = 20_000;
-const BENCH_MANY_PARAMS_TARGET_ROWS: usize = 512;
 const BENCH_SETUP_LOCK_SQL = "SELECT pg_advisory_lock(60119029)";
 const BENCH_SETUP_UNLOCK_SQL = "SELECT pg_advisory_unlock(60119029)";
 const CREATE_BENCH_PAYLOAD_SQL =
@@ -53,32 +52,7 @@ const CREATE_BENCH_PAYLOAD_SQL =
     "ratio NUMERIC(12, 3) NOT NULL, " ++
     "optional_note TEXT NULL" ++
     ")";
-const WIDE_ROWS_SQL =
-    "SELECT gs AS id, " ++
-    "('harbor-' || gs)::text AS name, " ++
-    "repeat(md5(gs::text), 4) AS bio, " ++
-    "repeat(md5((gs * 17)::text), 3) AS region, " ++
-    "(gs * 11) AS visits, " ++
-    "(gs % 2 = 0) AS active, " ++
-    "round((gs::numeric / 7.0), 3) AS ratio, " ++
-    "CASE WHEN gs % 5 = 0 THEN NULL ELSE repeat(md5((gs * 3)::text), 2) END AS optional_note " ++
-    "FROM generate_series(1, $1::int) AS gs";
-const MANY_PARAMS_SQL =
-    "SELECT " ++
-    "$1::int + $2::int + $3::int + $4::int + $5::int + $6::int + $7::int + $8::int + " ++
-    "$9::int + $10::int + $11::int + $12::int + $13::int + $14::int + $15::int + $16::int + " ++
-    "$17::int + $18::int + $19::int + $20::int + $21::int + $22::int + $23::int + $24::int + " ++
-    "$25::int + $26::int + $27::int + $28::int + $29::int + $30::int + $31::int + $32::int " ++
-    "AS total";
 const MANY_PARAMS_PARAM_COUNT: usize = 32;
-const MANY_PARAM_COLUMNS = buildManyParamColumns();
-const CREATE_BENCH_MANY_PARAMS_SQL = buildManyParamsCreateSql();
-const CREATE_BENCH_MANY_PARAMS_INDEX_SQL = buildManyParamsIndexSql();
-const MANY_PARAMS_SUM_COEFF: usize = blk: {
-    var sum: usize = 0;
-    for (1..MANY_PARAMS_PARAM_COUNT + 1) |idx| sum += idx;
-    break :blk sum;
-};
 
 const PipelineProfile = struct {
     enabled: bool = false,
@@ -197,6 +171,7 @@ const AGGREGATE_COLS = [_]Expr{
     Expr.count().withAlias("row_count"),
 };
 const MANY_PARAM_CLAUSES = buildManyParamClauses();
+const MANY_PARAM_SELECT = [_]Expr{Expr.count()};
 
 const POINT_CMD = QailCmd.get("harbors")
     .select(&POINT_COLS)
@@ -207,12 +182,14 @@ const PAYLOAD_ROWS_CMD = QailCmd.get("qail_bench_payload")
     .where(&PAYLOAD_WHERE)
     .orderBy(&PAYLOAD_ORDER);
 
-const WIDE_ROWS_CMD = QailCmd.raw(WIDE_ROWS_SQL);
+const WIDE_ROWS_CMD = PAYLOAD_ROWS_CMD;
 const AGGREGATE_CMD = QailCmd.get("qail_bench_payload")
     .select(&AGGREGATE_COLS)
     .where(&PAYLOAD_WHERE);
 
-const MANY_PARAMS_CMD = QailCmd.raw(MANY_PARAMS_SQL);
+const MANY_PARAMS_CMD = QailCmd.get("qail_bench_payload")
+    .select(&MANY_PARAM_SELECT)
+    .where(&MANY_PARAM_CLAUSES);
 
 const PoolSync = struct {
     ready_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -326,7 +303,7 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .total_queries = WIDE_ROWS_TOTAL_QUERIES,
             .iterations = WIDE_ROWS_ITERATIONS,
             .result_mode = .wide_rows,
-            .requires_payload = false,
+            .requires_payload = true,
             .requires_many_params = false,
             .cmd = &WIDE_ROWS_CMD,
         },
@@ -346,7 +323,7 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .total_queries = MANY_PARAMS_TOTAL_QUERIES,
             .iterations = MANY_PARAMS_ITERATIONS,
             .result_mode = .scalar_int,
-            .requires_payload = false,
+            .requires_payload = true,
             .requires_many_params = false,
             .cmd = &MANY_PARAMS_CMD,
         },
@@ -446,7 +423,6 @@ fn ensureWorkloadReady(spec: WorkloadSpec) !void {
     errdefer executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL) catch {};
 
     if (spec.requires_payload) try ensureBenchPayload(&conn);
-    if (spec.requires_many_params) try ensureBenchManyParams(&conn);
 
     try executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL);
 }
@@ -477,20 +453,6 @@ fn ensureBenchPayload(conn: *Connection) !void {
 
     try executeSimpleQuery(conn, insert_sql);
     _ = executeSimpleQuery(conn, "ANALYZE qail_bench_payload") catch {};
-}
-
-fn ensureBenchManyParams(conn: *Connection) !void {
-    try executeSimpleQuery(conn, CREATE_BENCH_MANY_PARAMS_SQL);
-    try executeSimpleQuery(conn, CREATE_BENCH_MANY_PARAMS_INDEX_SQL);
-
-    const current_rows = try querySingleInt(conn, "SELECT COALESCE(MAX(slot), 0) FROM qail_bench_many_params");
-    if (current_rows >= BENCH_MANY_PARAMS_TARGET_ROWS) return;
-
-    const insert_sql = try buildManyParamsInsertSql(std.heap.page_allocator, @intCast(current_rows + 1), BENCH_MANY_PARAMS_TARGET_ROWS);
-    defer std.heap.page_allocator.free(insert_sql);
-
-    try executeSimpleQuery(conn, insert_sql);
-    _ = executeSimpleQuery(conn, "ANALYZE qail_bench_many_params") catch {};
 }
 
 fn executeSimpleQuery(conn: *Connection, sql: []const u8) !void {
@@ -565,67 +527,19 @@ fn parseFirstDataRowUInt(payload: []const u8) !usize {
     return std.fmt.parseInt(usize, payload[pos .. pos + len], 10);
 }
 
-fn buildManyParamColumns() [MANY_PARAMS_PARAM_COUNT][]const u8 {
-    var columns: [MANY_PARAMS_PARAM_COUNT][]const u8 = undefined;
-    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        columns[idx] = if (idx + 1 < 10)
-            std.fmt.comptimePrint("p0{d}", .{idx + 1})
-        else
-            std.fmt.comptimePrint("p{d}", .{idx + 1});
-    }
-    return columns;
-}
-
 fn buildManyParamClauses() [MANY_PARAMS_PARAM_COUNT]WhereClause {
     var clauses: [MANY_PARAMS_PARAM_COUNT]WhereClause = undefined;
     inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
         clauses[idx] = .{
             .condition = .{
-                .column = MANY_PARAM_COLUMNS[idx],
+                .column = "id",
                 .op = .eq,
                 .value = .{ .param = idx + 1 },
             },
+            .logical_op = if (idx == 0) .@"and" else .@"or",
         };
     }
     return clauses;
-}
-
-fn buildManyParamsCreateSql() []const u8 {
-    comptime var sql: []const u8 = "CREATE TABLE IF NOT EXISTS qail_bench_many_params (slot INTEGER PRIMARY KEY, total BIGINT NOT NULL";
-    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        sql = sql ++ ", " ++ MANY_PARAM_COLUMNS[idx] ++ " INTEGER NOT NULL";
-    }
-    sql = sql ++ ")";
-    return sql;
-}
-
-fn buildManyParamsIndexSql() []const u8 {
-    comptime var sql: []const u8 = "CREATE UNIQUE INDEX IF NOT EXISTS qail_bench_many_params_lookup_idx ON qail_bench_many_params (";
-    inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        if (idx > 0) sql = sql ++ ", ";
-        sql = sql ++ MANY_PARAM_COLUMNS[idx];
-    }
-    sql = sql ++ ")";
-    return sql;
-}
-
-fn buildManyParamsInsertSql(allocator: std.mem.Allocator, start_slot: usize, end_slot: usize) ![]u8 {
-    var sql = io_compat.AllocatingWriter.init(allocator);
-    defer sql.deinit();
-    const writer = sql.writer();
-
-    try writer.writeAll("INSERT INTO qail_bench_many_params (slot, total");
-    for (MANY_PARAM_COLUMNS) |column| {
-        try writer.writeAll(", ");
-        try writer.writeAll(column);
-    }
-    try writer.writeAll(") SELECT gs, ");
-    try writer.print("(gs * {d})::bigint", .{MANY_PARAMS_SUM_COEFF});
-    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
-        try writer.print(", gs * {d}", .{idx + 1});
-    }
-    try writer.print(" FROM generate_series({d}, {d}) AS gs ON CONFLICT (slot) DO NOTHING", .{ start_slot, end_slot });
-    return sql.toOwnedSlice();
 }
 
 fn runSingleMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult {

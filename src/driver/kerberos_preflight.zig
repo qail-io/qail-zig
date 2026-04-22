@@ -1,6 +1,6 @@
 const std = @import("std");
-const process_compat = @import("../compat/process.zig");
-const io_compat = @import("../compat/io.zig");
+const process_compat = @import("../runtime/process.zig");
+const io_compat = @import("../runtime/io.zig");
 
 pub const LinuxKrb5ProviderConfig = struct {
     /// PostgreSQL service name (typically `postgres`).

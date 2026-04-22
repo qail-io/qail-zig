@@ -13,4 +13,3 @@ pub const Join = struct {
     /// If true, use ON TRUE (unconditional join). Used for joining CTEs.
     on_true: bool = false,
 };
-

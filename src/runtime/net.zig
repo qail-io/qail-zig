@@ -95,18 +95,11 @@ pub fn parseIp4(host: []const u8, port: u16) !Address {
 }
 
 pub fn tcpConnectToAddress(address: Address) !Stream {
-    const stream = address.inner.connect(runtimeIo(), .{
+    const stream = try address.inner.connect(runtimeIo(), .{
         .mode = .stream,
         .protocol = .tcp,
         .timeout = .none,
-    }) catch |err| blk: {
-        if (!io_compat.retryWithThreaded(err)) return err;
-        break :blk try address.inner.connect(runtimeIo(), .{
-            .mode = .stream,
-            .protocol = .tcp,
-            .timeout = .none,
-        });
-    };
+    });
     return Stream.fromInner(stream);
 }
 
@@ -127,19 +120,11 @@ pub fn tcpConnectToHostWithTimeout(
 
 pub fn tcpConnectToAddressWithTimeout(address: Address, timeout_ms: i32) !Stream {
     const timeout = sanitizeTimeout(timeoutFromMs(timeout_ms));
-    const stream = address.inner.connect(runtimeIo(), .{
+    const stream = try address.inner.connect(runtimeIo(), .{
         .mode = .stream,
         .protocol = .tcp,
         .timeout = timeout,
-    }) catch |err| blk: {
-        if (!io_compat.retryWithThreaded(err)) return err;
-        const retry_timeout = sanitizeTimeout(timeout);
-        break :blk try address.inner.connect(runtimeIo(), .{
-            .mode = .stream,
-            .protocol = .tcp,
-            .timeout = retry_timeout,
-        });
-    };
+    });
     return Stream.fromInner(stream);
 }
 
@@ -250,36 +235,20 @@ fn sanitizeTimeout(timeout: Io.Timeout) Io.Timeout {
 
 fn tcpConnectToHostInner(host: []const u8, port: u16, timeout: Io.Timeout) !Stream {
     if (IpAddress.parse(host, port)) |ip_address| {
-        const stream = ip_address.connect(runtimeIo(), .{
+        const stream = try ip_address.connect(runtimeIo(), .{
             .mode = .stream,
             .protocol = .tcp,
             .timeout = timeout,
-        }) catch |err| blk: {
-            if (!io_compat.retryWithThreaded(err)) return err;
-            const retry_timeout = sanitizeTimeout(timeout);
-            break :blk try ip_address.connect(runtimeIo(), .{
-                .mode = .stream,
-                .protocol = .tcp,
-                .timeout = retry_timeout,
-            });
-        };
+        });
         return Stream.fromInner(stream);
     } else |_| {}
 
     const host_name = try HostName.init(host);
-    const stream = HostName.connect(host_name, runtimeIo(), port, .{
+    const stream = try HostName.connect(host_name, runtimeIo(), port, .{
         .mode = .stream,
         .protocol = .tcp,
         .timeout = timeout,
-    }) catch |err| blk: {
-        if (!io_compat.retryWithThreaded(err)) return err;
-        const retry_timeout = sanitizeTimeout(timeout);
-        break :blk try HostName.connect(host_name, runtimeIo(), port, .{
-            .mode = .stream,
-            .protocol = .tcp,
-            .timeout = retry_timeout,
-        });
-    };
+    });
     return Stream.fromInner(stream);
 }
 

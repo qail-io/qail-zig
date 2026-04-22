@@ -4,7 +4,10 @@ const QailCmd = @import("cmd.zig").QailCmd;
 ///
 /// Keeping this in one helper makes raw-call removal incremental and auditable.
 pub fn command(sql: []const u8) QailCmd {
-    return QailCmd.raw(sql);
+    return .{
+        .kind = .raw,
+        .raw_sql = sql,
+    };
 }
 
 test "raw command helper wraps sql" {

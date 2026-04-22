@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const auth_options_mod = @import("auth_options.zig");
 const io_backend_mod = @import("io_backend.zig");

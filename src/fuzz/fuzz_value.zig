@@ -5,7 +5,7 @@
 //! including edge cases like empty strings, max-length arrays, etc.
 
 const std = @import("std");
-const io = @import("../compat/io.zig");
+const io = @import("../runtime/io.zig");
 const Value = @import("../ast/values.zig").Value;
 const IntervalUnit = @import("../ast/values.zig").IntervalUnit;
 

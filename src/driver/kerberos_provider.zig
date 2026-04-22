@@ -2,8 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const auth_options = @import("auth_options.zig");
 const kerberos_preflight = @import("kerberos_preflight.zig");
-const io_compat = @import("../compat/io.zig");
-const process_compat = @import("../compat/process.zig");
+const io_compat = @import("../runtime/io.zig");
+const process_compat = @import("../runtime/process.zig");
 
 pub const LinuxKrb5ProviderConfig = kerberos_preflight.LinuxKrb5ProviderConfig;
 

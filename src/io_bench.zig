@@ -12,12 +12,12 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 const Assignment = qail.ast.Assignment;
-const PgDriver = qail.driver.PgDriver;
+const PgDriver = qail.driver.driver.PgDriver;
 
 const READ_ITERS: u64 = 1_000_000;
 const WRITE_ITERS: u64 = 100_000;

@@ -13,7 +13,7 @@ const ast = @import("ast/mod.zig");
 
 const PgPool = driver.pool.PgPool;
 const PoolConfig = driver.pool.PoolConfig;
-const Pipeline = driver.Pipeline;
+const Pipeline = driver.pipeline.Pipeline;
 const Encoder = protocol.Encoder;
 
 const TOTAL_QUERIES: usize = 150_000_000;

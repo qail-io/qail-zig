@@ -15,7 +15,6 @@ const RuntimeMode = enum(u32) {
 };
 
 const RequestedMode = enum {
-    auto,
     threaded,
     evented,
 };
@@ -43,13 +42,6 @@ const StdIoRuntime = struct {
     fn runtimeUsesEvented() bool {
         ensureInit();
         return active_mode.load(.acquire) == .evented;
-    }
-
-    fn downgradeToThreadedOnNetworkDown(err: anyerror) bool {
-        if (err != error.NetworkDown) return false;
-        if (!supports_evented) return false;
-        ensureInit();
-        return active_mode.cmpxchgStrong(.evented, .threaded, .acq_rel, .acquire) == null;
     }
 
     fn ensureInit() void {
@@ -82,13 +74,7 @@ const StdIoRuntime = struct {
     }
 
     fn requestedMode() RequestedMode {
-        if (modeFromEnv()) |mode| {
-            return switch (mode) {
-                .auto => if (supports_evented) .evented else .threaded,
-                else => mode,
-            };
-        }
-        if (wantEvented()) return .evented;
+        if (modeFromEnv()) |mode| return mode;
         return .threaded;
     }
 
@@ -101,23 +87,22 @@ const StdIoRuntime = struct {
 
         if (value.len == 0) return null;
         if (std.ascii.eqlIgnoreCase(value, "threaded")) return .threaded;
-        if (std.ascii.eqlIgnoreCase(value, "evented")) return .evented;
-        if (std.ascii.eqlIgnoreCase(value, "auto")) return .auto;
-        return null;
+        if (std.ascii.eqlIgnoreCase(value, "evented")) {
+            if (!supports_evented) {
+                std.debug.panic(
+                    "QAIL_STD_IO_MODE=evented is not supported on target '{s}'. Use QAIL_STD_IO_MODE=threaded.",
+                    .{@tagName(builtin.os.tag)},
+                );
+            }
+            return .evented;
+        }
+
+        std.debug.panic(
+            "Invalid QAIL_STD_IO_MODE='{s}'. Allowed values: threaded, evented.",
+            .{value},
+        );
     }
 };
-
-fn wantEvented() bool {
-    const value = process_compat.getEnvVarOwned(std.heap.page_allocator, "QAIL_STD_IO_EVENTED") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => return false,
-        else => return false,
-    };
-    defer std.heap.page_allocator.free(value);
-    if (value.len == 0) return false;
-    if (std.mem.eql(u8, value, "0")) return false;
-    if (std.ascii.eqlIgnoreCase(value, "false")) return false;
-    return true;
-}
 
 pub fn runtimeIo() std.Io {
     return StdIoRuntime.getIo();
@@ -125,11 +110,6 @@ pub fn runtimeIo() std.Io {
 
 pub fn runtimeUsesEvented() bool {
     return StdIoRuntime.runtimeUsesEvented();
-}
-
-/// Returns true when caller should retry operation with threaded runtime.
-pub fn retryWithThreaded(err: anyerror) bool {
-    return StdIoRuntime.downgradeToThreadedOnNetworkDown(err);
 }
 
 /// Stable fixed-buffer writer adapter.

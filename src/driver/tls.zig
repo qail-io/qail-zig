@@ -11,10 +11,10 @@
 //! 5. Continue with StartupMessage over TLS
 
 const std = @import("std");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 const protocol = @import("../protocol/mod.zig");
 const tls_mod = @import("tls/mod.zig");
-const tls_client = @import("../compat/tls_client.zig");
+const tls_client = @import("../runtime/tls_client.zig");
 const message_limits = @import("message_limits.zig");
 
 const Encoder = protocol.Encoder;

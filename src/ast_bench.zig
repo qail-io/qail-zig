@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 const Value = qail.ast.Value;

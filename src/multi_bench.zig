@@ -7,7 +7,7 @@ const std = @import("std");
 const driver = @import("driver/mod.zig");
 const protocol = @import("protocol/mod.zig");
 
-const Connection = driver.Connection;
+const Connection = driver.connection.Connection;
 const Encoder = protocol.Encoder;
 
 const TOTAL_QUERIES: usize = 10_000_000;

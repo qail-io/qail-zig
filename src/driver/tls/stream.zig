@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const tls = std.crypto.tls;
-const net = @import("../../compat/net.zig");
+const net = @import("../../runtime/net.zig");
 
 /// Minimum buffer size for TLS records (per std.crypto.tls spec)
 pub const MIN_BUFFER_LEN = tls.max_ciphertext_record_len;

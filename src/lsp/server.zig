@@ -6,7 +6,7 @@
 const std = @import("std");
 const json = std.json;
 const protocol = @import("protocol.zig");
-const io = @import("qail").compat.io;
+const io = @import("qail").runtime.io;
 const grammar = @import("qail").parser.grammar;
 
 pub const QailServer = struct {

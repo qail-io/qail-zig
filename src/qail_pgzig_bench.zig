@@ -14,7 +14,7 @@ const qail = @import("qail");
 const bench = @import("qail_pgzig_bench/workloads.zig");
 const bench_runner = @import("qail_pgzig_bench/runner.zig");
 
-const io_compat = qail.compat.io;
+const io_compat = qail.runtime.io;
 const Mode = bench.Mode;
 const Runner = bench.Runner;
 const Workload = bench.Workload;

@@ -4,10 +4,10 @@
 
 const std = @import("std");
 const qail = @import("qail");
-const time = qail.compat.time;
+const time = qail.runtime.time;
 
-const Pipeline = qail.driver.Pipeline;
-const Connection = qail.driver.Connection;
+const Pipeline = qail.driver.pipeline.Pipeline;
+const Connection = qail.driver.connection.Connection;
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 

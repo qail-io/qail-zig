@@ -11,14 +11,14 @@
 const std = @import("std");
 const qail = @import("qail");
 
-const QailCmd = qail.QailCmd;
-const Expr = qail.Expr;
-const Value = qail.Value;
-const PgDriver = qail.PgDriver;
-const WhereClause = qail.cmd.WhereClause;
-const Assignment = qail.cmd.Assignment;
+const QailCmd = qail.ast.QailCmd;
+const Expr = qail.ast.Expr;
+const Value = qail.ast.Value;
+const PgDriver = qail.driver.driver.PgDriver;
+const WhereClause = qail.ast.cmd.WhereClause;
+const Assignment = qail.ast.cmd.Assignment;
 const transpiler = qail.transpiler;
-const b = qail.builders;
+const b = qail.ast.builders;
 
 var passed: u32 = 0;
 var failed: u32 = 0;

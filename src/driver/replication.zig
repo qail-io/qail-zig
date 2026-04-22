@@ -1,6 +1,6 @@
 const std = @import("std");
 const row_mod = @import("row.zig");
-const io_compat = @import("../compat/io.zig");
+const io_compat = @import("../runtime/io.zig");
 
 const PgRow = row_mod.PgRow;
 

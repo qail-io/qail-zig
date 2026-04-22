@@ -1,5 +1,5 @@
 const std = @import("std");
-const net = @import("../compat/net.zig");
+const net = @import("../runtime/net.zig");
 
 /// GSSENC Request code (80877104 = version 1234.5680)
 pub const GSSENC_REQUEST_CODE: u32 = 80877104;
