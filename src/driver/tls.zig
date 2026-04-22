@@ -28,6 +28,7 @@ pub const AuthOptions = auth_options_mod.AuthOptions;
 const TlsBuffers = tls_mod.TlsBuffers;
 pub const TlsConfig = tls_mod.TlsConfig;
 pub const VerifyMode = tls_mod.VerifyMode;
+const tls_client_min_buffer_len = tls_client.min_buffer_len;
 
 /// SSL Request code (80877103 = version 1234.5679)
 pub const SSL_REQUEST_CODE: u32 = 80877103;
@@ -37,14 +38,20 @@ pub const SSL_REQUEST_CODE: u32 = 80877103;
 /// Provides encrypted communication using the local TLS client wrapper (TLS 1.3).
 /// Falls back to plain connection if server doesn't support SSL.
 pub const TlsConnection = struct {
+    const TlsState = struct {
+        tls_buffers: TlsBuffers,
+        tls_client: tls_client.Client,
+        stream_reader: net.StreamReader,
+        stream_writer: net.StreamWriter,
+        stream_read_buffer: [tls_client_min_buffer_len]u8 = undefined,
+        stream_write_buffer: [tls_client_min_buffer_len]u8 = undefined,
+    };
+
     allocator: std.mem.Allocator,
     tcp_stream: net.Stream,
 
     // TLS components
-    tls_buffers: TlsBuffers,
-    tls_client: ?tls_client.Client = null,
-    stream_reader: ?net.StreamReader = null,
-    stream_writer: ?net.StreamWriter = null,
+    tls_state: ?*TlsState = null,
     tls_server_end_point_binding: ?[]u8 = null,
 
     // Connection state
@@ -98,7 +105,6 @@ pub const TlsConnection = struct {
         var conn = TlsConnection{
             .allocator = allocator,
             .tcp_stream = tcp_stream,
-            .tls_buffers = TlsBuffers.initSecure(),
         };
 
         // Request SSL upgrade
@@ -128,8 +134,16 @@ pub const TlsConnection = struct {
 
     /// Initialize TLS handshake using the local TLS client wrapper.
     fn initTls(self: *TlsConnection, config: TlsConfig, host: []const u8) !void {
-        self.stream_reader = net.streamReader(self.tcp_stream, self.tls_buffers.readBuffer());
-        self.stream_writer = net.streamWriter(self.tcp_stream, self.tls_buffers.writeBuffer());
+        const state = try self.allocator.create(TlsState);
+        errdefer self.allocator.destroy(state);
+        state.* = .{
+            .tls_buffers = TlsBuffers.initSecure(),
+            .tls_client = undefined,
+            .stream_reader = undefined,
+            .stream_writer = undefined,
+        };
+        state.stream_reader = net.streamReader(self.tcp_stream, &state.stream_read_buffer);
+        state.stream_writer = net.streamWriter(self.tcp_stream, &state.stream_write_buffer);
 
         // Build TLS options
         const tls_options = tls_mod.config.buildClientOptions(
@@ -137,8 +151,8 @@ pub const TlsConnection = struct {
                 .server_name = config.server_name orelse host,
                 .verify = config.verify,
             },
-            self.tls_buffers.readBuffer(),
-            self.tls_buffers.writeBuffer(),
+            state.tls_buffers.readBuffer(),
+            state.tls_buffers.writeBuffer(),
         );
         const tls_client_options: tls_client.Options = .{
             .host = switch (tls_options.host) {
@@ -159,12 +173,11 @@ pub const TlsConnection = struct {
         };
 
         // Initialize TLS client (performs handshake)
-        self.tls_client = try net.initTlsClient(&self.stream_reader.?, &self.stream_writer.?, tls_client_options);
+        state.tls_client = try net.initTlsClient(&state.stream_reader, &state.stream_writer, tls_client_options);
+        try state.stream_writer.interface.flush();
+        self.tls_state = state;
         self.ssl_enabled = true;
-        const handshake_binding = if (self.tls_client) |client|
-            client.tls_server_end_point_binding
-        else
-            null;
+        const handshake_binding = state.tls_client.tls_server_end_point_binding;
         self.tls_server_end_point_binding = try resolveTlsServerEndPointBinding(
             self.allocator,
             handshake_binding,
@@ -176,6 +189,10 @@ pub const TlsConnection = struct {
         if (self.tls_server_end_point_binding) |binding| {
             self.allocator.free(binding);
             self.tls_server_end_point_binding = null;
+        }
+        if (self.tls_state) |state| {
+            self.allocator.destroy(state);
+            self.tls_state = null;
         }
         self.tcp_stream.close();
     }
@@ -198,9 +215,10 @@ pub const TlsConnection = struct {
 
     /// Send bytes (encrypted if TLS enabled)
     pub fn send(self: *TlsConnection, bytes: []const u8) !void {
-        if (self.tls_client) |*client| {
-            try client.writer.writeAll(bytes);
-            try client.writer.flush();
+        if (self.tls_state) |state| {
+            try state.tls_client.writer.writeAll(bytes);
+            try state.tls_client.writer.flush();
+            try state.stream_writer.interface.flush();
         } else {
             try net.writeAllStream(self.tcp_stream, bytes);
         }
@@ -208,8 +226,15 @@ pub const TlsConnection = struct {
 
     /// Read bytes (decrypted if TLS enabled)
     fn readBytes(self: *TlsConnection, buf: []u8) !usize {
-        if (self.tls_client) |*client| {
-            return client.reader.readSliceShort(buf);
+        if (self.tls_state) |state| {
+            const available = state.tls_client.reader.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => return 0,
+                error.ReadFailed => return error.ReadFailed,
+            };
+            const n = @min(buf.len, available.len);
+            @memcpy(buf[0..n], available[0..n]);
+            state.tls_client.reader.toss(n);
+            return n;
         } else {
             return net.readStream(self.tcp_stream, buf);
         }

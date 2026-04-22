@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const net = @import("../runtime/net.zig");
 
 /// GSSENC Request code (80877104 = version 1234.5680)
@@ -40,11 +41,21 @@ pub fn tryGssEncRequestStream(
 
     return switch (response[0]) {
         'G' => blk: {
-            try net.setStreamBlocking(stream, false);
-            defer net.setStreamBlocking(stream, true) catch {};
-
             var extra: [1]u8 = undefined;
-            const extra_n = net.readStream(stream, &extra) catch 0;
+            // Probe for unexpected buffered data without routing through
+            // std.Io's blocking socket read path, which panics on EAGAIN.
+            const extra_n = switch (builtin.os.tag) {
+                .windows => 0,
+                else => blk2: {
+                    try net.setStreamBlocking(stream, false);
+                    defer net.setStreamBlocking(stream, true) catch {};
+
+                    break :blk2 std.posix.read(stream.handle, &extra) catch |err| switch (err) {
+                        error.WouldBlock => 0,
+                        else => return err,
+                    };
+                },
+            };
             if (extra_n > 0) return error.GssEncBufferStuffingDetected;
 
             handoff = true;

@@ -13,9 +13,11 @@
 >
 > **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated Zig driver implementation, with enterprise-auth on Linux using the platform GSSAPI stack rather than a self-contained Zig Kerberos implementation.
 
-> Core driver/runtime path is Zig-native and zero-GC. The Linux Kerberos/GSSENC path uses optional runtime GSSAPI loading and libc-backed dynamic linking. Current published driver matrix against `pg.zig`: qail-zig leads the `single` and `pool10` slices across `point`, `wide_rows`, `large_rows`, `many_params`, and `aggregate`.
+> Core driver/runtime path is Zig-native and zero-GC. The Linux Kerberos/GSSENC path uses optional runtime GSSAPI loading and libc-backed dynamic linking.
 
-- Docs: `dev.qail.io/zig/docs`
+- Website: [dev.qail.io/zig](https://dev.qail.io/zig)
+- Docs: [dev.qail.io/zig/docs](https://dev.qail.io/zig/docs)
+- Benchmarks: [dev.qail.io/zig/benchmarks](https://dev.qail.io/zig/benchmarks)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 
 ## Highlights
@@ -31,43 +33,16 @@
 
 ## Benchmarks
 
-### I/O: PostgreSQL Driver Matrix
+Published benchmark results live on the website instead of this README:
 
-The current public benchmark is the shared-surface `qail-zig` versus `pg.zig` matrix, measured on March 31, 2026 from the dedicated `qail_pgzig_bench` harness. It publishes 5-round medians across five workloads and two execution modes.
+- Driver benchmarks: [dev.qail.io/zig/benchmarks](https://dev.qail.io/zig/benchmarks)
+- Project overview: [dev.qail.io/zig](https://dev.qail.io/zig)
 
-| Workload | `single` (`pg.zig` / `qail-zig`) | `pool10` (`pg.zig` / `qail-zig`) |
-|----------|----------------------------------|----------------------------------|
-| **point** | 21,551 / **47,010** q/s | 79,728 / **169,726** q/s |
-| **wide_rows** | 4,615 / **5,477** q/s | 19,300 / **22,400** q/s |
-| **large_rows** | 91.058 / **95.391** q/s | 352.523 / **368.215** q/s |
-| **many_params** | 20,690 / **42,579** q/s | 79,165 / **166,296** q/s |
-| **aggregate** | 279.372 / **282.205** q/s | 1,976.256 / **2,036.974** q/s |
-
-> Current public read: qail-zig leads the published shared throughput slices against `pg.zig` on the matched prepared-statement surface.
-
-That is the current published Zig driver comparison. It is stricter than the older narrow prepared-point page because:
-
-- qail-zig workloads are authored as native `QailCmd` ASTs
-- qail-zig compiles them once to prepared SQL templates and runs them through its prepared protocol path
-- `pg.zig` executes the same prepared SQL templates through its cached prepared-query path
-- only `single` and `pool10` are compared so the published page stays on the clearest shared modes between the two drivers
-
-### CPU: AST Build + Transpile (1M iterations)
-
-| Tier | qail-zig | qail.rs (Rust) |
-|------|----------|----------------|
-| **T1 — SELECT \*** | 58 ns/op | 271 ns/op |
-| **T2 — SELECT WHERE** | 196 ns/op | 1,755 ns/op |
-| **T3 — ORDER/LIMIT** | 268 ns/op | 2,307 ns/op |
-| **T4 — INSERT 5 cols** | 238 ns/op | 1,143 ns/op |
-| **T5 — UPDATE WHERE** | 280 ns/op | 1,720 ns/op |
-| **T6 — JOIN/GROUP/HAVING** | 340 ns/op | 4,834 ns/op |
-
-> **Why Zig is faster here:** Zig's AST is comptime-evaluated (zero-cost struct init with `[]const u8` slices), and the transpiler appends slices directly into an `ArrayList`. Rust's transpiler uses `format!()` with intermediate `String` allocations. In production, Rust's prepared statement cache amortizes transpiler cost to zero, which is why it wins the I/O benchmark.
+The web pages are the canonical place for the current benchmark matrix, methodology, and interpretation. The README stays intentionally short so users do not have to parse large benchmark tables here.
 
 ```bash
-# Run benchmarks
-zig build ast-bench          # AST benchmark on healthy Zig toolchains
+# Run benchmarks locally
+zig build ast-bench
 zig build pgzig-bench -- qail single --workload point
 zig build pgzig-bench -- pgzig pool10 --workload many_params
 
@@ -376,4 +351,4 @@ MIT — see [LICENSE](LICENSE)
 
 ---
 
-**Pure Zig PostgreSQL Driver** | Zero Dependencies | ~22K Code Lines | 1M+ queries/second
+**Zig-first PostgreSQL Driver** | Zero Dependencies | AST-Native Queries

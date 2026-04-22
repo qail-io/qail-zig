@@ -968,6 +968,7 @@ fn drain(w: *Writer, data: []const []const u8, splat: usize) Writer.Error!usize 
         }
     }
     output.advance(ciphertext_end);
+    try output.flush();
     return w.consume(total_clear);
 }
 
@@ -978,6 +979,7 @@ fn flush(w: *Writer) Writer.Error!void {
     const prepared = prepareCiphertextRecord(c, ciphertext_buf, w.buffered(), .application_data);
     output.advance(prepared.ciphertext_end);
     w.end = 0;
+    try output.flush();
 }
 
 /// Sends a `close_notify` alert, which is necessary for the server to
@@ -989,6 +991,7 @@ pub fn end(c: *Client) Writer.Error!void {
     const ciphertext_buf = try output.writableSliceGreedy(min_buffer_len);
     const prepared = prepareCiphertextRecord(c, ciphertext_buf, &tls.close_notify_alert, .alert);
     output.advance(prepared.ciphertext_end);
+    try output.flush();
 }
 
 fn prepareCiphertextRecord(

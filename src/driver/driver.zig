@@ -2071,6 +2071,7 @@ pub const PgDriver = struct {
             try self.validateExtendedFlow(&flow, msg.msg_type, false);
             switch (msg.msg_type) {
                 .bind_complete => {},
+                .no_data => {},
                 .command_complete => {
                     var decoder = Decoder.init(msg.payload);
                     const tag = try decoder.parseCommandComplete();
@@ -2143,6 +2144,7 @@ pub const PgDriver = struct {
                     }
                     field_names_template = names;
                 },
+                .no_data => {},
                 .data_row => {
                     var decoder = Decoder.init(msg.payload);
                     const columns = try decoder.parseDataRowOwned(self.allocator);

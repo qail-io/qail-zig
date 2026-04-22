@@ -39,6 +39,7 @@ const STMT_NAME = "qail_zig_modes_stmt";
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 1099511628211;
 const BENCH_PAYLOAD_TARGET_ROWS: usize = 20_000;
+const BENCH_MANY_PARAMS_TARGET_ROWS: usize = 512;
 const BENCH_SETUP_LOCK_SQL = "SELECT pg_advisory_lock(60119029)";
 const BENCH_SETUP_UNLOCK_SQL = "SELECT pg_advisory_unlock(60119029)";
 const CREATE_BENCH_PAYLOAD_SQL =
@@ -171,7 +172,7 @@ const AGGREGATE_COLS = [_]Expr{
     Expr.count().withAlias("row_count"),
 };
 const MANY_PARAM_CLAUSES = buildManyParamClauses();
-const MANY_PARAM_SELECT = [_]Expr{Expr.count()};
+const MANY_PARAM_SELECT = [_]Expr{Expr.col("total")};
 
 const POINT_CMD = QailCmd.get("harbors")
     .select(&POINT_COLS)
@@ -187,9 +188,10 @@ const AGGREGATE_CMD = QailCmd.get("qail_bench_payload")
     .select(&AGGREGATE_COLS)
     .where(&PAYLOAD_WHERE);
 
-const MANY_PARAMS_CMD = QailCmd.get("qail_bench_payload")
+const MANY_PARAMS_CMD = QailCmd.get("qail_bench_many_params")
     .select(&MANY_PARAM_SELECT)
-    .where(&MANY_PARAM_CLAUSES);
+    .where(&MANY_PARAM_CLAUSES)
+    .limit(1);
 
 const PoolSync = struct {
     ready_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -323,8 +325,8 @@ fn workloadSpec(workload: Workload) WorkloadSpec {
             .total_queries = MANY_PARAMS_TOTAL_QUERIES,
             .iterations = MANY_PARAMS_ITERATIONS,
             .result_mode = .scalar_int,
-            .requires_payload = true,
-            .requires_many_params = false,
+            .requires_payload = false,
+            .requires_many_params = true,
             .cmd = &MANY_PARAMS_CMD,
         },
         .aggregate => .{
@@ -395,17 +397,12 @@ fn buildAggregateParams(allocator: std.mem.Allocator, total: usize) ![]ParamSet 
 }
 
 fn buildManyParamsBatch(allocator: std.mem.Allocator, total: usize) ![]ParamSet {
-    const cache = try allocator.alloc([]const u8, 256);
-    for (cache, 0..) |*slot, i| {
-        slot.* = try std.fmt.allocPrint(allocator, "{d}", .{i + 1});
-    }
-
     const params = try allocator.alloc(ParamSet, total);
     for (params, 0..) |*slot, query_idx| {
+        const target_slot = (query_idx % BENCH_MANY_PARAMS_TARGET_ROWS) + 1;
         const inner = try allocator.alloc(?[]const u8, MANY_PARAMS_PARAM_COUNT);
         for (0..MANY_PARAMS_PARAM_COUNT) |param_idx| {
-            const value_idx = (query_idx + (param_idx * 7)) % cache.len;
-            inner[param_idx] = cache[value_idx];
+            inner[param_idx] = try std.fmt.allocPrint(allocator, "{d}", .{target_slot * (param_idx + 1)});
         }
         slot.* = inner;
     }
@@ -423,6 +420,7 @@ fn ensureWorkloadReady(spec: WorkloadSpec) !void {
     errdefer executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL) catch {};
 
     if (spec.requires_payload) try ensureBenchPayload(&conn);
+    if (spec.requires_many_params) try ensureBenchManyParams(&conn);
 
     try executeSimpleQuery(&conn, BENCH_SETUP_UNLOCK_SQL);
 }
@@ -527,19 +525,116 @@ fn parseFirstDataRowUInt(payload: []const u8) !usize {
     return std.fmt.parseInt(usize, payload[pos .. pos + len], 10);
 }
 
+fn manyParamColumnName(comptime idx: usize) []const u8 {
+    return if (idx + 1 < 10)
+        comptime std.fmt.comptimePrint("p0{d}", .{idx + 1})
+    else
+        comptime std.fmt.comptimePrint("p{d}", .{idx + 1});
+}
+
+fn appendManyParamColumnName(writer: anytype, idx: usize) !void {
+    if (idx + 1 < 10) {
+        try writer.writeAll("p0");
+    } else {
+        try writer.writeAll("p");
+    }
+    try writer.print("{d}", .{idx + 1});
+}
+
+fn buildManyParamsCreateSql(allocator: std.mem.Allocator) ![]u8 {
+    var writer = io_compat.AllocatingWriter.init(allocator);
+    defer writer.deinit();
+    const out = writer.writer();
+
+    try out.writeAll("CREATE TABLE IF NOT EXISTS qail_bench_many_params (slot INTEGER PRIMARY KEY, total BIGINT NOT NULL");
+    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        try out.writeAll(", ");
+        try appendManyParamColumnName(out, idx);
+        try out.writeAll(" INTEGER NOT NULL");
+    }
+    try out.writeAll(")");
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildManyParamsIndexSql(allocator: std.mem.Allocator) ![]u8 {
+    var writer = io_compat.AllocatingWriter.init(allocator);
+    defer writer.deinit();
+    const out = writer.writer();
+
+    try out.writeAll("CREATE UNIQUE INDEX IF NOT EXISTS qail_bench_many_params_lookup_idx ON qail_bench_many_params (");
+    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        if (idx > 0) try out.writeAll(", ");
+        try appendManyParamColumnName(out, idx);
+    }
+    try out.writeAll(")");
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildManyParamsInsertSql(allocator: std.mem.Allocator, start_slot: usize, end_slot: usize) ![]u8 {
+    var writer = io_compat.AllocatingWriter.init(allocator);
+    defer writer.deinit();
+    const out = writer.writer();
+
+    var sum_coeff: usize = 0;
+    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        sum_coeff += idx + 1;
+    }
+
+    try out.writeAll("INSERT INTO qail_bench_many_params (slot, total");
+    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        try out.writeAll(", ");
+        try appendManyParamColumnName(out, idx);
+    }
+    try out.writeAll(") SELECT gs, ");
+    try out.print("(gs * {d})::bigint", .{sum_coeff});
+    for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
+        try out.print(", gs * {d}", .{idx + 1});
+    }
+    try out.print(
+        " FROM generate_series({d}, {d}) AS gs ON CONFLICT (slot) DO NOTHING",
+        .{ start_slot, end_slot },
+    );
+
+    return try writer.toOwnedSlice();
+}
+
 fn buildManyParamClauses() [MANY_PARAMS_PARAM_COUNT]WhereClause {
     var clauses: [MANY_PARAMS_PARAM_COUNT]WhereClause = undefined;
     inline for (0..MANY_PARAMS_PARAM_COUNT) |idx| {
         clauses[idx] = .{
             .condition = .{
-                .column = "id",
+                .column = manyParamColumnName(idx),
                 .op = .eq,
                 .value = .{ .param = idx + 1 },
             },
-            .logical_op = if (idx == 0) .@"and" else .@"or",
         };
     }
     return clauses;
+}
+
+fn ensureBenchManyParams(conn: *Connection) !void {
+    const create_sql = try buildManyParamsCreateSql(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(create_sql);
+    try executeSimpleQuery(conn, create_sql);
+
+    const index_sql = try buildManyParamsIndexSql(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(index_sql);
+    try executeSimpleQuery(conn, index_sql);
+
+    const current_rows = try querySingleInt(conn, "SELECT COALESCE(MAX(slot), 0) FROM qail_bench_many_params");
+    if (current_rows >= BENCH_MANY_PARAMS_TARGET_ROWS) return;
+
+    const insert_sql = try buildManyParamsInsertSql(
+        std.heap.page_allocator,
+        current_rows + 1,
+        BENCH_MANY_PARAMS_TARGET_ROWS,
+    );
+    defer std.heap.page_allocator.free(insert_sql);
+
+    try executeSimpleQuery(conn, insert_sql);
+    _ = executeSimpleQuery(conn, "ANALYZE qail_bench_many_params") catch {};
 }
 
 fn runSingleMode(spec: WorkloadSpec, params: []const ParamSet) !BenchmarkResult {
