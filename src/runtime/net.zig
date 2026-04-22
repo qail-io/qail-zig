@@ -252,10 +252,16 @@ fn tcpConnectToHostInner(host: []const u8, port: u16, timeout: Io.Timeout) !Stre
     return Stream.fromInner(stream);
 }
 
-fn localhostAcceptThread(server: *Server) void {
-    defer server.deinit();
+const LocalhostAcceptCtx = struct {
+    server: *Server,
+    done: *std.atomic.Value(bool),
+};
 
-    var conn = server.accept() catch return;
+fn localhostAcceptThread(ctx: *LocalhostAcceptCtx) void {
+    defer ctx.done.store(true, .release);
+    defer ctx.server.deinit();
+
+    var conn = ctx.server.accept() catch return;
     defer conn.stream.close();
 }
 
@@ -263,11 +269,15 @@ test "tcp connect to host with timeout resolves localhost" {
     var server = try Address.listen(try Address.parseIp4("127.0.0.1", 0), .{ .reuse_address = true });
     const port = server.listen_address.getPort();
     const nudge_addr = try Address.parseIp4("127.0.0.1", port);
+    var done = std.atomic.Value(bool).init(false);
+    var ctx = LocalhostAcceptCtx{ .server = &server, .done = &done };
 
-    var thread = try std.Thread.spawn(.{}, localhostAcceptThread, .{&server});
+    var thread = try std.Thread.spawn(.{}, localhostAcceptThread, .{&ctx});
     defer {
-        const nudge_stream = tcpConnectToAddress(nudge_addr) catch null;
-        if (nudge_stream) |stream| stream.close();
+        if (!done.load(.acquire)) {
+            const nudge_stream = tcpConnectToAddress(nudge_addr) catch null;
+            if (nudge_stream) |stream| stream.close();
+        }
         thread.join();
     }
 

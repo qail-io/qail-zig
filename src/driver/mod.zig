@@ -1,9 +1,14 @@
+const builtin = @import("builtin");
+
 // PostgreSQL Driver Module
 //
 // Async driver for PostgreSQL using the protocol layer.
 
 pub const connection = @import("connection.zig");
-pub const async_connection = @import("async_connection.zig");
+pub const async_connection = if (builtin.os.tag == .windows)
+    @import("async_connection_stub.zig")
+else
+    @import("async_connection.zig");
 pub const tls = @import("tls.zig");
 pub const gssenc = @import("gssenc.zig");
 pub const driver = @import("driver.zig");
