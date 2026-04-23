@@ -3,7 +3,7 @@
 //! Usage: qail <QUERY> | qail <COMMAND> [ARGS]
 
 const std = @import("std");
-const cli = @import("cli.zig");
+const cli = @import("cli/mod.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
