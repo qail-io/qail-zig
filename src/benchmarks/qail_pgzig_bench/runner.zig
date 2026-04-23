@@ -2,7 +2,7 @@ const std = @import("std");
 const qail = @import("qail");
 const pg = @import("pg");
 const bench = @import("workloads.zig");
-const process_compat = @import("../runtime/process.zig");
+const process_compat = qail.runtime.process;
 
 const time = qail.runtime.time;
 const Connection = qail.driver.connection.Connection;

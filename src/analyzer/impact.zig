@@ -6,6 +6,7 @@
 const std = @import("std");
 const scanner = @import("scanner.zig");
 const differ = @import("../parser/differ.zig");
+const io_compat = @import("../runtime/io.zig");
 
 const CodeReference = scanner.CodeReference;
 const MigrationCmd = differ.MigrationCmd;
@@ -179,7 +180,8 @@ pub const MigrationImpact = struct {
 
     /// Generate human-readable report
     pub fn report(self: *const MigrationImpact, allocator: std.mem.Allocator) ![]u8 {
-        var output = std.ArrayList(u8).init(allocator);
+        var output = io_compat.AllocatingWriter.init(allocator);
+        defer output.deinit();
         const writer = output.writer();
 
         if (self.safe_to_run) {

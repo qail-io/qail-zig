@@ -7,13 +7,11 @@
 // Run: zig build pool
 
 const std = @import("std");
-const driver = @import("driver/mod.zig");
-const protocol = @import("protocol/mod.zig");
-const ast = @import("ast/mod.zig");
+const qail = @import("qail");
+const driver = qail.driver;
+const protocol = qail.protocol;
 
 const PgPool = driver.pool.PgPool;
-const PoolConfig = driver.pool.PoolConfig;
-const Pipeline = driver.pipeline.Pipeline;
 const Encoder = protocol.Encoder;
 
 const TOTAL_QUERIES: usize = 150_000_000;

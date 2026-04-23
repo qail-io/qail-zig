@@ -9,7 +9,7 @@ The current public Zig driver comparison is:
 
 ## Harness
 
-The active harness is `src/qail_pgzig_bench.zig` and reports the shared prepared-statement surface:
+The active harness is `src/benchmarks/qail_pgzig_bench.zig` and reports the shared prepared-statement surface:
 
 - `single` — prepared single-query path on one connection
 - `pool10` — prepared singles over ten connections

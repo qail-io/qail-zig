@@ -100,7 +100,7 @@ pub fn build(b: *std.Build) void {
     const bench = b.addExecutable(.{
         .name = "qail-bench",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench.zig"),
+            .root_source_file = b.path("src/benchmarks/bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -119,7 +119,7 @@ pub fn build(b: *std.Build) void {
     const integration = b.addExecutable(.{
         .name = "qail-integration",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/integration_test.zig"),
+            .root_source_file = b.path("src/tests/integration_test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -138,7 +138,7 @@ pub fn build(b: *std.Build) void {
     const pipeline_test = b.addExecutable(.{
         .name = "qail-pipeline-test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/pipeline_test.zig"),
+            .root_source_file = b.path("src/tests/pipeline_test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -157,7 +157,7 @@ pub fn build(b: *std.Build) void {
     const stress = b.addExecutable(.{
         .name = "qail-stress",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/stress_test.zig"),
+            .root_source_file = b.path("src/tests/stress_test.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -176,7 +176,7 @@ pub fn build(b: *std.Build) void {
     const fair = b.addExecutable(.{
         .name = "qail-fair",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/fair_bench.zig"),
+            .root_source_file = b.path("src/benchmarks/fair_bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -202,7 +202,7 @@ pub fn build(b: *std.Build) void {
     const ast_bench = b.addExecutable(.{
         .name = "ast_bench",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ast_bench.zig"),
+            .root_source_file = b.path("src/benchmarks/ast_bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -221,7 +221,7 @@ pub fn build(b: *std.Build) void {
     const e2e_test = b.addExecutable(.{
         .name = "e2e_test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/e2e_test.zig"),
+            .root_source_file = b.path("src/tests/e2e_test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -240,7 +240,7 @@ pub fn build(b: *std.Build) void {
     const adversarial_test = b.addExecutable(.{
         .name = "qail-adversarial-test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/adversarial_test.zig"),
+            .root_source_file = b.path("src/tests/adversarial_test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -259,7 +259,7 @@ pub fn build(b: *std.Build) void {
     const gssenc_smoke = b.addExecutable(.{
         .name = "qail-gssenc-smoke",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/gssenc_smoke_test.zig"),
+            .root_source_file = b.path("src/tests/gssenc_smoke_test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -294,7 +294,7 @@ pub fn build(b: *std.Build) void {
     const tls_smoke = b.addExecutable(.{
         .name = "qail-tls-smoke",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tls_smoke_test.zig"),
+            .root_source_file = b.path("src/tests/tls_smoke_test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -327,7 +327,7 @@ pub fn build(b: *std.Build) void {
     const io_bench = b.addExecutable(.{
         .name = "io_bench",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/io_bench.zig"),
+            .root_source_file = b.path("src/benchmarks/io_bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -346,7 +346,7 @@ pub fn build(b: *std.Build) void {
     const pool_bench = b.addExecutable(.{
         .name = "qail-pool",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/pool_bench.zig"),
+            .root_source_file = b.path("src/benchmarks/pool_bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -365,7 +365,7 @@ pub fn build(b: *std.Build) void {
     const pipe_bench = b.addExecutable(.{
         .name = "pipe_bench",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/pipe_bench.zig"),
+            .root_source_file = b.path("src/benchmarks/pipe_bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -384,7 +384,7 @@ pub fn build(b: *std.Build) void {
     const error_test = b.addExecutable(.{
         .name = "qail-error-test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/error_test.zig"),
+            .root_source_file = b.path("src/tests/error_test.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -403,7 +403,7 @@ pub fn build(b: *std.Build) void {
     const verify_bench = b.addExecutable(.{
         .name = "qail-verify",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench_verify.zig"),
+            .root_source_file = b.path("src/benchmarks/bench_verify.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -422,7 +422,7 @@ pub fn build(b: *std.Build) void {
     const multi_bench = b.addExecutable(.{
         .name = "qail-multi",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/multi_bench.zig"),
+            .root_source_file = b.path("src/benchmarks/multi_bench.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -441,7 +441,7 @@ pub fn build(b: *std.Build) void {
     const pipeline_bench = b.addExecutable(.{
         .name = "qail-pipeline",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/bench_pipeline.zig"),
+            .root_source_file = b.path("src/benchmarks/bench_pipeline.zig"),
             .target = target,
             .optimize = .ReleaseFast,
             .imports = &.{
@@ -467,7 +467,7 @@ pub fn build(b: *std.Build) void {
         const async_test = b.addExecutable(.{
             .name = "qail-async-test",
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/test_async.zig"),
+                .root_source_file = b.path("src/tests/test_async.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{

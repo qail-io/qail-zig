@@ -11,6 +11,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = gpa.allocator();
 
     const args = try init.args.toSlice(allocator);
+    defer allocator.free(args);
 
     const cmd = cli.parse(allocator, args) catch |err| {
         std.debug.print("Error: {}\n", .{err});

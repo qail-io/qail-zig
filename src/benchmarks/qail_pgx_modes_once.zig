@@ -5,20 +5,21 @@
 //! raw SQL literals on the QAIL side.
 //!
 //! Compile directly with:
-//!   zig build-exe src/qail_pgx_modes_once.zig -O ReleaseFast -femit-bin=/tmp/qail_zig_modes_once
+//!   zig build-exe --dep qail -Mmain=src/benchmarks/qail_pgx_modes_once.zig -Mqail=src/lib.zig -O ReleaseFast -femit-bin=/tmp/qail_zig_modes_once
 //!
 //! On macOS 26 hosts, clamp the target to an older SDK floor to avoid the
 //! current Zig build-runner/linker failure:
-//!   zig build-exe src/qail_pgx_modes_once.zig -target aarch64-macos.15.0 -O ReleaseFast -femit-bin=/tmp/qail_zig_modes_once
+//!   zig build-exe --dep qail -Mmain=src/benchmarks/qail_pgx_modes_once.zig -Mqail=src/lib.zig -target aarch64-macos.15.0 -O ReleaseFast -femit-bin=/tmp/qail_zig_modes_once
 
 const std = @import("std");
-const io_compat = @import("runtime/io.zig");
-const process_compat = @import("runtime/process.zig");
-const time = @import("runtime/time.zig");
-const ast = @import("ast/mod.zig");
-const Connection = @import("driver/connection.zig").Connection;
-const pool_mod = @import("driver/pool.zig");
-const protocol = @import("protocol/mod.zig");
+const qail = @import("qail");
+const io_compat = qail.runtime.io;
+const process_compat = qail.runtime.process;
+const time = qail.runtime.time;
+const ast = qail.ast;
+const Connection = qail.driver.connection.Connection;
+const pool_mod = qail.driver.pool;
+const protocol = qail.protocol;
 
 const QailCmd = ast.QailCmd;
 const Expr = ast.Expr;

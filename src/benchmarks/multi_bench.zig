@@ -4,8 +4,9 @@
 // Run: zig build multi
 
 const std = @import("std");
-const driver = @import("driver/mod.zig");
-const protocol = @import("protocol/mod.zig");
+const qail = @import("qail");
+const driver = qail.driver;
+const protocol = qail.protocol;
 
 const Connection = driver.connection.Connection;
 const Encoder = protocol.Encoder;

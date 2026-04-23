@@ -63,14 +63,11 @@ pub const CodebaseScanner = struct {
 
     /// Scan a directory or file for QAIL/SQL references
     pub fn scan(self: *CodebaseScanner, path: []const u8) !void {
-        const stat = std.Io.Dir.cwd().statFile(io_compat.runtimeIo(), path, .{}) catch |err| {
-            if (err == error.IsDir) {
-                try self.scanDir(path);
-                return;
-            }
-            return err;
-        };
-        _ = stat;
+        const stat = try std.Io.Dir.cwd().statFile(io_compat.runtimeIo(), path, .{});
+        if (stat.kind == .directory) {
+            try self.scanDir(path);
+            return;
+        }
         try self.scanFile(path);
     }
 
@@ -81,7 +78,7 @@ pub const CodebaseScanner = struct {
         defer dir.close(io_iface);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io_iface)) |entry| {
             // Skip common non-source directories
             if (entry.kind == .directory) {
                 if (std.mem.eql(u8, entry.name, "target") or
