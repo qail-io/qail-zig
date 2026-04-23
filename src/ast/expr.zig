@@ -350,6 +350,14 @@ pub const Constraint = union(enum) {
         return false;
     }
 
+    /// Check if constraint list contains not_null
+    pub fn hasNotNull(constraints: []const Constraint) bool {
+        for (constraints) |c| {
+            if (c == .not_null) return true;
+        }
+        return false;
+    }
+
     /// Check if constraint list contains unique
     pub fn hasUnique(constraints: []const Constraint) bool {
         for (constraints) |c| {

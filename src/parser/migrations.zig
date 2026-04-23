@@ -11,6 +11,8 @@ const QailCmd = @import("../ast/cmd.zig").QailCmd;
 const Expr = @import("../ast/expr.zig").Expr;
 const Constraint = @import("../ast/expr.zig").Constraint;
 
+var last_generated_version_seconds: std.atomic.Value(u64) = .init(0);
+
 // ============================================================================
 // Migration Table Schema
 // ============================================================================
@@ -51,7 +53,9 @@ pub fn getMigrationTableCmd() QailCmd {
         .{ .column_def = .{ .name = "id", .data_type = "serial", .is_primary_key = true } },
         .{ .column_def = .{ .name = "version", .data_type = "varchar(255)", .is_not_null = true, .is_unique = true } },
         .{ .column_def = .{ .name = "name", .data_type = "varchar(255)" } },
-        .{ .column_def = .{ .name = "applied_at", .data_type = "timestamptz", .default_value = "NOW()" } },
+        // Keep migration-table DDL within public raw-policy constraints:
+        // default SQL expressions are treated as trusted-only escape hatches.
+        .{ .column_def = .{ .name = "applied_at", .data_type = "timestamptz" } },
         .{ .column_def = .{ .name = "checksum", .data_type = "varchar(64)", .is_not_null = true } },
         .{ .column_def = .{ .name = "sql_up", .data_type = "text", .is_not_null = true } },
         .{ .column_def = .{ .name = "sql_down", .data_type = "text" } },
@@ -72,7 +76,13 @@ pub fn getMigrationStatusCmd() QailCmd {
 /// Generate a migration version string (timestamp-based)
 pub fn generateVersion() [14]u8 {
     const timestamp = std.Io.Clock.now(.real, io_compat.runtimeIo()).toSeconds();
-    const secs = @as(u64, @intCast(timestamp));
+    const now_secs = @as(u64, @intCast(timestamp));
+    var secs = now_secs;
+    while (true) {
+        const seen = last_generated_version_seconds.load(.monotonic);
+        if (secs <= seen) secs = seen + 1;
+        if (last_generated_version_seconds.cmpxchgWeak(seen, secs, .seq_cst, .monotonic) == null) break;
+    }
 
     // Convert to datetime components
     const epoch_day = secs / 86400;
@@ -110,6 +120,28 @@ test "generate version" {
     try std.testing.expectEqual(@as(usize, 14), version.len);
     // Should start with 20xx (year)
     try std.testing.expect(version[0] == '2' and version[1] == '0');
+}
+
+test "generate version stays unique across rapid calls" {
+    var seen = std.StringHashMap(void).init(std.testing.allocator);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |key| {
+            std.testing.allocator.free(key.*);
+        }
+        seen.deinit();
+    }
+
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const version = generateVersion();
+        const key = try std.testing.allocator.dupe(u8, &version);
+        const put = try seen.getOrPut(key);
+        if (put.found_existing) {
+            std.testing.allocator.free(key);
+        }
+        try std.testing.expect(!put.found_existing);
+    }
 }
 
 test "compute checksum" {

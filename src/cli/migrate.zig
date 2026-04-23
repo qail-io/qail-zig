@@ -412,17 +412,62 @@ pub fn make(comptime Cli: type) type {
                 .columns = &[_]Expr{
                     Expr.col("version"),
                     Expr.col("name"),
+                    Expr.col("applied_at"),
                     Expr.col("checksum"),
                     Expr.col("sql_up"),
+                    Expr.col("sql_down"),
                 },
                 .insert_values = &[_]Value{
                     Value.fromString(version),
                     Value.fromString(name),
+                    Value.fromString("now"),
                     Value.fromString(checksum_str),
                     Value.fromString(sql_up),
+                    Value.fromString(""),
                 },
             };
             _ = try pg.execute(&record_cmd);
+        }
+
+        fn tryRecordMigrationReceiptWithVersionAuto(
+            allocator: Allocator,
+            pg: *@import("../driver/driver.zig").PgDriver,
+            version: []const u8,
+            name: []const u8,
+            sql_up: []const u8,
+        ) !bool {
+            const parser = @import("../parser/mod.zig");
+            const Value = @import("../ast/cmd.zig").Value;
+
+            try ensureMigrationTable(pg);
+
+            const checksum = parser.computeChecksum(sql_up);
+            const checksum_str = try std.fmt.allocPrint(allocator, "{x:0>16}", .{checksum});
+            defer allocator.free(checksum_str);
+
+            const record_cmd = QailCmd{
+                .kind = .put,
+                .table = "_qail_migrations",
+                .columns = &[_]Expr{
+                    Expr.col("version"),
+                    Expr.col("name"),
+                    Expr.col("applied_at"),
+                    Expr.col("checksum"),
+                    Expr.col("sql_up"),
+                    Expr.col("sql_down"),
+                },
+                .insert_values = &[_]Value{
+                    Value.fromString(version),
+                    Value.fromString(name),
+                    Value.fromString("now"),
+                    Value.fromString(checksum_str),
+                    Value.fromString(sql_up),
+                    Value.fromString(""),
+                },
+            };
+
+            const affected = try pg.execute(&record_cmd);
+            return affected > 0;
         }
 
         fn recordMigrationReceipt(
@@ -432,9 +477,22 @@ pub fn make(comptime Cli: type) type {
             sql_up: []const u8,
         ) ![14]u8 {
             const parser = @import("../parser/mod.zig");
-            const version = parser.generateVersion();
-            try recordMigrationReceiptWithVersion(allocator, pg, &version, name, sql_up);
-            return version;
+            const max_attempts: usize = 1024;
+            var attempt: usize = 0;
+
+            while (attempt < max_attempts) : (attempt += 1) {
+                const version = parser.generateVersion();
+                const inserted = try tryRecordMigrationReceiptWithVersionAuto(
+                    allocator,
+                    pg,
+                    &version,
+                    name,
+                    sql_up,
+                );
+                if (inserted) return version;
+            }
+
+            return error.ExecuteError;
         }
 
         fn runMigrateRollback(
@@ -1469,31 +1527,16 @@ pub fn make(comptime Cli: type) type {
 
                     if (success) {
                         // Record migration in history (AST-native - no raw SQL!)
-                        const version = parser.generateVersion();
-                        const checksum = parser.computeChecksum(sql);
-                        const checksum_str = std.fmt.allocPrint(allocator, "{x:0>16}", .{checksum}) catch "0";
-                        defer allocator.free(checksum_str);
-
-                        const Value = @import("../ast/cmd.zig").Value;
-
-                        // Build INSERT using AST-native columns + insert_values (like qail.rs)
-                        const record_cmd = QailCmd{
-                            .kind = .add,
-                            .table = "_qail_migrations",
-                            .columns = &[_]Expr{
-                                Expr.col("version"),
-                                Expr.col("name"),
-                                Expr.col("checksum"),
-                                Expr.col("sql_up"),
-                            },
-                            .insert_values = &[_]Value{
-                                Value.fromString(&version),
-                                Value.fromString("auto_migration"),
-                                Value.fromString(checksum_str),
-                                Value.fromString("migrated"),
-                            },
+                        const version = recordMigrationReceipt(
+                            allocator,
+                            &pg,
+                            "auto_migration",
+                            sql,
+                        ) catch |err| {
+                            pg.rollback() catch {};
+                            print("Failed to record migration receipt: {}\n", .{err});
+                            return err;
                         };
-                        _ = pg.execute(&record_cmd) catch {}; // Best effort recording
 
                         pg.commit() catch |err| {
                             print("Error committing: {}\n", .{err});

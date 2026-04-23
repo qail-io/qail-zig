@@ -1521,7 +1521,9 @@ fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
 
     const has_pk = def.is_primary_key or Constraint.hasPrimaryKey(def.constraints);
     const has_unique = def.is_unique or Constraint.hasUnique(def.constraints);
-    const is_not_null = def.is_not_null or !Constraint.hasNullable(def.constraints);
+    const has_nullable = Constraint.hasNullable(def.constraints);
+    const has_not_null = def.is_not_null or Constraint.hasNotNull(def.constraints);
+    const is_not_null = has_not_null and !has_nullable;
 
     if (has_pk) {
         try writer.writeAll(" PRIMARY KEY");
@@ -1713,6 +1715,27 @@ test "ast encoder lock table uses typed mode" {
     try encoder.writeAstToSql(writer.writer(), &cmd);
 
     try std.testing.expectEqualStrings("LOCK TABLE users ACCESS EXCLUSIVE MODE", writer.getWritten());
+}
+
+test "ast encoder create table keeps unspecified columns nullable" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const defs = [_]Expr{
+        .{ .column_def = .{ .name = "id", .data_type = "serial", .is_primary_key = true } },
+        .{ .column_def = .{ .name = "nickname", .data_type = "text" } },
+        .{ .column_def = .{ .name = "email", .data_type = "text", .is_not_null = true } },
+    };
+    const cmd = QailCmd.make("users").select(&defs);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS users (id serial PRIMARY KEY, nickname text, email text NOT NULL)",
+        writer.getWritten(),
+    );
 }
 
 test "ast encoder insert uses typed source query" {
