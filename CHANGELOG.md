@@ -4,6 +4,18 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+## v0.8.1 — 2026-04-23
+
+### Added
+
+- Pipeline failures now retain inspectable metadata after drain-to-`ReadyForQuery`, including the failing query index, completed/skipped counts, rollback semantics, and PostgreSQL SQLSTATE/message/detail/hint fields.
+- The adversarial test runner can now execute a single hardening case directly, which made the live Linux real-DB regressions easier to isolate during this patch release.
+
+### Fixed
+
+- Linux `PgDriver.connect` no longer crashes on the real server/real PostgreSQL path when large transport-backed driver values move through the nested connect helpers; the connect path now materializes the final driver through pointer-based `Into` helpers instead of returning oversized driver/transport values across multiple stack frames.
+- Real pipeline-failure validation now confirms the cycle rollback semantics and connection recovery behavior on the Linux server after a failed pipelined statement.
+
 ## v0.8.0 — 2026-04-22
 
 ### Breaking

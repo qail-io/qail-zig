@@ -485,7 +485,9 @@ pub const PgDriver = struct {
 
     /// Connect to PostgreSQL
     pub fn connect(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, database: []const u8) !PgDriver {
-        return connectWithOptions(allocator, host, port, user, database, null, .{});
+        var driver: PgDriver = undefined;
+        try connectWithOptionsInto(&driver, allocator, host, port, user, database, null, .{});
+        return driver;
     }
 
     /// Connect to PostgreSQL with connect timeout (milliseconds).
@@ -497,14 +499,18 @@ pub const PgDriver = struct {
         database: []const u8,
         timeout_ms: i32,
     ) !PgDriver {
-        return connectWithOptions(allocator, host, port, user, database, null, .{
+        var driver: PgDriver = undefined;
+        try connectWithOptionsInto(&driver, allocator, host, port, user, database, null, .{
             .timeout_ms = timeout_ms,
         });
+        return driver;
     }
 
     /// Connect with password
     pub fn connectWithPassword(allocator: std.mem.Allocator, host: []const u8, port: u16, user: []const u8, database: []const u8, password: []const u8) !PgDriver {
-        return connectWithOptions(allocator, host, port, user, database, password, .{});
+        var driver: PgDriver = undefined;
+        try connectWithOptionsInto(&driver, allocator, host, port, user, database, password, .{});
+        return driver;
     }
 
     /// Connect with password and connect timeout (milliseconds).
@@ -517,9 +523,11 @@ pub const PgDriver = struct {
         password: []const u8,
         timeout_ms: i32,
     ) !PgDriver {
-        return connectWithOptions(allocator, host, port, user, database, password, .{
+        var driver: PgDriver = undefined;
+        try connectWithOptionsInto(&driver, allocator, host, port, user, database, password, .{
             .timeout_ms = timeout_ms,
         });
+        return driver;
     }
 
     /// Builder-style constructor for ergonomic connection setup.
@@ -535,11 +543,19 @@ pub const PgDriver = struct {
         };
         defer allocator.free(url);
 
-        return connectUrl(allocator, url);
+        var driver: PgDriver = undefined;
+        try connectUrlInto(&driver, allocator, url);
+        return driver;
     }
 
     /// Connect using PostgreSQL URL (`postgres://` / `postgresql://`).
     pub fn connectUrl(allocator: std.mem.Allocator, url: []const u8) !PgDriver {
+        var driver: PgDriver = undefined;
+        try connectUrlInto(&driver, allocator, url);
+        return driver;
+    }
+
+    fn connectUrlInto(out: *PgDriver, allocator: std.mem.Allocator, url: []const u8) !void {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -553,15 +569,7 @@ pub const PgDriver = struct {
         var options = parsed.options;
         options.startup_params = startup_params;
 
-        return connectWithOptions(
-            allocator,
-            parsed.host,
-            parsed.port,
-            parsed.user,
-            parsed.database,
-            parsed.password,
-            options,
-        );
+        try connectWithOptionsInto(out, allocator, parsed.host, parsed.port, parsed.user, parsed.database, parsed.password, options);
     }
 
     /// Connect with explicit options.
@@ -574,6 +582,21 @@ pub const PgDriver = struct {
         password: ?[]const u8,
         options: ConnectOptions,
     ) !PgDriver {
+        var driver: PgDriver = undefined;
+        try connectWithOptionsInto(&driver, allocator, host, port, user, database, password, options);
+        return driver;
+    }
+
+    fn connectWithOptionsInto(
+        out: *PgDriver,
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        options: ConnectOptions,
+    ) !void {
         if (options.gss_enc_mode != .disable) {
             const negotiation = try gssenc_request_mod.tryGssEncRequestStream(allocator, host, port, options.timeout_ms);
             switch (negotiation) {
@@ -584,17 +607,8 @@ pub const PgDriver = struct {
                         }
                         return err;
                     };
-                    return initDriverFromTransport(
-                        allocator,
-                        host,
-                        port,
-                        user,
-                        database,
-                        password,
-                        options.startup_params,
-                        options.auth_options,
-                        .{ .gssenc = gssenc_conn },
-                    );
+                    try connectAcceptedGssEncWithOptionsInto(out, allocator, host, port, user, database, password, options.startup_params, options.auth_options, gssenc_conn);
+                    return;
                 },
                 .rejected, .server_error => {
                     if (options.gss_enc_mode == .require) return error.GssEncRequiredButRejected;
@@ -602,19 +616,7 @@ pub const PgDriver = struct {
             }
         }
 
-        return connectWithStartupParamsAndAuth(
-            allocator,
-            host,
-            port,
-            user,
-            database,
-            password,
-            options.startup_params,
-            options.auth_options,
-            options.timeout_ms,
-            options.tls_mode,
-            options.tls_config,
-        );
+        try connectWithStartupParamsAndAuthInto(out, allocator, host, port, user, database, password, options.startup_params, options.auth_options, options.timeout_ms, options.tls_mode, options.tls_config);
     }
 
     /// Connect with explicit auth options (GSS/SSPI/Kerberos token provider).
@@ -627,9 +629,11 @@ pub const PgDriver = struct {
         password: ?[]const u8,
         auth_options: AuthOptions,
     ) !PgDriver {
-        return connectWithOptions(allocator, host, port, user, database, password, .{
+        var driver: PgDriver = undefined;
+        try connectWithOptionsInto(&driver, allocator, host, port, user, database, password, .{
             .auth_options = auth_options,
         });
+        return driver;
     }
 
     /// Connect with explicit auth options and connect timeout (milliseconds).
@@ -643,10 +647,12 @@ pub const PgDriver = struct {
         auth_options: AuthOptions,
         timeout_ms: i32,
     ) !PgDriver {
-        return connectWithOptions(allocator, host, port, user, database, password, .{
+        var driver: PgDriver = undefined;
+        try connectWithOptionsInto(&driver, allocator, host, port, user, database, password, .{
             .timeout_ms = timeout_ms,
             .auth_options = auth_options,
         });
+        return driver;
     }
 
     /// Connect with logical replication startup mode (`replication=database`).
@@ -657,7 +663,9 @@ pub const PgDriver = struct {
         user: []const u8,
         database: []const u8,
     ) !PgDriver {
-        return connectLogicalReplicationWithAuth(allocator, host, port, user, database, null, .{});
+        var driver: PgDriver = undefined;
+        try connectLogicalReplicationWithAuthInto(&driver, allocator, host, port, user, database, null, .{});
+        return driver;
     }
 
     /// Connect with logical replication startup mode and connect timeout (milliseconds).
@@ -669,7 +677,9 @@ pub const PgDriver = struct {
         database: []const u8,
         timeout_ms: i32,
     ) !PgDriver {
-        return connectLogicalReplicationWithAuthTimeout(allocator, host, port, user, database, null, .{}, timeout_ms);
+        var driver: PgDriver = undefined;
+        try connectLogicalReplicationWithAuthTimeoutInto(&driver, allocator, host, port, user, database, null, .{}, timeout_ms);
+        return driver;
     }
 
     /// Connect with password in logical replication startup mode (`replication=database`).
@@ -681,7 +691,9 @@ pub const PgDriver = struct {
         database: []const u8,
         password: []const u8,
     ) !PgDriver {
-        return connectLogicalReplicationWithAuth(allocator, host, port, user, database, password, .{});
+        var driver: PgDriver = undefined;
+        try connectLogicalReplicationWithAuthInto(&driver, allocator, host, port, user, database, password, .{});
+        return driver;
     }
 
     /// Connect with password in logical replication mode and connect timeout (milliseconds).
@@ -694,7 +706,9 @@ pub const PgDriver = struct {
         password: []const u8,
         timeout_ms: i32,
     ) !PgDriver {
-        return connectLogicalReplicationWithAuthTimeout(allocator, host, port, user, database, password, .{}, timeout_ms);
+        var driver: PgDriver = undefined;
+        try connectLogicalReplicationWithAuthTimeoutInto(&driver, allocator, host, port, user, database, password, .{}, timeout_ms);
+        return driver;
     }
 
     /// Connect with logical replication mode and explicit auth options.
@@ -707,19 +721,9 @@ pub const PgDriver = struct {
         password: ?[]const u8,
         auth_options: AuthOptions,
     ) !PgDriver {
-        return connectWithStartupParamsAndAuth(
-            allocator,
-            host,
-            port,
-            user,
-            database,
-            password,
-            &.{.{ .name = "replication", .value = "database" }},
-            auth_options,
-            null,
-            .disable,
-            null,
-        );
+        var driver: PgDriver = undefined;
+        try connectLogicalReplicationWithAuthInto(&driver, allocator, host, port, user, database, password, auth_options);
+        return driver;
     }
 
     /// Connect with logical replication mode, explicit auth options, and connect timeout (milliseconds).
@@ -733,22 +737,40 @@ pub const PgDriver = struct {
         auth_options: AuthOptions,
         timeout_ms: i32,
     ) !PgDriver {
-        return connectWithStartupParamsAndAuth(
-            allocator,
-            host,
-            port,
-            user,
-            database,
-            password,
-            &.{.{ .name = "replication", .value = "database" }},
-            auth_options,
-            timeout_ms,
-            .disable,
-            null,
-        );
+        var driver: PgDriver = undefined;
+        try connectLogicalReplicationWithAuthTimeoutInto(&driver, allocator, host, port, user, database, password, auth_options, timeout_ms);
+        return driver;
     }
 
-    fn connectWithStartupParamsAndAuth(
+    fn connectLogicalReplicationWithAuthInto(
+        out: *PgDriver,
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        auth_options: AuthOptions,
+    ) !void {
+        try connectWithStartupParamsAndAuthInto(out, allocator, host, port, user, database, password, &.{.{ .name = "replication", .value = "database" }}, auth_options, null, .disable, null);
+    }
+
+    fn connectLogicalReplicationWithAuthTimeoutInto(
+        out: *PgDriver,
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        auth_options: AuthOptions,
+        timeout_ms: i32,
+    ) !void {
+        try connectWithStartupParamsAndAuthInto(out, allocator, host, port, user, database, password, &.{.{ .name = "replication", .value = "database" }}, auth_options, timeout_ms, .disable, null);
+    }
+
+    fn connectWithStartupParamsAndAuthInto(
+        out: *PgDriver,
         allocator: std.mem.Allocator,
         host: []const u8,
         port: u16,
@@ -760,52 +782,15 @@ pub const PgDriver = struct {
         timeout_ms: ?i32,
         tls_mode: TlsMode,
         tls_config: ?TlsConfig,
-    ) !PgDriver {
-        const transport: DriverConnection = switch (tls_mode) {
-            .disable => blk: {
-                const conn = if (timeout_ms) |ms|
-                    try Connection.connectWithTimeout(allocator, host, port, ms)
-                else
-                    try Connection.connect(allocator, host, port);
-                break :blk .{ .plain = conn };
-            },
-            .prefer, .require, .verify_ca, .verify_full => blk: {
-                var config = tls_config orelse TlsConfig{};
-                if (config.server_name == null) config.server_name = host;
-                switch (tls_mode) {
-                    .verify_ca, .verify_full => {
-                        if (config.verify == .no_verification) {
-                            return error.TlsVerificationRequired;
-                        }
-                    },
-                    else => {},
-                }
-
-                var tls_conn = if (timeout_ms) |ms|
-                    try TlsConnection.connectWithTimeout(allocator, host, port, config, ms)
-                else
-                    try TlsConnection.connect(allocator, host, port, config);
-                if ((tls_mode == .require or tls_mode == .verify_ca or tls_mode == .verify_full) and !tls_conn.sslAccepted()) {
-                    tls_conn.close();
-                    return error.TlsRequired;
-                }
-                break :blk .{ .tls = tls_conn };
-            },
-        };
-        return initDriverFromTransport(
-            allocator,
-            host,
-            port,
-            user,
-            database,
-            password,
-            startup_params,
-            auth_options,
-            transport,
-        );
+    ) !void {
+        switch (tls_mode) {
+            .disable => try connectPlainWithStartupParamsAndAuthInto(out, allocator, host, port, user, database, password, startup_params, auth_options, timeout_ms),
+            .prefer, .require, .verify_ca, .verify_full => try connectTlsWithStartupParamsAndAuthInto(out, allocator, host, port, user, database, password, startup_params, auth_options, timeout_ms, tls_mode, tls_config),
+        }
     }
 
-    fn initDriverFromTransport(
+    fn connectPlainWithStartupParamsAndAuthInto(
+        out: *PgDriver,
         allocator: std.mem.Allocator,
         host: []const u8,
         port: u16,
@@ -814,19 +799,113 @@ pub const PgDriver = struct {
         password: ?[]const u8,
         startup_params: []const StartupParam,
         auth_options: AuthOptions,
-        transport: DriverConnection,
-    ) !PgDriver {
-        var owned_transport = transport;
-        errdefer owned_transport.close();
+        timeout_ms: ?i32,
+    ) !void {
+        const conn_ptr = try allocator.create(Connection);
+        defer allocator.destroy(conn_ptr);
+        conn_ptr.* = if (timeout_ms) |ms|
+            try Connection.connectWithTimeout(allocator, host, port, ms)
+        else
+            try Connection.connect(allocator, host, port);
+        var conn_owned = true;
+        errdefer if (conn_owned) conn_ptr.close();
+        try conn_ptr.startupWithParamsAndAuth(user, database, password, startup_params, auth_options);
 
-        try owned_transport.startupWithParamsAndAuth(user, database, password, startup_params, auth_options);
+        const driver_ptr = try allocator.create(PgDriver);
+        defer allocator.destroy(driver_ptr);
+        driver_ptr.* = PgDriver.init(conn_ptr.*, allocator);
+        conn_owned = false;
+        errdefer driver_ptr.deinit();
+        try populateDriverConnectState(driver_ptr, allocator, host, port, startup_params);
+        out.* = driver_ptr.*;
+    }
 
-        var driver = PgDriver.initTransport(owned_transport, allocator);
-        errdefer driver.deinit();
+    fn connectTlsWithStartupParamsAndAuthInto(
+        out: *PgDriver,
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        startup_params: []const StartupParam,
+        auth_options: AuthOptions,
+        timeout_ms: ?i32,
+        tls_mode: TlsMode,
+        tls_config: ?TlsConfig,
+    ) !void {
+        var config = tls_config orelse TlsConfig{};
+        if (config.server_name == null) config.server_name = host;
+        switch (tls_mode) {
+            .verify_ca, .verify_full => {
+                if (config.verify == .no_verification) {
+                    return error.TlsVerificationRequired;
+                }
+            },
+            else => {},
+        }
+
+        const tls_conn_ptr = try allocator.create(TlsConnection);
+        defer allocator.destroy(tls_conn_ptr);
+        tls_conn_ptr.* = if (timeout_ms) |ms|
+            try TlsConnection.connectWithTimeout(allocator, host, port, config, ms)
+        else
+            try TlsConnection.connect(allocator, host, port, config);
+        var tls_owned = true;
+        errdefer if (tls_owned) tls_conn_ptr.close();
+        if ((tls_mode == .require or tls_mode == .verify_ca or tls_mode == .verify_full) and !tls_conn_ptr.sslAccepted()) {
+            tls_conn_ptr.close();
+            return error.TlsRequired;
+        }
+        try tls_conn_ptr.startupWithParamsAndAuth(user, database, password, startup_params, auth_options);
+
+        const driver_ptr = try allocator.create(PgDriver);
+        defer allocator.destroy(driver_ptr);
+        driver_ptr.* = PgDriver.initTransport(.{ .tls = tls_conn_ptr.* }, allocator);
+        tls_owned = false;
+        errdefer driver_ptr.deinit();
+        try populateDriverConnectState(driver_ptr, allocator, host, port, startup_params);
+        out.* = driver_ptr.*;
+    }
+
+    fn connectAcceptedGssEncWithOptionsInto(
+        out: *PgDriver,
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        user: []const u8,
+        database: []const u8,
+        password: ?[]const u8,
+        startup_params: []const StartupParam,
+        auth_options: AuthOptions,
+        gssenc_conn: gssenc_mod.GssEncConnection,
+    ) !void {
+        const conn_ptr = try allocator.create(gssenc_mod.GssEncConnection);
+        defer allocator.destroy(conn_ptr);
+        conn_ptr.* = gssenc_conn;
+        var conn_owned = true;
+        errdefer if (conn_owned) conn_ptr.close();
+        try conn_ptr.startupWithParamsAndAuth(user, database, password, startup_params, auth_options);
+
+        const driver_ptr = try allocator.create(PgDriver);
+        defer allocator.destroy(driver_ptr);
+        driver_ptr.* = PgDriver.initTransport(.{ .gssenc = conn_ptr.* }, allocator);
+        conn_owned = false;
+        errdefer driver_ptr.deinit();
+        try populateDriverConnectState(driver_ptr, allocator, host, port, startup_params);
+        out.* = driver_ptr.*;
+    }
+
+    fn populateDriverConnectState(
+        driver: *PgDriver,
+        allocator: std.mem.Allocator,
+        host: []const u8,
+        port: u16,
+        startup_params: []const StartupParam,
+    ) !void {
         driver.connect_host = try allocator.dupe(u8, host);
         driver.connect_port = port;
         driver.replication_mode_enabled = connect_url_mod.hasLogicalReplicationStartupMode(startup_params);
-        return driver;
     }
 
     // ==================== AST-Native Query Execution ====================

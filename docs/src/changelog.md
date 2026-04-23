@@ -2,12 +2,12 @@
 
 QAIL Zig now tracks its own release notes separately from qail.rs.
 
-## Current Highlights (`v0.8.0`)
+## Current Highlights (`v0.8.1`)
 
-- qail-zig is now Zig `0.16+` only, with the older compatibility layer consolidated into the `runtime/*` namespace.
-- The Linux TLS path was fixed and live-validated against a real PostgreSQL server, including TLS SCRAM channel binding.
-- The Linux Kerberos/GSSENC smoke path remains green in CI and now shares the same tightened release validation story.
-- Package metadata, readme, and changelog references are aligned on `v0.8.0`.
+- Linux `PgDriver.connect` no longer crashes on the real PostgreSQL server path; the driver connect helpers now avoid returning oversized transport-backed values through nested stack frames.
+- Pipeline failures now expose query index and PostgreSQL error metadata after the batch drains, which makes hardening and recovery checks explicit.
+- The Linux TLS and enterprise-auth coverage from `v0.8.0` remains in place and is still part of the current release validation story.
+- Package metadata, readme, and changelog references are aligned on `v0.8.1`.
 
 For the repository changelog, see:
 
