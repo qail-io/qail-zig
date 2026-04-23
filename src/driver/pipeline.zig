@@ -43,12 +43,40 @@ pub const PreparedStatement = struct {
     }
 };
 
+/// Borrowed via `Pipeline.lastFailure()` until the next pipeline operation.
+pub const PipelineFailure = struct {
+    /// Number of queries the caller expected to complete in this batch.
+    expected_queries: usize,
+    /// Number of queries that completed before PostgreSQL sent ErrorResponse.
+    completed_queries: usize,
+    /// Zero-based index of the failing query within the submitted batch.
+    failed_query_index: usize,
+    /// Number of queued queries PostgreSQL discarded after the failure.
+    skipped_queries_after_failure: usize,
+    /// True when the driver drained to ReadyForQuery after the error.
+    drained_to_ready: bool,
+    /// `true` for qail's single-Sync pipeline helpers, `null` for raw bytes.
+    cycle_rolled_back: ?bool,
+    sqlstate: ?[]const u8 = null,
+    message: ?[]const u8 = null,
+    detail: ?[]const u8 = null,
+    hint: ?[]const u8 = null,
+
+    pub fn deinit(self: *PipelineFailure, allocator: std.mem.Allocator) void {
+        freeOwnedOptionalSlice(allocator, &self.sqlstate);
+        freeOwnedOptionalSlice(allocator, &self.message);
+        freeOwnedOptionalSlice(allocator, &self.detail);
+        freeOwnedOptionalSlice(allocator, &self.hint);
+    }
+};
+
 /// Pipeline execution context - holds shared state for pipelining operations
 pub const Pipeline = struct {
     conn: *Connection,
     encoder: Encoder,
     allocator: std.mem.Allocator,
     stmt_cache: std.StringHashMap(PreparedStatement),
+    last_failure: ?PipelineFailure = null,
 
     pub fn init(conn: *Connection, allocator: std.mem.Allocator) Pipeline {
         return .{
@@ -56,10 +84,12 @@ pub const Pipeline = struct {
             .encoder = Encoder.init(allocator),
             .allocator = allocator,
             .stmt_cache = std.StringHashMap(PreparedStatement).init(allocator),
+            .last_failure = null,
         };
     }
 
     pub fn deinit(self: *Pipeline) void {
+        self.clearLastFailure();
         // Clean up cached statements
         var it = self.stmt_cache.valueIterator();
         while (it.next()) |stmt| {
@@ -80,9 +110,22 @@ pub const Pipeline = struct {
         self.stmt_cache.clearRetainingCapacity();
     }
 
+    pub fn lastFailure(self: *const Pipeline) ?*const PipelineFailure {
+        if (self.last_failure == null) return null;
+        return &self.last_failure.?;
+    }
+
+    pub fn clearLastFailure(self: *Pipeline) void {
+        if (self.last_failure) |*failure| {
+            failure.deinit(self.allocator);
+            self.last_failure = null;
+        }
+    }
+
     /// Get a cached prepared statement or create a new one.
     /// Cached statements are automatically reused across calls.
     pub fn getOrPrepare(self: *Pipeline, sql: []const u8) !*PreparedStatement {
+        self.clearLastFailure();
         // Check cache first
         if (self.stmt_cache.getPtr(sql)) |cached| {
             return cached;
@@ -103,6 +146,7 @@ pub const Pipeline = struct {
     /// Prepare a SQL statement and return a handle for fast execution.
     /// The statement is registered with PostgreSQL for reuse.
     pub fn prepare(self: *Pipeline, sql: []const u8) !PreparedStatement {
+        self.clearLastFailure();
         // Generate unique statement name from SQL hash
         const hash = std.hash.Wyhash.hash(0, sql);
         const name = try std.fmt.allocPrint(self.allocator, "s{x}", .{hash});
@@ -144,6 +188,7 @@ pub const Pipeline = struct {
     /// Returns only the count of completed queries (fast path).
     pub fn pipelineAstFast(self: *Pipeline, cmds: []const *const QailCmd) !usize {
         if (cmds.len == 0) return 0;
+        self.clearLastFailure();
         try raw_policy.rejectPublicRuntimeCmds(cmds);
 
         var ast_encoder = AstEncoder.init(self.allocator);
@@ -169,6 +214,7 @@ pub const Pipeline = struct {
         cmds: []const *const QailCmd,
     ) ![][]PgRow {
         if (cmds.len == 0) return &.{};
+        self.clearLastFailure();
         try raw_policy.rejectPublicRuntimeCmds(cmds);
 
         var ast_encoder = AstEncoder.init(self.allocator);
@@ -201,6 +247,7 @@ pub const Pipeline = struct {
         params_batch: []const []const ?[]const u8,
     ) !usize {
         if (params_batch.len == 0) return 0;
+        self.clearLastFailure();
 
         // Pre-allocate buffer for ALL messages (Bind+Execute per query + Sync)
         // Estimate: ~50 bytes per query for SELECT 1 type queries
@@ -233,6 +280,7 @@ pub const Pipeline = struct {
         params_batch: []const []const ?[]const u8,
     ) ![][]PgRow {
         if (params_batch.len == 0) return &.{};
+        self.clearLastFailure();
 
         // Pre-allocate buffer for ALL messages
         var buffer: std.ArrayList(u8) = .empty;
@@ -265,6 +313,7 @@ pub const Pipeline = struct {
         wire_bytes: []const u8,
         expected_queries: usize,
     ) !usize {
+        self.clearLastFailure();
         // Send raw bytes directly (no encoding overhead)
         try self.conn.send(wire_bytes);
 
@@ -294,6 +343,7 @@ pub const Pipeline = struct {
         params_batch: []const []const ?[]const u8,
     ) ![][2]?[]const u8 {
         if (params_batch.len == 0) return &.{};
+        self.clearLastFailure();
 
         // Pre-allocate buffer for ALL messages
         var buffer: std.ArrayList(u8) = .empty;
@@ -341,8 +391,10 @@ pub const Pipeline = struct {
                     }
                 },
                 'E' => {
-                    _ = self.drainUntilReadyAfterError() catch {};
-                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                    const retryable = isPreparedStatementRetryablePayload(msg.payload);
+                    const drained = self.drainUntilReadyAfterError() catch false;
+                    captureLastFailure(self, msg.payload, results.items.len, expected, true, drained);
+                    if (retryable) {
                         self.clearCache();
                         return error.PreparedStatementRetryable;
                     }
@@ -458,8 +510,10 @@ pub const Pipeline = struct {
                     if (completed >= expected) return completed;
                 },
                 'E' => {
-                    _ = self.drainUntilReadyAfterError() catch {};
-                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                    const retryable = isPreparedStatementRetryablePayload(msg.payload);
+                    const drained = self.drainUntilReadyAfterError() catch false;
+                    captureLastFailure(self, msg.payload, completed, expected, true, drained);
+                    if (retryable) {
                         self.clearCache();
                         return error.PreparedStatementRetryable;
                     }
@@ -485,8 +539,10 @@ pub const Pipeline = struct {
                     if (completed >= expected) return completed;
                 },
                 'E' => {
-                    _ = self.drainUntilReadyAfterError() catch {};
-                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                    const retryable = isPreparedStatementRetryablePayload(msg.payload);
+                    const drained = self.drainUntilReadyAfterError() catch false;
+                    captureLastFailure(self, msg.payload, completed, expected, null, drained);
+                    if (retryable) {
                         self.clearCache();
                         return error.PreparedStatementRetryable;
                     }
@@ -579,8 +635,10 @@ pub const Pipeline = struct {
                     }
                 },
                 .error_response => {
-                    _ = self.drainUntilReadyAfterError() catch {};
-                    if (isPreparedStatementRetryablePayload(msg.payload)) {
+                    const retryable = isPreparedStatementRetryablePayload(msg.payload);
+                    const drained = self.drainUntilReadyAfterError() catch false;
+                    captureLastFailure(self, msg.payload, all_results.items.len, expected, true, drained);
+                    if (retryable) {
                         self.clearCache();
                         return error.PreparedStatementRetryable;
                     }
@@ -619,11 +677,11 @@ pub const Pipeline = struct {
         }
     }
 
-    fn drainUntilReadyAfterError(self: *Pipeline) !void {
+    fn drainUntilReadyAfterError(self: *Pipeline) !bool {
         while (true) {
             const msg = try self.conn.readMessage();
             if (!isPipelineDrainAllowedMessage(msg.msg_type)) return error.UnexpectedBackendMessageType;
-            if (msg.msg_type == .ready_for_query) return;
+            if (msg.msg_type == .ready_for_query) return true;
         }
     }
 
@@ -651,6 +709,16 @@ pub const Pipeline = struct {
         };
     }
 };
+
+fn freeOwnedOptionalSlice(allocator: std.mem.Allocator, maybe_slice: *?[]const u8) void {
+    if (maybe_slice.*) |slice| allocator.free(slice);
+    maybe_slice.* = null;
+}
+
+fn dupeOptionalSliceBestEffort(allocator: std.mem.Allocator, maybe_slice: ?[]const u8) ?[]const u8 {
+    const slice = maybe_slice orelse return null;
+    return allocator.dupe(u8, slice) catch null;
+}
 
 fn isPipelineSessionNoise(msg_type: BackendMessage) bool {
     return msg_type == .notification or msg_type == .notice or msg_type == .parameter_status;
@@ -703,6 +771,39 @@ fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
         if (j == needle.len) return true;
     }
     return false;
+}
+
+fn captureLastFailure(
+    self: *Pipeline,
+    payload: []const u8,
+    completed_queries: usize,
+    expected_queries: usize,
+    cycle_rolled_back: ?bool,
+    drained_to_ready: bool,
+) void {
+    const failed_query_index = if (completed_queries < expected_queries) completed_queries else expected_queries;
+    const skipped_queries_after_failure = if (completed_queries + 1 < expected_queries)
+        expected_queries - completed_queries - 1
+    else
+        0;
+
+    var failure = PipelineFailure{
+        .expected_queries = expected_queries,
+        .completed_queries = completed_queries,
+        .failed_query_index = failed_query_index,
+        .skipped_queries_after_failure = skipped_queries_after_failure,
+        .drained_to_ready = drained_to_ready,
+        .cycle_rolled_back = cycle_rolled_back,
+    };
+
+    var decoder = Decoder.init(payload);
+    const err_info = decoder.parseErrorResponse() catch protocol.wire.ErrorInfo{};
+    failure.sqlstate = dupeOptionalSliceBestEffort(self.allocator, err_info.code);
+    failure.message = dupeOptionalSliceBestEffort(self.allocator, err_info.message);
+    failure.detail = dupeOptionalSliceBestEffort(self.allocator, err_info.detail);
+    failure.hint = dupeOptionalSliceBestEffort(self.allocator, err_info.hint);
+
+    self.last_failure = failure;
 }
 
 fn parseDataRowFirstTwoPayload(payload: []const u8) ![2]?[]const u8 {
@@ -838,4 +939,47 @@ test "pipeline hardening: direct execute rejects oversized portal name" {
     const huge_portal = @as([*]const u8, @ptrFromInt(1))[0..too_large_len];
 
     try std.testing.expectError(error.MessageTooLarge, pipeline.encodeExecute(&buffer, huge_portal, 0));
+}
+
+test "pipeline hardening: captures last failure metadata" {
+    var pipeline = Pipeline{
+        .conn = @ptrFromInt(@alignOf(Connection)),
+        .encoder = Encoder.init(std.testing.allocator),
+        .allocator = std.testing.allocator,
+        .stmt_cache = std.StringHashMap(PreparedStatement).init(std.testing.allocator),
+    };
+    defer pipeline.deinit();
+
+    const payload = [_]u8{
+        'S', 'E', 'R', 'R', 'O', 'R', 0,
+        'C', '2', '2', 'P', '0', '2', 0,
+        'M', 'i', 'n', 'v', 'a', 'l', 'i',
+        'd', ' ', 'i', 'n', 'p', 'u', 't',
+        ' ', 's', 'y', 'n', 't', 'a', 'x',
+        ' ', 'f', 'o', 'r', ' ', 't', 'y',
+        'p', 'e', ' ', 'i', 'n', 't', 'e',
+        'g', 'e', 'r', 0,   'D', 'f', 'a',
+        'i', 'l', 'i', 'n', 'g', ' ', 'r',
+        'o', 'w', 0,   'H', 'u', 's', 'e',
+        ' ', 'a', ' ', 'v', 'a', 'l', 'i',
+        'd', ' ', 'n', 'u', 'm', 'b', 'e',
+        'r', 0,   0,
+    };
+
+    captureLastFailure(&pipeline, &payload, 1, 3, true, true);
+
+    const failure = pipeline.lastFailure() orelse return error.ExpectedPipelineFailureMetadata;
+    try std.testing.expectEqual(@as(usize, 3), failure.expected_queries);
+    try std.testing.expectEqual(@as(usize, 1), failure.completed_queries);
+    try std.testing.expectEqual(@as(usize, 1), failure.failed_query_index);
+    try std.testing.expectEqual(@as(usize, 1), failure.skipped_queries_after_failure);
+    try std.testing.expect(failure.drained_to_ready);
+    try std.testing.expectEqual(@as(?bool, true), failure.cycle_rolled_back);
+    try std.testing.expectEqualStrings("22P02", failure.sqlstate.?);
+    try std.testing.expectEqualStrings("invalid input syntax for type integer", failure.message.?);
+    try std.testing.expectEqualStrings("failing row", failure.detail.?);
+    try std.testing.expectEqualStrings("use a valid number", failure.hint.?);
+
+    pipeline.clearLastFailure();
+    try std.testing.expect(pipeline.lastFailure() == null);
 }

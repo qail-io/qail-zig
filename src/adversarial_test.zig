@@ -9,6 +9,7 @@ const PgDriver = qail.driver.driver.PgDriver;
 const PgBytesRow = qail.driver.row.PgBytesRow;
 const CancelToken = qail.driver.driver.CancelToken;
 const Connection = qail.driver.connection.Connection;
+const Pipeline = qail.driver.pipeline.Pipeline;
 const Encoder = qail.protocol.Encoder;
 const Decoder = qail.protocol.Decoder;
 const AstEncoder = qail.protocol.AstEncoder;
@@ -52,6 +53,16 @@ fn readEnvOptionalOwned(allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
         error.EnvironmentVariableNotFound => null,
         else => return err,
     };
+}
+
+fn readOptionalCaseFilter(allocator: std.mem.Allocator, args: std.process.Args) !?[]u8 {
+    if (try readEnvOptionalOwned(allocator, "QAIL_ADVERSARIAL_CASE")) |value| return value;
+
+    var it = try std.process.Args.Iterator.initAllocator(args, allocator);
+    defer it.deinit();
+    _ = it.next(); // argv[0]
+    const case_id = it.next() orelse return null;
+    return try allocator.dupe(u8, case_id);
 }
 
 fn loadDbConfig(allocator: std.mem.Allocator) !DbConfig {
@@ -460,6 +471,78 @@ fn caseErrorRecoveryAfterFailure(allocator: std.mem.Allocator, cfg: *const DbCon
     if (values.len != 1 or values[0] != 5) return error.RecoveryFailed;
 }
 
+fn casePipelineErrorSkipsRemainingQueries(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
+    var conn = try connectConnection(allocator, cfg);
+    defer conn.close();
+
+    var pipeline = Pipeline.init(&conn, allocator);
+    defer pipeline.deinit();
+
+    try executeSimpleSql(&conn, allocator, "CREATE TEMP TABLE qail_adv_pipeline_fail (value integer NOT NULL)");
+
+    const stmt = try pipeline.getOrPrepare(
+        "INSERT INTO qail_adv_pipeline_fail(value) VALUES ($1::int4)",
+    );
+
+    const first = [_]?[]const u8{"1"};
+    const failing = [_]?[]const u8{"broken"};
+    const third = [_]?[]const u8{"3"};
+    const batch = [_][]const ?[]const u8{
+        first[0..],
+        failing[0..],
+        third[0..],
+    };
+
+    if (pipeline.pipelinePreparedFast(stmt, batch[0..])) |_| {
+        return error.ExpectedQueryError;
+    } else |err| switch (err) {
+        error.QueryError => {},
+        else => return err,
+    }
+
+    const failure = pipeline.lastFailure() orelse return error.MissingPipelineFailureMetadata;
+    if (failure.expected_queries != 3) return error.UnexpectedPipelineExpectedCount;
+    if (failure.completed_queries != 1) return error.UnexpectedPipelineCompletedCount;
+    if (failure.failed_query_index != 1) return error.UnexpectedPipelineFailureIndex;
+    if (failure.skipped_queries_after_failure != 1) return error.UnexpectedPipelineSkippedCount;
+    if (!failure.drained_to_ready) return error.PipelineDidNotDrainAfterError;
+    if (failure.cycle_rolled_back != true) return error.MissingPipelineRollbackSemantics;
+    if (failure.sqlstate == null or !std.mem.eql(u8, failure.sqlstate.?, "22P02")) {
+        return error.UnexpectedPipelineFailureSqlstate;
+    }
+    const failure_message = failure.message orelse return error.MissingPipelineFailureMessage;
+    if (std.mem.indexOf(u8, failure_message, "invalid input syntax for type integer") == null) {
+        return error.UnexpectedPipelineFailureMessage;
+    }
+
+    const count_text = try querySimpleFirstColumnSql(
+        &conn,
+        allocator,
+        "SELECT COUNT(*) FROM qail_adv_pipeline_fail",
+    );
+    defer allocator.free(count_text);
+    const rolled_back_count = try std.fmt.parseInt(usize, count_text, 10);
+    if (rolled_back_count != 0) return error.PipelineFailureUnexpectedCommittedRowCount;
+
+    const recovery = [_]?[]const u8{"42"};
+    const recovery_batch = [_][]const ?[]const u8{recovery[0..]};
+    const completed = try pipeline.pipelinePreparedFast(stmt, recovery_batch[0..]);
+    if (completed != 1) return error.PipelineRecoveryUnexpectedCompletionCount;
+    if (pipeline.lastFailure() != null) return error.StalePipelineFailureMetadata;
+
+    const committed_values = try querySimpleFirstColumnSql(
+        &conn,
+        allocator,
+        "SELECT string_agg(value::text, ',' ORDER BY value) FROM qail_adv_pipeline_fail",
+    );
+    defer allocator.free(committed_values);
+    if (!std.mem.eql(u8, committed_values, "42")) return error.PipelineFailureUnexpectedCommittedValues;
+
+    const health = try querySimpleFirstColumnSql(&conn, allocator, "SELECT 99");
+    defer allocator.free(health);
+    if (!std.mem.eql(u8, health, "99")) return error.ConnectionUnhealthyAfterPipelineFailure;
+}
+
 fn caseLargeParamPayload(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
     var conn = try connectConnection(allocator, cfg);
     defer conn.close();
@@ -643,10 +726,42 @@ fn caseMidQueryCancelRecovery(allocator: std.mem.Allocator, cfg: *const DbConfig
     if (count < 1) return error.CancelRecoveryUnexpectedCount;
 }
 
-pub fn main() !void {
+fn shouldRunAdversarialCase(case_filter: ?[]const u8, case_id: []const u8) bool {
+    const filter = case_filter orelse return true;
+    return std.mem.eql(u8, filter, case_id);
+}
+
+fn runAdversarialCase(
+    case_filter: ?[]const u8,
+    case_id: []const u8,
+    label: []const u8,
+    allocator: std.mem.Allocator,
+    cfg: *const DbConfig,
+    case_fn: anytype,
+    passed: *usize,
+    failed: *usize,
+) void {
+    std.debug.print("  [{s}] {s}...", .{ case_id, label });
+    if (!shouldRunAdversarialCase(case_filter, case_id)) {
+        std.debug.print(" skipped\n", .{});
+        return;
+    }
+
+    if (case_fn(allocator, cfg)) |_| {
+        std.debug.print(" ✓\n", .{});
+        passed.* += 1;
+    } else |err| {
+        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
+        failed.* += 1;
+    }
+}
+
+pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
     var cfg = try loadDbConfig(allocator);
     defer cfg.deinit(allocator);
+    const case_filter = try readOptionalCaseFilter(allocator, init.minimal.args);
+    defer if (case_filter) |value| allocator.free(value);
 
     std.debug.print("\n", .{});
     std.debug.print("╔════════════════════════════════════════════════════════════╗\n", .{});
@@ -660,78 +775,15 @@ pub fn main() !void {
 
     var passed: usize = 0;
     var failed: usize = 0;
-
-    std.debug.print("  [1] Unicode roundtrip with QAIL DSL...", .{});
-    if (caseUnicodeRoundtrip(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
-
-    std.debug.print("  [2] SQL injection payload stays literal...", .{});
-    if (caseSqlInjectionLiteralContainment(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
-
-    std.debug.print("  [3] Portal reuse with interleaved Sync...", .{});
-    if (casePortalReuseInterleavedSync(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
-
-    std.debug.print("  [4] Error path recovery after division-by-zero...", .{});
-    if (caseErrorRecoveryAfterFailure(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
-
-    std.debug.print("  [5] Unknown statement desync + recovery...", .{});
-    if (caseUnknownStatementRecovery(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
-
-    std.debug.print("  [6] AST embedded NUL rejected fail-closed...", .{});
-    if (caseAstEmbeddedNulRejected(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
-
-    std.debug.print("  [7] Mid-query cancel (stop in the middle) + recover...", .{});
-    if (caseMidQueryCancelRecovery(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
-
-    std.debug.print("  [8] Large parameter payload roundtrip (512 KiB)...", .{});
-    if (caseLargeParamPayload(allocator, &cfg)) |_| {
-        std.debug.print(" ✓\n", .{});
-        passed += 1;
-    } else |err| {
-        std.debug.print(" ✗ {s}\n", .{@errorName(err)});
-        failed += 1;
-    }
+    runAdversarialCase(case_filter, "1", "Unicode roundtrip with QAIL DSL", allocator, &cfg, caseUnicodeRoundtrip, &passed, &failed);
+    runAdversarialCase(case_filter, "2", "SQL injection payload stays literal", allocator, &cfg, caseSqlInjectionLiteralContainment, &passed, &failed);
+    runAdversarialCase(case_filter, "3", "Portal reuse with interleaved Sync", allocator, &cfg, casePortalReuseInterleavedSync, &passed, &failed);
+    runAdversarialCase(case_filter, "4", "Error path recovery after division-by-zero", allocator, &cfg, caseErrorRecoveryAfterFailure, &passed, &failed);
+    runAdversarialCase(case_filter, "5", "Unknown statement desync + recovery", allocator, &cfg, caseUnknownStatementRecovery, &passed, &failed);
+    runAdversarialCase(case_filter, "6", "AST embedded NUL rejected fail-closed", allocator, &cfg, caseAstEmbeddedNulRejected, &passed, &failed);
+    runAdversarialCase(case_filter, "7", "Mid-query cancel (stop in the middle) + recover", allocator, &cfg, caseMidQueryCancelRecovery, &passed, &failed);
+    runAdversarialCase(case_filter, "8", "Large parameter payload roundtrip (512 KiB)", allocator, &cfg, caseLargeParamPayload, &passed, &failed);
+    runAdversarialCase(case_filter, "9", "Pipeline failure skips remaining queries + recovers", allocator, &cfg, casePipelineErrorSkipsRemainingQueries, &passed, &failed);
 
     std.debug.print("\n", .{});
     std.debug.print("────────────────────────────────────────────────────────────\n", .{});
