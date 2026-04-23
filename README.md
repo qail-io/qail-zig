@@ -9,7 +9,7 @@
 
 > **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
-> **Scope:** ~45K lines of Zig across 160 tracked `.zig` files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, builders, and benchmarks, plus optional Linux GSSAPI/libc integration for Kerberos/GSSENC.
+> **Scope:** 48,078 tracked text lines overall, including 45,334 lines of Zig across 160 tracked `.zig` files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, builders, benchmarks, and optional Linux GSSAPI/libc integration for Kerberos/GSSENC.
 >
 > **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated Zig driver implementation, with enterprise-auth on Linux using the platform GSSAPI stack rather than a self-contained Zig Kerberos implementation.
 
@@ -22,7 +22,7 @@
 
 ## Highlights
 
-- **~45K lines of Zig** — 160 tracked `.zig` files, Zig-first core runtime, optional Linux libc/GSSAPI integration only for Kerberos/GSSENC
+- **48,078 total LOC** — 45,334 Zig lines across 160 tracked `.zig` files, with optional Linux libc/GSSAPI integration only for Kerberos/GSSENC
 - **AST-Native Queries** — Type-safe query building, not string concatenation
 - **Codegen Parity** — 26 enums + 9 structs auto-generated from [qail.rs](https://github.com/qail-io/qail) AST
 - **Full PostgreSQL Driver** — Connection pooling, pipelining, TLS, COPY
@@ -260,51 +260,36 @@ zig build
 ## Project Structure
 
 ```
-src/
-├── lib.zig              # Root module
-├── cli.zig              # CLI implementation
-├── qail_main.zig        # CLI entry point
-├── data_safety.zig      # Migration safety checks
-├── validator.zig        # Schema validation
-├── fmt.zig              # QAIL formatter
-├── ast_bench.zig        # AST build + transpile benchmark
-├── ast/                 # AST types
-│   ├── cmd.zig          # QailCmd (core command type)
-│   ├── expr.zig         # Expression types
-│   ├── operators.zig    # Operators, sort orders, actions
-│   ├── values.zig       # Value types (string, int, float, etc.)
-│   ├── mod.zig          # Module re-exports
-│   ├── builders/        # 10 builder modules
-│   │   ├── mod.zig      # Builder re-exports
-│   │   ├── aggregates.zig
-│   │   ├── binary.zig
-│   │   ├── case_when.zig
-│   │   ├── cast.zig
-│   │   ├── columns.zig
-│   │   ├── conditions.zig
-│   │   ├── json.zig
-│   │   ├── literals.zig
-│   │   ├── shortcuts.zig
-│   │   ├── time.zig
-│   │   └── typed.zig
-│   └── generated/       # Auto-generated from qail.rs
-│       ├── operators.gen.zig
-│       ├── values.gen.zig
-│       ├── conditions.gen.zig
-│       ├── cages.gen.zig
-│       ├── joins.gen.zig
-│       ├── cmd.gen.zig
-│       └── expr.gen.zig
-├── parser/              # QAIL text parser
-├── protocol/            # PostgreSQL wire protocol
-├── driver/              # Database driver, pool, pipeline
-├── analyzer/            # Code scanner, impact analysis
-├── transpiler/          # SQL output (PostgreSQL dialect)
-├── fuzz/                # Fuzz test targets
-│   ├── fuzz_decoder.zig
-│   ├── fuzz_value.zig
-│   └── fuzz_transpiler.zig
-└── lsp/                 # Language Server Protocol
+.
+├── build.zig                 # Build graph and targets
+├── build.zig.zon             # Package manifest
+├── src/                      # Library, driver, tooling, tests, and benchmarks
+│   ├── lib.zig               # Root module export surface
+│   ├── main.zig              # Main build/test entry
+│   ├── qail_main.zig         # CLI entry point
+│   ├── cli.zig               # CLI commands
+│   ├── ast/                  # AST core, builders, and generated parity types
+│   ├── analyzer/             # Scanner and impact analysis
+│   ├── data_safety/          # SQL and snapshot safety helpers
+│   ├── driver/               # Connection, pool, TLS, COPY, RLS, auth
+│   ├── fuzz/                 # Fuzz targets
+│   ├── hardening/            # Startup, protocol, replication hardening
+│   ├── lsp/                  # Language Server Protocol server
+│   ├── parser/               # Grammar, schema parser, migrations, differ
+│   ├── protocol/             # Wire protocol codec and auth framing
+│   ├── qail_pgzig_bench/     # Benchmark workloads and runner
+│   ├── runtime/              # IO, time, rand, process, TLS client primitives
+│   ├── sanitize/             # AST sanitization tests
+│   └── transpiler/           # PostgreSQL SQL rendering
+├── scripts/                  # Codegen, parity, and policy guard scripts
+│   └── ci/                   # CI environment helpers
+├── docs/                     # mdBook docs, guides, and theme overrides
+│   ├── src/                  # Documentation pages and book index
+│   └── theme/                # Custom mdBook theme assets
+├── .github/workflows/        # CI workflows
+├── CHANGELOG.md              # Versioned release notes
+├── CONTRIBUTING.md           # Contribution guide
+└── PARITY_AST_PG_DRIVER.md   # qail.rs parity notes
 ```
 
 
@@ -313,7 +298,7 @@ src/
 
 | Feature | qail-zig | qail.rs |
 |---------|----------|---------|
-| Lines of code | ~22K | ~130K |
+| Total LOC | 48,078 | 208,087 |
 | Dependencies | 0 | 15+ crates |
 | Build Time | <2s | ~30s |
 | Binary Size | ~200KB | ~2MB |

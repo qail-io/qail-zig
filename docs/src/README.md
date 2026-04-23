@@ -4,12 +4,30 @@
 
 QAIL Zig is the active Zig implementation of the QAIL PostgreSQL stack. It shares the same AST direction as qail.rs, but keeps the runtime, protocol path, and tooling in Zig. The core driver path is Zig-native; Linux Kerberos/GSSENC support is an optional runtime integration with system libc/GSSAPI rather than a self-contained Zig Kerberos stack. Full qail.rs ecosystem parity is still incomplete outside the PostgreSQL-focused track.
 
-## Latest Updates (March 2026)
+## Latest Updates (April 2026)
 
 - qail-zig is active again and no longer documented as deferred.
 - PG driver hardening now includes AST sanitization, stricter startup/auth sequencing, COPY fail-closed checks, and replication hardening suites.
 - The current public benchmark story is now the dedicated qail-zig versus `pg.zig` shared-surface matrix.
 - qail-zig now has its own versioned changelog and docs track.
+- Current repository snapshot: 48,078 tracked text lines total, including 45,334 lines of Zig across 160 tracked `.zig` files.
+- The current qail.rs reference size for parity tracking is 208,087 total lines.
+
+## Repository Snapshot
+
+- Total LOC: 48,078 tracked text lines in qail-zig.
+- Zig LOC: 45,334 lines across 160 tracked `.zig` files.
+- qail.rs total LOC: 208,087 lines.
+
+```text
+.
+├── src/                # Driver, AST, parser, protocol, runtime, CLI, LSP, tests, benches
+├── scripts/            # Codegen, parity, and policy guards
+├── docs/               # mdBook pages and theme overrides
+├── .github/workflows/  # CI workflows
+├── build.zig           # Build graph and targets
+└── PARITY_AST_PG_DRIVER.md
+```
 
 ## What QAIL Zig Covers
 
