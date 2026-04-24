@@ -1,4 +1,4 @@
-//! Startup protocol hardening tests.
+//! Startup protocol fail-closed tests.
 //!
 //! Validates fail-closed behavior for malformed or out-of-order backend
 //! messages during connection startup/authentication.

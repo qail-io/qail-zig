@@ -19,7 +19,7 @@ pub const validator = @import("validator.zig");
 pub const sanitize = @import("sanitize.zig");
 pub const fmt = @import("fmt.zig");
 pub const runtime = @import("runtime/mod.zig");
-// LSP is built as a standalone binary, not exported from lib
+// Editor LSP is provided by the published qail.rs extension, not this library.
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -28,7 +28,7 @@ test {
     _ = @import("fuzz/fuzz_value.zig");
     _ = @import("fuzz/fuzz_transpiler.zig");
     _ = @import("driver/raw_policy.zig");
-    _ = @import("hardening/protocol_hardening.zig");
-    _ = @import("hardening/replication_hardening.zig");
-    _ = @import("hardening/startup_hardening.zig");
+    _ = @import("tests/protocol_fail_closed_test.zig");
+    _ = @import("tests/replication_fail_closed_test.zig");
+    _ = @import("tests/startup_fail_closed_test.zig");
 }

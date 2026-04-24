@@ -4,12 +4,17 @@ qail-zig tracks qail.rs as the reference implementation for PostgreSQL driver be
 
 ## Current Snapshot
 
-As of `2026-04-01`, the narrow AST/codegen parity checks against a local `qail.rs` checkout are green:
+As of `2026-04-23`, the narrow AST/codegen parity checks against a local `qail.rs` checkout are green:
 
 - `./scripts/check_codegen_sync.sh ../qail.rs` -> `codegen sync check passed`
 - `./scripts/check_parity.sh ../qail.rs` -> `AST actions: rust=75 zig=76`, `Encoder actions: rust=57 zig=76`, `parity check passed`
 
 That means the Rust-driven AST porting/codegen path is working for its current scope, and the PostgreSQL AST encoder still covers the Rust action surface completely.
+
+Real PostgreSQL CLI validation on the Zig side is also green on this date:
+
+- Broad CLI matrix pass: `16/16` on live DB paths (`exec`, `seed`, `pull`, `migrate status|plan|up|down`).
+- Migration receipt-collision stress pass: `6/6` immediate dual-`migrate up` runs across fresh databases.
 
 ## Active Areas with Strong Coverage
 
@@ -23,6 +28,7 @@ That means the Rust-driven AST porting/codegen path is working for its current s
 - LISTEN / NOTIFY
 - logical replication core
 - RLS helper APIs
+- CLI PostgreSQL execution path (`exec`, `seed`, `pull`, `migrate status|plan|up|down`)
 - startup/auth policy controls
 - TLS SCRAM channel-binding derivation and fail-closed precedence on TLS startup
 - protocol hardening suites
@@ -37,8 +43,8 @@ Parity is not complete across the entire qail.rs ecosystem. The largest gaps rem
 - qdrant vector driver and hybrid execution path
 - workflow engine
 - typed schema codegen (`qail types`) and build-time SQL / N+1 guard rails
-- some CLI breadth (`qail init`, `exec`, `types`, vector/hybrid flows)
-- some LSP breadth (notably formatting and code actions)
+- CLI breadth outside the core PG path (`qail init`, `types`, vector/hybrid flows)
+- editor tooling breadth remains on the qail.rs OpenVSX LSP track (not bundled in qail-zig)
 - direct SDKs and broader non-driver surfaces
 
 ## Important Policy Delta
@@ -55,6 +61,7 @@ The main remaining policy difference is narrower now:
 - The repository now also carries a dedicated Linux Kerberos/GSSENC smoke workflow that provisions a local realm + PostgreSQL service principal and proves one AST-native roundtrip over `gssencmode=require`.
 - Typed RLS helpers and typed policy parsing are now present on the Zig side, including normalization of common wrapped `current_setting(...)` forms emitted by `pg_dump`.
 - The old raw nested-query and raw policy-SQL string fields have been removed from the Zig AST shape entirely; trusted compatibility now flows through internal helper modules and raw AST variants that the public runtime gate already rejects.
+- Migration receipt recording now writes the full tracked shape (`version`, `name`, `applied_at`, `checksum`, `sql_up`, `sql_down`) and handles generated-version collisions without aborting roll-forward migrations.
 
 The main remaining enterprise-auth gap is narrower now:
 

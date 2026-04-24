@@ -13,7 +13,6 @@ pub fn showHelp() void {
         \\  init [DIR]                  Initialize schema + migrations scaffold
         \\  repl                        Interactive REPL mode
         \\  explain <QUERY>             Parse and explain a query
-        \\  symbols                     Show symbol reference
         \\  fmt <QUERY>                 Format to canonical syntax
         \\  exec [QUERY] [--file PATH] [--url URL] [--tx] [--dry-run] [--json]
         \\  seed [--file PATH] [--url URL] [--tx] [--dry-run]
@@ -25,6 +24,12 @@ pub fn showHelp() void {
         \\  mig <NAME> [--depends X] [--author Y]
         \\  watch <SCHEMA> [--url <URL>] [--auto-apply]
         \\  migrate <ACTION>            Run migrations
+        \\  vector <ACTION>             Qdrant collection + snapshot operations
+        \\  branch <ACTION>             Database branch operations
+        \\  schema <ACTION>             Modular schema tooling
+        \\  sync <ACTION>               Sync trigger management
+        \\  worker [-i N] [-b N]        Run hybrid queue worker daemon
+        \\  help                        Print help
         \\
         \\Options:
         \\  -f, --format <sql|json|pretty>   Output format for direct query mode
@@ -64,6 +69,87 @@ pub fn showHelp() void {
     , .{});
 }
 
+pub fn showBranchHelp() void {
+    print(
+        \\Database branch operations
+        \\
+        \\Usage: qail branch <ACTION> [ARGS]
+        \\
+        \\Actions:
+        \\  create <NAME> [--parent NAME] [--url URL]   Create branch metadata
+        \\  list [--url URL]                             List branches
+        \\  delete <NAME> [--url URL]                    Soft-delete a branch
+        \\  merge <NAME> [--url URL]                     Mark a branch as merged
+        \\  help                                          Show branch help
+        \\
+        \\Examples:
+        \\  qail branch create feature_auth --url postgres://localhost/mydb
+        \\  qail branch list --url postgres://localhost/mydb
+        \\  qail branch merge feature_auth --url postgres://localhost/mydb
+        \\
+    , .{});
+}
+
+pub fn showSchemaHelp() void {
+    print(
+        \\Modular schema tooling
+        \\
+        \\Usage: qail schema <ACTION> [ARGS]
+        \\
+        \\Actions:
+        \\  doctor [SCHEMA] [--strict]                 Validate module/source consistency
+        \\  split [SCHEMA] [--out DIR] [--force]       Split schema into module directory
+        \\  merge [SCHEMA_DIR] [--output FILE]         Merge modules into one schema file
+        \\  help                                       Show schema help
+        \\
+        \\Examples:
+        \\  qail schema doctor schema --strict
+        \\  qail schema split schema.qail --out schema --force
+        \\  qail schema merge schema --output schema.qail
+        \\
+    , .{});
+}
+
+pub fn showSyncHelp() void {
+    print(
+        \\Sync trigger tooling
+        \\
+        \\Usage: qail sync <ACTION>
+        \\
+        \\Actions:
+        \\  generate                    Generate sync migration files from qail.toml
+        \\  list                        List configured sync rules
+        \\  help                        Show sync help
+        \\
+        \\Examples:
+        \\  qail sync generate
+        \\  qail sync list
+        \\
+    , .{});
+}
+
+pub fn showVectorHelp() void {
+    print(
+        \\Vector database operations (Qdrant REST API)
+        \\
+        \\Usage: qail vector <ACTION> [ARGS]
+        \\
+        \\Actions:
+        \\  create <COLLECTION> --size N [--distance cosine|euclidean|dot] <URL>
+        \\  drop <COLLECTION> <URL>
+        \\  backup <COLLECTION> [--output FILE] <URL>
+        \\  restore <COLLECTION> --snapshot PATH_OR_URL <URL>
+        \\  snapshots <COLLECTION> <URL>
+        \\  help
+        \\
+        \\Examples:
+        \\  qail vector create products --size 1536 --distance cosine http://localhost:6333
+        \\  qail vector backup products --output products.snapshot http://localhost:6333
+        \\  qail vector snapshots products http://localhost:6333
+        \\
+    , .{});
+}
+
 pub fn showMigrateHelp() void {
     print(
         \\Apply migrations from schema diff
@@ -93,6 +179,7 @@ pub fn showMigrateHelp() void {
         \\  shadow <DIFF|SCHEMA> <URL> [--live] Prepare shadow database and save receipt
         \\  promote <URL>                    Apply shadow diff to primary and drop shadow DB
         \\  abort <URL>                      Drop shadow DB and mark receipt aborted
+        \\  help                             Show migrate help
         \\
         \\Examples:
         \\  qail migrate plan v1.qail:v2.qail

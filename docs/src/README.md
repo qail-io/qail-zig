@@ -10,18 +10,20 @@ QAIL Zig is the active Zig implementation of the QAIL PostgreSQL stack. It share
 - PG driver hardening now includes AST sanitization, stricter startup/auth sequencing, COPY fail-closed checks, and replication hardening suites.
 - The current public benchmark story is now the dedicated qail-zig versus `pg.zig` shared-surface matrix.
 - qail-zig now has its own versioned changelog and docs track.
-- Current repository snapshot: 48,078 tracked text lines total, including 45,334 lines of Zig across 160 tracked `.zig` files.
-- The current qail.rs reference size for parity tracking is 208,087 total lines.
+- Real PostgreSQL CLI validation is now explicitly tracked for `exec`, `seed`, `pull`, and `migrate status|plan|up|down` paths.
+- Migration receipt hardening now records full receipt fields and handles generated-version collisions for immediate back-to-back migration runs.
+- Current repository snapshot: 52,795 tracked text lines total, including 50,049 lines of Zig across 169 tracked `.zig` files.
+- The current qail.rs reference size for parity tracking is 209,728 total lines.
 
 ## Repository Snapshot
 
-- Total LOC: 48,078 tracked text lines in qail-zig.
-- Zig LOC: 45,334 lines across 160 tracked `.zig` files.
-- qail.rs total LOC: 208,087 lines.
+- Total LOC: 52,795 tracked text lines in qail-zig.
+- Zig LOC: 50,049 lines across 169 tracked `.zig` files.
+- qail.rs total LOC: 209,728 lines.
 
 ```text
 .
-├── src/                # Driver, AST, parser, protocol, runtime, CLI, LSP, tests, benches
+├── src/                # Driver, AST, parser, protocol, runtime, CLI, tests, benches
 ├── scripts/            # Codegen, parity, and policy guards
 ├── docs/               # mdBook pages and theme overrides
 ├── .github/workflows/  # CI workflows
@@ -39,7 +41,8 @@ QAIL Zig is the active Zig implementation of the QAIL PostgreSQL stack. It share
 | COPY in/out helpers | ✅ Active |
 | TLS | ✅ Active |
 | Logical replication core | ✅ Active |
-| CLI + LSP | ✅ Active |
+| CLI | ✅ Active |
+| Editor LSP (via qail.rs extension) | ✅ External |
 | Security hardening suites | ✅ Active |
 | qail.rs parity tracking | ✅ Active |
 

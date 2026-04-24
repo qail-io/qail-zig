@@ -7,9 +7,9 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.8.1-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.8.1)
 
-> **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, LSP, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
+> **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
-> **Scope:** 48,078 tracked text lines overall, including 45,334 lines of Zig across 160 tracked `.zig` files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, LSP, builders, benchmarks, and optional Linux GSSAPI/libc integration for Kerberos/GSSENC.
+> **Scope:** 48,078 tracked text lines overall, including 45,334 lines of Zig across 160 tracked `.zig` files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, builders, benchmarks, and optional Linux GSSAPI/libc integration for Kerberos/GSSENC.
 >
 > **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated Zig driver implementation, with enterprise-auth on Linux using the platform GSSAPI stack rather than a self-contained Zig Kerberos implementation.
 
@@ -28,7 +28,7 @@
 - **Full PostgreSQL Driver** — Connection pooling, pipelining, TLS, COPY
 - **10 Builder Modules** — Conditions, aggregates, binary, cast, JSON, literals, time, case/when, shortcuts, typed
 - **Fuzz Testing** — Decoder, value, and transpiler fuzzing
-- **Language Server** — LSP with hover, completions, diagnostics
+- **Editor Tooling** — Use the published qail.rs OpenVSX LSP extension
 - **CLI** — Migrations, REPL, formatting, schema diff
 
 ## Benchmarks
@@ -246,17 +246,6 @@ qail fmt file.qail       # Format QAIL
 qail lint file.qail      # Lint checks
 ```
 
-## LSP (Language Server)
-
-```bash
-zig build
-./zig-out/bin/qail-lsp
-```
-
-- **textDocument/completion** — QAIL keywords, snippets
-- **textDocument/hover** — Query info, SQL preview
-- **textDocument/publishDiagnostics** — Parse errors
-
 ## Project Structure
 
 ```
@@ -273,8 +262,7 @@ zig build
 │   ├── data_safety/          # SQL and snapshot safety helpers
 │   ├── driver/               # Connection, pool, TLS, COPY, RLS, auth
 │   ├── fuzz/                 # Fuzz targets
-│   ├── hardening/            # Startup, protocol, replication hardening
-│   ├── lsp/                  # Language Server Protocol server
+│   ├── tests/                # Integration, smoke, stress, and fail-closed suites
 │   ├── parser/               # Grammar, schema parser, migrations, differ
 │   ├── protocol/             # Wire protocol codec and auth framing
 │   ├── qail_pgzig_bench/     # Benchmark workloads and runner
@@ -304,7 +292,7 @@ zig build
 | Binary Size | ~200KB | ~2MB |
 | Codegen | Yes (generated from Rust) | Yes (source of truth) |
 | CLI | Yes | Yes |
-| LSP | Yes | Yes |
+| Bundled LSP binary | No (use qail.rs OpenVSX extension) | Yes |
 | Connection Pool | Yes | Yes |
 | TLS | Yes (std.crypto) | Yes (rustls) |
 | COPY Protocol | Yes | Yes |

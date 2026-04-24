@@ -7,6 +7,10 @@ pub fn make(comptime Cli: type) type {
     const Dialect = Cli.Dialect;
     const MigrationDirection = Cli.MigrationDirection;
     const ApplyPhase = Cli.ApplyPhase;
+    const BranchAction = Cli.BranchAction;
+    const SchemaAction = Cli.SchemaAction;
+    const SyncAction = Cli.SyncAction;
+    const VectorAction = Cli.VectorAction;
 
     return struct {
         const GlobalOptions = struct {
@@ -26,6 +30,40 @@ pub fn make(comptime Cli: type) type {
             if (std.mem.eql(u8, value, "postgres")) return .postgres;
             if (std.mem.eql(u8, value, "sqlite")) return .sqlite;
             return null;
+        }
+
+        fn isHelpToken(value: []const u8) bool {
+            return std.mem.eql(u8, value, "--help") or std.mem.eql(u8, value, "-h");
+        }
+
+        fn hasHelpToken(values: []const []const u8) bool {
+            for (values) |value| {
+                if (isHelpToken(value)) return true;
+            }
+            return false;
+        }
+
+        fn isKnownTopLevelCommand(value: []const u8) bool {
+            return std.mem.eql(u8, value, "init") or
+                std.mem.eql(u8, value, "repl") or
+                std.mem.eql(u8, value, "explain") or
+                std.mem.eql(u8, value, "symbols") or
+                std.mem.eql(u8, value, "fmt") or
+                std.mem.eql(u8, value, "exec") or
+                std.mem.eql(u8, value, "seed") or
+                std.mem.eql(u8, value, "types") or
+                std.mem.eql(u8, value, "pull") or
+                std.mem.eql(u8, value, "check") or
+                std.mem.eql(u8, value, "diff") or
+                std.mem.eql(u8, value, "lint") or
+                std.mem.eql(u8, value, "mig") or
+                std.mem.eql(u8, value, "watch") or
+                std.mem.eql(u8, value, "migrate") or
+                std.mem.eql(u8, value, "branch") or
+                std.mem.eql(u8, value, "schema") or
+                std.mem.eql(u8, value, "sync") or
+                std.mem.eql(u8, value, "vector") or
+                std.mem.eql(u8, value, "worker");
         }
 
         /// Parse CLI arguments into a Command
@@ -73,6 +111,52 @@ pub fn make(comptime Cli: type) type {
 
             const first = args[i];
             const rest = args[(i + 1)..];
+
+            if (std.mem.eql(u8, first, "help")) {
+                if (rest.len >= 1 and std.mem.eql(u8, rest[0], "migrate")) return .migrate_help;
+                if (rest.len >= 1 and std.mem.eql(u8, rest[0], "branch")) return .branch_help;
+                if (rest.len >= 1 and std.mem.eql(u8, rest[0], "schema")) return .schema_help;
+                if (rest.len >= 1 and std.mem.eql(u8, rest[0], "sync")) return .sync_help;
+                if (rest.len >= 1 and std.mem.eql(u8, rest[0], "vector")) return .vector_help;
+                return .help;
+            }
+
+            if (std.mem.eql(u8, first, "migrate")) {
+                if (hasHelpToken(rest)) return .migrate_help;
+                return parseMigrateAction(rest);
+            }
+            if (std.mem.eql(u8, first, "branch")) {
+                if (rest.len == 0) return .branch_help;
+                if (rest.len > 0 and std.mem.eql(u8, rest[0], "help")) return .branch_help;
+                if (hasHelpToken(rest)) return .branch_help;
+                return .{ .branch = try parseBranchAction(rest) };
+            }
+            if (std.mem.eql(u8, first, "schema")) {
+                if (rest.len == 0) return .schema_help;
+                if (rest.len > 0 and std.mem.eql(u8, rest[0], "help")) return .schema_help;
+                if (hasHelpToken(rest)) return .schema_help;
+                return .{ .schema = try parseSchemaAction(rest) };
+            }
+            if (std.mem.eql(u8, first, "sync")) {
+                if (rest.len == 0) return .sync_help;
+                if (rest.len > 0 and std.mem.eql(u8, rest[0], "help")) return .sync_help;
+                if (hasHelpToken(rest)) return .sync_help;
+                return .{ .sync = try parseSyncAction(rest) };
+            }
+            if (std.mem.eql(u8, first, "vector")) {
+                if (rest.len == 0) return .vector_help;
+                if (rest.len > 0 and std.mem.eql(u8, rest[0], "help")) return .vector_help;
+                if (hasHelpToken(rest)) return .vector_help;
+                return .{ .vector = try parseVectorAction(rest) };
+            }
+            if (std.mem.eql(u8, first, "worker")) {
+                if (hasHelpToken(rest)) return .help;
+                return .{ .worker = try parseWorkerCommand(rest) };
+            }
+
+            if (isKnownTopLevelCommand(first) and hasHelpToken(rest)) {
+                return .help;
+            }
 
             // Check for subcommands
             if (std.mem.eql(u8, first, "init")) {
@@ -281,8 +365,6 @@ pub fn make(comptime Cli: type) type {
                 }
 
                 return .{ .watch = .{ .schema = rest[0], .url = url, .auto_apply = auto_apply } };
-            } else if (std.mem.eql(u8, first, "migrate")) {
-                return parseMigrateAction(rest);
             }
 
             // Default: transpile query
@@ -759,6 +841,351 @@ pub fn make(comptime Cli: type) type {
             }
 
             return error.UnknownCommand;
+        }
+
+        fn parseBranchAction(args: []const []const u8) !BranchAction {
+            if (args.len == 0) return error.MissingArgument;
+            const action = args[0];
+
+            if (std.mem.eql(u8, action, "help")) return error.UnknownOption;
+            if (std.mem.eql(u8, action, "create")) {
+                if (args.len < 2) return error.MissingArgument;
+                var parent: ?[]const u8 = null;
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--parent")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        parent = args[i];
+                        continue;
+                    }
+                    if (std.mem.eql(u8, arg, "--url") or std.mem.eql(u8, arg, "-u")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        url = args[i];
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .create = .{
+                    .name = args[1],
+                    .parent = parent,
+                    .url = url,
+                } };
+            }
+            if (std.mem.eql(u8, action, "list")) {
+                var url: ?[]const u8 = null;
+                var i: usize = 1;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--url") or std.mem.eql(u8, arg, "-u")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        url = args[i];
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .list = .{ .url = url } };
+            }
+            if (std.mem.eql(u8, action, "delete")) {
+                if (args.len < 2) return error.MissingArgument;
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--url") or std.mem.eql(u8, arg, "-u")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        url = args[i];
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .delete = .{
+                    .name = args[1],
+                    .url = url,
+                } };
+            }
+            if (std.mem.eql(u8, action, "merge")) {
+                if (args.len < 2) return error.MissingArgument;
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--url") or std.mem.eql(u8, arg, "-u")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        url = args[i];
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .merge = .{
+                    .name = args[1],
+                    .url = url,
+                } };
+            }
+
+            return error.UnknownCommand;
+        }
+
+        fn parseSchemaAction(args: []const []const u8) !SchemaAction {
+            if (args.len == 0) return .{ .doctor = .{} };
+            const action = args[0];
+
+            if (std.mem.eql(u8, action, "doctor")) {
+                var schema: []const u8 = "schema.qail";
+                var strict = false;
+                var i: usize = 1;
+                if (i < args.len and !std.mem.startsWith(u8, args[i], "-")) {
+                    schema = args[i];
+                    i += 1;
+                }
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--strict")) {
+                        strict = true;
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .doctor = .{ .schema = schema, .strict = strict } };
+            }
+            if (std.mem.eql(u8, action, "split")) {
+                var input: []const u8 = "schema.qail";
+                var out: []const u8 = "schema";
+                var force = false;
+                var i: usize = 1;
+                if (i < args.len and !std.mem.startsWith(u8, args[i], "-")) {
+                    input = args[i];
+                    i += 1;
+                }
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--out") or std.mem.eql(u8, arg, "-o")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        out = args[i];
+                        continue;
+                    }
+                    if (std.mem.eql(u8, arg, "--force")) {
+                        force = true;
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .split = .{
+                    .input = input,
+                    .out = out,
+                    .force = force,
+                } };
+            }
+            if (std.mem.eql(u8, action, "merge")) {
+                var input: []const u8 = "schema";
+                var output: []const u8 = "schema.qail";
+                var i: usize = 1;
+                if (i < args.len and !std.mem.startsWith(u8, args[i], "-")) {
+                    input = args[i];
+                    i += 1;
+                }
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        output = args[i];
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .merge = .{ .input = input, .output = output } };
+            }
+            if (std.mem.eql(u8, action, "help")) return error.UnknownOption;
+
+            return error.UnknownCommand;
+        }
+
+        fn parseSyncAction(args: []const []const u8) !SyncAction {
+            if (args.len == 0) return error.MissingArgument;
+            if (std.mem.eql(u8, args[0], "generate")) {
+                if (args.len != 1) return error.UnknownOption;
+                return .generate;
+            }
+            if (std.mem.eql(u8, args[0], "list")) {
+                if (args.len != 1) return error.UnknownOption;
+                return .list;
+            }
+            if (std.mem.eql(u8, args[0], "help")) return error.UnknownOption;
+            return error.UnknownCommand;
+        }
+
+        fn parseVectorAction(args: []const []const u8) !VectorAction {
+            if (args.len == 0) return error.MissingArgument;
+            const action = args[0];
+
+            if (std.mem.eql(u8, action, "create")) {
+                if (args.len < 2) return error.MissingArgument;
+                var size: ?u64 = null;
+                var distance: []const u8 = "cosine";
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--size") or std.mem.eql(u8, arg, "-s")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        size = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidArgument;
+                        continue;
+                    }
+                    if (std.mem.eql(u8, arg, "--distance") or std.mem.eql(u8, arg, "-d")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        distance = args[i];
+                        continue;
+                    }
+                    if (std.mem.startsWith(u8, arg, "-")) return error.UnknownOption;
+                    if (url == null) {
+                        url = arg;
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{
+                    .create = .{
+                        .collection = args[1],
+                        .size = size orelse return error.MissingArgument,
+                        .distance = distance,
+                        .url = url orelse return error.MissingArgument,
+                    },
+                };
+            }
+
+            if (std.mem.eql(u8, action, "drop")) {
+                if (args.len < 2) return error.MissingArgument;
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.startsWith(u8, arg, "-")) return error.UnknownOption;
+                    if (url == null) {
+                        url = arg;
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .drop = .{ .collection = args[1], .url = url orelse return error.MissingArgument } };
+            }
+
+            if (std.mem.eql(u8, action, "backup")) {
+                if (args.len < 2) return error.MissingArgument;
+                var output: ?[]const u8 = null;
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        output = args[i];
+                        continue;
+                    }
+                    if (std.mem.startsWith(u8, arg, "-")) return error.UnknownOption;
+                    if (url == null) {
+                        url = arg;
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{
+                    .backup = .{
+                        .collection = args[1],
+                        .output = output,
+                        .url = url orelse return error.MissingArgument,
+                    },
+                };
+            }
+
+            if (std.mem.eql(u8, action, "restore")) {
+                if (args.len < 2) return error.MissingArgument;
+                var snapshot: ?[]const u8 = null;
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.eql(u8, arg, "--snapshot") or std.mem.eql(u8, arg, "-s")) {
+                        i += 1;
+                        if (i >= args.len) return error.MissingArgument;
+                        snapshot = args[i];
+                        continue;
+                    }
+                    if (std.mem.startsWith(u8, arg, "-")) return error.UnknownOption;
+                    if (url == null) {
+                        url = arg;
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{
+                    .restore = .{
+                        .collection = args[1],
+                        .snapshot = snapshot orelse return error.MissingArgument,
+                        .url = url orelse return error.MissingArgument,
+                    },
+                };
+            }
+
+            if (std.mem.eql(u8, action, "snapshots")) {
+                if (args.len < 2) return error.MissingArgument;
+                var url: ?[]const u8 = null;
+                var i: usize = 2;
+                while (i < args.len) : (i += 1) {
+                    const arg = args[i];
+                    if (std.mem.startsWith(u8, arg, "-")) return error.UnknownOption;
+                    if (url == null) {
+                        url = arg;
+                        continue;
+                    }
+                    return error.UnknownOption;
+                }
+                return .{ .snapshots = .{
+                    .collection = args[1],
+                    .url = url orelse return error.MissingArgument,
+                } };
+            }
+
+            if (std.mem.eql(u8, action, "help")) return error.UnknownOption;
+            return error.UnknownCommand;
+        }
+
+        fn parseWorkerCommand(args: []const []const u8) !Cli.WorkerCmd {
+            var interval_ms: u64 = 1000;
+            var batch_size: u32 = 100;
+
+            var i: usize = 0;
+            while (i < args.len) : (i += 1) {
+                const arg = args[i];
+                if (std.mem.eql(u8, arg, "--interval") or std.mem.eql(u8, arg, "-i")) {
+                    i += 1;
+                    if (i >= args.len) return error.MissingArgument;
+                    interval_ms = std.fmt.parseInt(u64, args[i], 10) catch return error.InvalidArgument;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--batch") or std.mem.eql(u8, arg, "-b")) {
+                    i += 1;
+                    if (i >= args.len) return error.MissingArgument;
+                    batch_size = std.fmt.parseInt(u32, args[i], 10) catch return error.InvalidArgument;
+                    continue;
+                }
+                return error.UnknownOption;
+            }
+
+            return .{
+                .interval_ms = interval_ms,
+                .batch_size = batch_size,
+            };
         }
 
         fn parseApplyPhaseValue(value: []const u8) ?ApplyPhase {

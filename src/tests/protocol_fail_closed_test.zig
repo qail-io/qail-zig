@@ -1,4 +1,4 @@
-//! Protocol hardening tests (wire encoder).
+//! Protocol fail-closed tests (wire encoder).
 //!
 //! Focused on fail-closed behavior and byte-level correctness.
 

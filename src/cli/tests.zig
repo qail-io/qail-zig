@@ -88,6 +88,277 @@ pub fn make(comptime Cli: type) type {
             try std.testing.expect(cmd == .migrate_help);
         }
 
+        test "parse top-level help command" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .help);
+        }
+
+        test "parse init help flag returns help action" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "init",
+                "--help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .help);
+        }
+
+        test "parse mig help flag returns help action" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "mig",
+                "--help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .help);
+        }
+
+        test "parse exec help flag returns help action" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "exec",
+                "--help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .help);
+        }
+
+        test "parse migrate subcommand help flag returns migrate help action" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "migrate",
+                "up",
+                "--help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .migrate_help);
+        }
+
+        test "parse branch help command" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "branch",
+                "help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .branch_help);
+        }
+
+        test "parse schema help command" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "schema",
+                "help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .schema_help);
+        }
+
+        test "parse sync help command" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "sync",
+                "help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .sync_help);
+        }
+
+        test "parse vector help command" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "vector",
+                "help",
+            };
+
+            const cmd = try parse(allocator, &args);
+            try std.testing.expect(cmd == .vector_help);
+        }
+
+        test "parse branch create with parent and url" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "branch",
+                "create",
+                "feature_auth",
+                "--parent",
+                "main",
+                "--url",
+                "postgres://localhost/mydb",
+            };
+
+            const cmd = try parse(allocator, &args);
+            switch (cmd) {
+                .branch => |b| switch (b) {
+                    .create => |c| {
+                        try std.testing.expectEqualStrings("feature_auth", c.name);
+                        try std.testing.expect(c.parent != null);
+                        try std.testing.expectEqualStrings("main", c.parent.?);
+                        try std.testing.expect(c.url != null);
+                        try std.testing.expectEqualStrings("postgres://localhost/mydb", c.url.?);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        test "parse schema split defaults and flags" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "schema",
+                "split",
+                "--out",
+                "schema_modules",
+                "--force",
+            };
+
+            const cmd = try parse(allocator, &args);
+            switch (cmd) {
+                .schema => |s| switch (s) {
+                    .split => |split| {
+                        try std.testing.expectEqualStrings("schema.qail", split.input);
+                        try std.testing.expectEqualStrings("schema_modules", split.out);
+                        try std.testing.expect(split.force);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        test "parse sync generate action" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "sync",
+                "generate",
+            };
+
+            const cmd = try parse(allocator, &args);
+            switch (cmd) {
+                .sync => |action| try std.testing.expect(action == .generate),
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        test "parse vector create with size distance and url" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "vector",
+                "create",
+                "products",
+                "--size",
+                "1536",
+                "--distance",
+                "cosine",
+                "http://localhost:6333",
+            };
+
+            const cmd = try parse(allocator, &args);
+            switch (cmd) {
+                .vector => |action| switch (action) {
+                    .create => |create| {
+                        try std.testing.expectEqualStrings("products", create.collection);
+                        try std.testing.expectEqual(@as(u64, 1536), create.size);
+                        try std.testing.expectEqualStrings("cosine", create.distance);
+                        try std.testing.expectEqualStrings("http://localhost:6333", create.url);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        test "parse vector backup with output" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "vector",
+                "backup",
+                "products",
+                "--output",
+                "products.snapshot",
+                "http://localhost:6333",
+            };
+
+            const cmd = try parse(allocator, &args);
+            switch (cmd) {
+                .vector => |action| switch (action) {
+                    .backup => |backup| {
+                        try std.testing.expectEqualStrings("products", backup.collection);
+                        try std.testing.expect(backup.output != null);
+                        try std.testing.expectEqualStrings("products.snapshot", backup.output.?);
+                        try std.testing.expectEqualStrings("http://localhost:6333", backup.url);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        test "parse worker defaults" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "worker",
+            };
+
+            const cmd = try parse(allocator, &args);
+            switch (cmd) {
+                .worker => |worker| {
+                    try std.testing.expectEqual(@as(u64, 1000), worker.interval_ms);
+                    try std.testing.expectEqual(@as(u32, 100), worker.batch_size);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        test "parse worker explicit interval and batch" {
+            const allocator = std.testing.allocator;
+            const args = [_][]const u8{
+                "qail",
+                "worker",
+                "--interval",
+                "200",
+                "--batch",
+                "50",
+            };
+
+            const cmd = try parse(allocator, &args);
+            switch (cmd) {
+                .worker => |worker| {
+                    try std.testing.expectEqual(@as(u64, 200), worker.interval_ms);
+                    try std.testing.expectEqual(@as(u32, 50), worker.batch_size);
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
         test "parse migrate status without url uses empty sentinel" {
             const allocator = std.testing.allocator;
             const args = [_][]const u8{

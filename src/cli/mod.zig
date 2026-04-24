@@ -15,6 +15,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const QailCmd = @import("../ast/cmd.zig").QailCmd;
 const schema_cli = @import("schema.zig");
+const schema_tools_cli = @import("schema_tools.zig").make(@This());
 const commands = @import("commands.zig").make(@This());
 const migrate_support = @import("migrate_support.zig").make(@This());
 const migrate = @import("migrate.zig").make(@This());
@@ -22,6 +23,10 @@ const parse_cli = @import("parse.zig").make(@This());
 const lock_cli = @import("lock.zig").make(@This());
 const help_cli = @import("help.zig");
 const project_cli = @import("project.zig");
+const branch_cli = @import("branch.zig").make(@This());
+const sync_cli = @import("sync.zig").make(@This());
+const vector_cli = @import("vector.zig").make(@This());
+const worker_cli = @import("worker.zig").make(@This());
 
 comptime {
     if (builtin.is_test) {
@@ -43,6 +48,11 @@ pub const SeedCmd = struct {
     url: ?[]const u8 = null,
     tx: bool = false,
     dry_run: bool = false,
+};
+
+pub const WorkerCmd = struct {
+    interval_ms: u64 = 1000,
+    batch_size: u32 = 100,
 };
 
 pub const Command = union(enum) {
@@ -78,10 +88,86 @@ pub const Command = union(enum) {
         url: ?[]const u8 = null,
         auto_apply: bool = false,
     },
+    branch: BranchAction,
+    schema: SchemaAction,
+    sync: SyncAction,
+    vector: VectorAction,
+    worker: WorkerCmd,
     migrate: MigrateAction,
     migrate_help,
+    branch_help,
+    schema_help,
+    sync_help,
+    vector_help,
     help,
     version,
+};
+
+pub const BranchAction = union(enum) {
+    create: struct {
+        name: []const u8,
+        parent: ?[]const u8 = null,
+        url: ?[]const u8 = null,
+    },
+    list: struct {
+        url: ?[]const u8 = null,
+    },
+    delete: struct {
+        name: []const u8,
+        url: ?[]const u8 = null,
+    },
+    merge: struct {
+        name: []const u8,
+        url: ?[]const u8 = null,
+    },
+};
+
+pub const SchemaAction = union(enum) {
+    doctor: struct {
+        schema: []const u8 = "schema.qail",
+        strict: bool = false,
+    },
+    split: struct {
+        input: []const u8 = "schema.qail",
+        out: []const u8 = "schema",
+        force: bool = false,
+    },
+    merge: struct {
+        input: []const u8 = "schema",
+        output: []const u8 = "schema.qail",
+    },
+};
+
+pub const SyncAction = enum {
+    generate,
+    list,
+};
+
+pub const VectorAction = union(enum) {
+    create: struct {
+        collection: []const u8,
+        size: u64,
+        distance: []const u8 = "cosine",
+        url: []const u8,
+    },
+    drop: struct {
+        collection: []const u8,
+        url: []const u8,
+    },
+    backup: struct {
+        collection: []const u8,
+        output: ?[]const u8 = null,
+        url: []const u8,
+    },
+    restore: struct {
+        collection: []const u8,
+        snapshot: []const u8,
+        url: []const u8,
+    },
+    snapshots: struct {
+        collection: []const u8,
+        url: []const u8,
+    },
 };
 
 pub const MigrateAction = union(enum) {
@@ -226,8 +312,17 @@ pub fn run(allocator: Allocator, cmd: Command) !void {
         .diff => |d| try schema_cli.diffSchemas(allocator, d.old, d.new, @tagName(d.format)),
         .lint => |l| try schema_cli.lintSchema(allocator, l.schema, l.strict),
         .watch => |w| try schema_cli.watchSchema(allocator, w.schema, w.url, w.auto_apply),
+        .branch => |b| try branch_cli.runBranch(allocator, b),
+        .schema => |s| try schema_tools_cli.runSchema(allocator, s),
+        .sync => |s| try sync_cli.runSync(allocator, s),
+        .vector => |v| try vector_cli.runVector(allocator, v),
+        .worker => |w| try worker_cli.runWorker(allocator, w),
         .migrate => |m| try migrate.runMigrate(allocator, m),
         .migrate_help => help_cli.showMigrateHelp(),
+        .branch_help => help_cli.showBranchHelp(),
+        .schema_help => help_cli.showSchemaHelp(),
+        .sync_help => help_cli.showSyncHelp(),
+        .vector_help => help_cli.showVectorHelp(),
         .help => help_cli.showHelp(),
         .version => help_cli.showVersion(),
     }

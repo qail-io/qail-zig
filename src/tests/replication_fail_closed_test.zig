@@ -1,4 +1,4 @@
-//! Replication protocol hardening tests.
+//! Replication protocol fail-closed tests.
 //!
 //! Exercises `START_REPLICATION` fail-closed behavior against malformed or
 //! out-of-order backend responses using a real TCP connection.
