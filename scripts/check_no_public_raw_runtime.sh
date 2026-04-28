@@ -15,6 +15,8 @@ checks=(
   "src/driver/mod.zig:pub const raw_cmd ="
   "src/driver/mod.zig:pub const query ="
   "src/driver/mod.zig:pub const cursor ="
+  "src/lib.zig:pub const data_safety ="
+  "src/data_safety/mod.zig:pub const sql ="
   "src/ast/mod.zig:pub const raw_cmd ="
   "src/driver/prepared.zig:pub fn fromSql("
   "src/driver/pipeline.zig:pub fn getOrPrepare(self: *Pipeline, sql: []const u8)"
