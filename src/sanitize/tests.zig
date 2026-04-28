@@ -93,3 +93,26 @@ test "sanitize: typed policy predicates pass" {
     const cmd = QailCmd.createPolicy(policy);
     try std.testing.expect(validateCmd(&cmd) == null);
 }
+
+test "sanitize: notify payload is data" {
+    const cmd = QailCmd.notifyChannel("events", "x'); DROP TABLE users; --");
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: grant role payload is an identifier" {
+    const privs = [_][]const u8{"SELECT"};
+    const cmd = QailCmd.grant("users", &privs, "app_role; DROP ROLE app_role");
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("role", err.field);
+}
+
+test "sanitize: raw default payload rejected" {
+    var cmd = QailCmd{
+        .kind = .alter_set_default,
+        .table = "users",
+        .columns = &.{Expr.col("role")},
+        .payload = "current_user; DROP TABLE users",
+    };
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("payload", err.field);
+}

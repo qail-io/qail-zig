@@ -53,7 +53,7 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
             if (cmd.channel) |ch| try writer.writeAll(ch);
             if (cmd.payload) |p| {
                 try writer.writeAll(", '");
-                try writer.writeAll(p);
+                try writeEscapedSqlString(writer, p);
                 try writer.writeByte('\'');
             }
         },
@@ -194,6 +194,16 @@ fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
         }
     }
     try writer.writeByte('"');
+}
+
+fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
+    for (value) |c| {
+        if (c == '\'') {
+            try writer.writeAll("''");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
 }
 
 // ==================== Tests ====================
@@ -445,6 +455,11 @@ test "transpile listen notify" {
     const sql2 = try toSql(std.testing.allocator, &notify_cmd);
     defer std.testing.allocator.free(sql2);
     try std.testing.expectEqualStrings("NOTIFY order_created", sql2);
+
+    const notify_payload_cmd = QailCmd.notifyChannel("order_created", "x'); DROP TABLE users; --");
+    const sql3 = try toSql(std.testing.allocator, &notify_payload_cmd);
+    defer std.testing.allocator.free(sql3);
+    try std.testing.expectEqualStrings("NOTIFY order_created, 'x''); DROP TABLE users; --'", sql3);
 }
 
 test "transpile select with cast expression" {

@@ -375,7 +375,7 @@ pub const AstEncoder = struct {
                 if (cmd.channel) |ch| try writer.writeAll(ch);
                 if (cmd.payload) |p| {
                     try writer.writeAll(", '");
-                    try writer.writeAll(p);
+                    try writeEscapedSqlString(writer, p);
                     try writer.writeByte('\'');
                 }
             },
@@ -1975,6 +1975,22 @@ test "ast encoder grant and revoke" {
     const revoke_cmd = QailCmd.revoke("users", &privs, "app_role");
     try encoder.encodeQuery(&revoke_cmd);
     try std.testing.expect(std.mem.indexOf(u8, encoder.getWritten(), "REVOKE SELECT, INSERT ON users FROM app_role") != null);
+}
+
+test "ast encoder escapes notify payload" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const cmd = QailCmd.notifyChannel("events", "x'); DROP TABLE users; --");
+
+    var sql_buf: [256]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "NOTIFY events, 'x''); DROP TABLE users; --'",
+        writer.getWritten(),
+    );
 }
 
 test "ast encoder create and drop database quote hyphenated names" {

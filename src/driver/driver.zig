@@ -1367,6 +1367,7 @@ pub const PgDriver = struct {
     /// Bulk insert rows using PostgreSQL COPY FROM STDIN from AST-native `add` command.
     pub fn copyBulk(self: *PgDriver, cmd: *const QailCmd, rows: []const []const ?[]const u8) !u64 {
         if (cmd.kind != .add) return error.InvalidCopyCommand;
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         const columns = try extractCopyColumns(self.allocator, cmd);
         defer self.allocator.free(columns);
         return copy_mod.copyIn(&self.conn, self.allocator, cmd.table, columns, rows);
@@ -1375,6 +1376,7 @@ pub const PgDriver = struct {
     /// Bulk insert pre-encoded COPY text bytes using AST-native `add` command.
     pub fn copyBulkRaw(self: *PgDriver, cmd: *const QailCmd, data: []const u8) !u64 {
         if (cmd.kind != .add) return error.InvalidCopyCommand;
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         const columns = try extractCopyColumns(self.allocator, cmd);
         defer self.allocator.free(columns);
         return copy_mod.copyInRaw(&self.conn, self.allocator, cmd.table, columns, data);
@@ -1383,6 +1385,7 @@ pub const PgDriver = struct {
     /// Export an AST-native `copy_out` command into a single raw byte buffer.
     pub fn copyExportRaw(self: *PgDriver, cmd: *const QailCmd) ![]u8 {
         if (cmd.kind != .copy_out) return error.InvalidCopyCommand;
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
 
         var out: std.ArrayListUnmanaged(u8) = .empty;
         errdefer out.deinit(self.allocator);
@@ -1406,6 +1409,7 @@ pub const PgDriver = struct {
         on_chunk: CopyChunkHandler,
     ) !void {
         if (cmd.kind != .copy_out) return error.InvalidCopyCommand;
+        try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
 
         try self.encoder.encodeQuery(cmd);
         try self.conn.send(self.encoder.getWritten());

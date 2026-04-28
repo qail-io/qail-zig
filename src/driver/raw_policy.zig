@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const raw_cmd = @import("../ast/raw_cmd.zig");
+const sanitize = @import("../sanitize.zig");
 const trusted_policy_sql = @import("../ast/trusted_policy_sql.zig");
 
 const QailCmd = ast.QailCmd;
@@ -124,10 +125,25 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
 
     switch (cmd.kind) {
         .call, .do_block, .session_set, .session_reset => return true,
-        .create_function, .create_trigger, .create_enum, .lock_table => {
+        .alter_set_default, .create_function, .create_trigger, .create_enum, .lock_table => {
             if (cmd.payload != null) return true;
         },
         else => {},
+    }
+
+    if (cmd.payload != null) {
+        switch (cmd.kind) {
+            .alter_enum_add_value,
+            .comment_on,
+            .drop_policy,
+            .drop_trigger,
+            .grant,
+            .notify,
+            .rename_col,
+            .revoke,
+            => {},
+            else => return true,
+        }
     }
 
     if (cmd.source_query) |source_query| {
@@ -190,6 +206,7 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
 /// Reject raw runtime commands from the public execution path.
 pub fn rejectPublicRuntimeCmd(cmd: *const QailCmd) !void {
     if (cmdHasTrustedOnlyEscapeHatch(cmd)) return error.RawSqlForbidden;
+    if (sanitize.validateCmd(cmd)) |_| return error.UnsafeIdentifier;
 }
 
 /// Reject raw runtime commands from public batched execution paths.
@@ -199,6 +216,52 @@ pub fn rejectPublicRuntimeCmds(cmds: []const *const QailCmd) !void {
 
 test "raw policy allows regular ast commands" {
     const cmd = @import("../ast/mod.zig").QailCmd.get("users");
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
+test "raw policy rejects unsafe table identifiers in public ast commands" {
+    const cmd = QailCmd.get("users; DROP TABLE users");
+    try std.testing.expectError(error.UnsafeIdentifier, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects unsafe column identifiers in public ast commands" {
+    const cmd = QailCmd.get("users").select(&.{Expr.col("name; DROP TABLE users")});
+    try std.testing.expectError(error.UnsafeIdentifier, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy allows escaped data payloads in public notify commands" {
+    const cmd = QailCmd.notifyChannel("events", "x'); DROP TABLE users; --");
+    try rejectPublicRuntimeCmd(&cmd);
+}
+
+test "raw policy rejects unsafe identifier payloads in public ast commands" {
+    const privs = [_][]const u8{"SELECT"};
+    const cmd = QailCmd.grant("users", &privs, "app_role; DROP ROLE app_role");
+    try std.testing.expectError(error.UnsafeIdentifier, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects raw default payloads in public ast commands" {
+    const cmd = QailCmd{
+        .kind = .alter_set_default,
+        .table = "users",
+        .columns = &.{Expr.col("role")},
+        .payload = "current_user; DROP TABLE users",
+    };
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy rejects unexpected payload fields in public ast commands" {
+    const cmd = QailCmd{
+        .kind = .get,
+        .table = "users",
+        .payload = "SELECT 1",
+    };
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
+}
+
+test "raw policy allows qualified safe identifiers in public ast commands" {
+    const cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{Expr.col("pg_database.datname")});
     try rejectPublicRuntimeCmd(&cmd);
 }
 

@@ -448,6 +448,25 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
         if (checkIdent("privilege", p)) |err| return err;
     }
 
+    if (cmd.payload) |payload| {
+        switch (cmd.kind) {
+            .notify, .comment_on, .alter_enum_add_value => {},
+            .grant, .revoke => {
+                if (checkIdent("role", payload)) |err| return err;
+            },
+            .drop_policy => {
+                if (checkIdent("policy.name", payload)) |err| return err;
+            },
+            .drop_trigger => {
+                if (checkIdent("trigger.table", payload)) |err| return err;
+            },
+            .rename_col => {
+                if (checkIdent("rename.target", payload)) |err| return err;
+            },
+            else => return rawError("payload"),
+        }
+    }
+
     if (cmd.vector_name) |name| {
         if (checkIdent("vector_name", name)) |err| return err;
     }
