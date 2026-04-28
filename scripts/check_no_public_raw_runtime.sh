@@ -7,10 +7,19 @@ repo_root="$(
 )"
 
 checks=(
+  "build.zig:addModule(\"qail_protocol\""
+  "src/lib.zig:pub const protocol ="
   "src/driver/driver.zig:pub fn executeRaw("
+  "src/driver/driver.zig:pub fn explainEstimateSql("
   "src/driver/mod.zig:pub const raw_sql ="
   "src/driver/mod.zig:pub const raw_cmd ="
+  "src/driver/mod.zig:pub const query ="
   "src/ast/mod.zig:pub const raw_cmd ="
+  "src/driver/prepared.zig:pub fn fromSql("
+  "src/driver/pipeline.zig:pub fn getOrPrepare(self: *Pipeline, sql: []const u8)"
+  "src/driver/pipeline.zig:pub fn prepare(self: *Pipeline, sql: []const u8)"
+  "src/driver/pipeline.zig:pub fn pipelineBytesFast("
+  "src/driver/cursor.zig:query_sql: []const u8"
 )
 
 for check in "${checks[@]}"; do

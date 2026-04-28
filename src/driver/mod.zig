@@ -24,7 +24,6 @@ pub const transaction = @import("transaction.zig");
 pub const prepared = @import("prepared.zig");
 pub const cursor = @import("cursor.zig");
 pub const io = @import("io.zig");
-pub const query = @import("query.zig");
 pub const metrics = @import("metrics.zig");
 pub const auth_options = @import("auth_options.zig");
 pub const explain_estimate = @import("explain_estimate.zig");

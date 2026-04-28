@@ -5,16 +5,18 @@
 
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
-const raw_cmd = @import("raw_cmd.zig");
+const protocol = @import("../protocol/mod.zig");
 const cursor_sql = @import("cursor/sql.zig");
+const raw_policy = @import("raw_policy.zig");
 const QailCmd = ast.QailCmd;
+const AstEncoder = protocol.AstEncoder;
 
 /// Server-side cursor for streaming query results.
 ///
 /// Example (AST-native):
 /// ```zig
 /// const cursor = Cursor.init(&conn, "my_cursor");
-/// try cursor.declare("SELECT * FROM large_table");
+/// const declare_sql = try cursor.declareSql(allocator, &query);
 ///
 /// while (try cursor.fetch(100)) |rows| {
 ///     for (rows) |row| {
@@ -36,8 +38,15 @@ pub const Cursor = struct {
         };
     }
 
-    /// Build DECLARE CURSOR SQL.
-    pub fn declareSql(self: *const Cursor, allocator: std.mem.Allocator, query_sql: []const u8) ![]u8 {
+    /// Build DECLARE CURSOR SQL from a QAIL AST command.
+    pub fn declareSql(self: *const Cursor, allocator: std.mem.Allocator, query: *const QailCmd) ![]u8 {
+        try raw_policy.rejectPublicRuntimeCmd(query);
+
+        var encoder = AstEncoder.init(allocator);
+        defer encoder.deinit();
+        const query_sql = try encoder.toSqlOwned(allocator, query);
+        defer allocator.free(query_sql);
+
         return cursor_sql.buildDeclare(allocator, self.name, query_sql);
     }
 
@@ -50,12 +59,6 @@ pub const Cursor = struct {
     pub fn closeSql(self: *const Cursor, allocator: std.mem.Allocator) ![]u8 {
         return cursor_sql.buildClose(allocator, self.name);
     }
-
-    /// Create QailCmd for declaring cursor (AST-native).
-    pub fn declareCmd(self: *const Cursor, query: *const QailCmd) QailCmd {
-        _ = query; // Future: embed query in cursor command
-        return raw_cmd.command(self.name); // Placeholder - actual impl uses SQL
-    }
 };
 
 // ==================== Tests ====================
@@ -64,7 +67,8 @@ test "Cursor SQL generation" {
     const allocator = std.testing.allocator;
     const cursor = Cursor.init(allocator, "test_cursor");
 
-    const declare = try cursor.declareSql(allocator, "SELECT * FROM users");
+    const query = QailCmd.get("users");
+    const declare = try cursor.declareSql(allocator, &query);
     defer allocator.free(declare);
     try std.testing.expectEqualStrings("DECLARE test_cursor CURSOR FOR SELECT * FROM users", declare);
 

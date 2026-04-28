@@ -1,75 +1,44 @@
-// Error Test - Verify we actually parse responses
+// Error Test - Verify public AST execution parses PostgreSQL errors.
 // Run: zig build error-test
 
 const std = @import("std");
 const qail = @import("qail");
-const driver = qail.driver;
-const protocol = qail.protocol;
 
-const Connection = driver.connection.Connection;
-const Encoder = protocol.Encoder;
+const QailCmd = qail.ast.QailCmd;
+const Expr = qail.ast.Expr;
+const PgDriver = qail.driver.driver.PgDriver;
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    std.debug.print("Testing error detection with SELECT 1/0 (divide by zero)...\n", .{});
+    std.debug.print("Testing error detection with an AST divide-by-zero query...\n", .{});
 
-    var conn = try Connection.connect(allocator, "127.0.0.1", 5432);
-    defer conn.close();
+    var driver = try PgDriver.connect(allocator, "127.0.0.1", 5432, "orion", "postgres");
+    defer driver.deinit();
 
-    try conn.startup("orion", "postgres", null);
+    const one = Expr.int(1);
+    const zero = Expr.int(0);
+    const div_expr: Expr = .{
+        .binary = .{
+            .left = &one,
+            .op = .div,
+            .right = &zero,
+            .alias = null,
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{div_expr})
+        .limit(1);
 
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
-
-    // Prepare statement - should work
-    const stmt_name = "error_test";
-    try encoder.encodeParse(stmt_name, "SELECT 1/0", &[_]u32{});
-    try conn.stream.writeAll(encoder.getWritten());
-
-    try encoder.encodeSync();
-    try conn.stream.writeAll(encoder.getWritten());
-
-    // Read parse response
-    var read_buf: [16384]u8 = undefined;
-    _ = try conn.stream.read(&read_buf);
-
-    std.debug.print("✅ Statement prepared\n", .{});
-
-    // Now execute - should get error
-    encoder.reset();
-    try encoder.appendBind("", stmt_name, &[_]?[]const u8{});
-    try encoder.appendExecute("", 0);
-    try encoder.appendSync();
-
-    try conn.stream.writeAll(encoder.getWritten());
-
-    std.debug.print("Sent execute, reading response...\n", .{});
-
-    // Read response and check for error
-    var read_len: usize = 0;
-    var found_error = false;
-
-    while (read_len < 1000) {
-        const n = try conn.stream.read(read_buf[read_len..]);
-        if (n == 0) break;
-        read_len += n;
-
-        // Scan for 'E' (ErrorResponse)
-        for (read_buf[0..read_len]) |b| {
-            if (b == 'E') {
-                found_error = true;
-                break;
-            }
-        }
-
-        // Check for 'Z' (ReadyForQuery)
-        if (std.mem.indexOf(u8, read_buf[0..read_len], "Z")) |_| break;
-    }
-
-    if (found_error) {
-        std.debug.print("✅ ERROR DETECTED! Benchmark is REAL - we are parsing responses\n", .{});
-    } else {
-        std.debug.print("❌ NO ERROR! Benchmark is FAKE - we are NOT parsing responses correctly\n", .{});
+    if (driver.fetchAll(&cmd)) |rows| {
+        for (rows) |*row| row.deinit();
+        allocator.free(rows);
+        std.debug.print("NO ERROR: divide-by-zero query unexpectedly succeeded\n", .{});
+        return error.ExpectedQueryError;
+    } else |err| switch (err) {
+        error.QueryError => {
+            std.debug.print("ERROR DETECTED: public AST path parsed PostgreSQL error response\n", .{});
+        },
+        else => return err,
     }
 }

@@ -1,6 +1,6 @@
 // QAIL Zig Native Benchmark
 //
-// Benchmarks AST → Wire Protocol encoding throughput
+// Benchmarks AST → SQL rendering throughput
 
 const std = @import("std");
 const qail = @import("qail");
@@ -8,14 +8,13 @@ const time = qail.runtime.time;
 
 const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
-const AstEncoder = qail.protocol.AstEncoder;
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
     std.debug.print("\n", .{});
     std.debug.print("╔════════════════════════════════════════════════════════════╗\n", .{});
-    std.debug.print("║  QAIL Zig Native Benchmark - AST → Wire Encoding           ║\n", .{});
+    std.debug.print("║  QAIL Zig Native Benchmark - AST → SQL Rendering           ║\n", .{});
     std.debug.print("╚════════════════════════════════════════════════════════════╝\n", .{});
     std.debug.print("\n", .{});
 
@@ -37,9 +36,6 @@ pub fn main() !void {
 }
 
 fn benchmarkEncoding(allocator: std.mem.Allocator, iterations: u64) !u64 {
-    var encoder = AstEncoder.init(allocator);
-    defer encoder.deinit();
-
     // Build a representative query
     const cols = [_]Expr{ Expr.col("id"), Expr.col("name"), Expr.col("email") };
 
@@ -48,7 +44,8 @@ fn benchmarkEncoding(allocator: std.mem.Allocator, iterations: u64) !u64 {
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
         const cmd = QailCmd.get("users").select(&cols).limit(10);
-        try encoder.encodeQuery(&cmd);
+        const sql = try qail.transpiler.toSql(allocator, &cmd);
+        allocator.free(sql);
     }
 
     const end = time.now() catch unreachable;

@@ -1,41 +1,35 @@
 // QAIL Zig Pool Benchmark - Fair Comparison with Rust
 //
-// Uses PgPool with multiple threads for parallel query execution.
-// PARSES RESPONSES like Rust's pipeline_prepared_ultra for fair comparison.
-//
-// Query: SELECT id, name FROM harbors LIMIT $1
+// Uses PgPool with multiple threads and the public AST-native Pipeline API.
 // Run: zig build pool
 
 const std = @import("std");
 const qail = @import("qail");
 const driver = qail.driver;
-const protocol = qail.protocol;
 
+const QailCmd = qail.ast.QailCmd;
+const Expr = qail.ast.Expr;
+const WhereClause = qail.ast.cmd.WhereClause;
 const PgPool = driver.pool.PgPool;
-const Encoder = protocol.Encoder;
+const Pipeline = driver.pipeline.Pipeline;
 
 const TOTAL_QUERIES: usize = 150_000_000;
 const NUM_WORKERS: usize = 10;
 const POOL_SIZE: usize = 10;
 const QUERIES_PER_BATCH: usize = 100;
 
-// Query being benchmarked
-const QUERY = "SELECT id, name FROM harbors LIMIT $1";
-
 pub fn main() !void {
-    // Use page_allocator - it's thread-safe
     const allocator = std.heap.page_allocator;
 
     std.debug.print(
         \\╔═══════════════════════════════════════════════════════════╗
         \\║  QAIL Zig Pool Benchmark - Fair Comparison with Rust      ║
         \\╠═══════════════════════════════════════════════════════════╣
-        \\║  Query:   SELECT id, name FROM harbors LIMIT $1           ║
+        \\║  Query: SELECT id, name FROM harbors WHERE id <= $1       ║
         \\║  Total:    150,000,000 queries                            ║
         \\║  Workers:  10 threads                                     ║
         \\║  Pool:     10 connections                                 ║
         \\║  Batch:    100 queries per pipeline                       ║
-        \\║  Parsing:  Yes (fair comparison)                          ║
         \\╚═══════════════════════════════════════════════════════════╝
         \\
         \\
@@ -43,7 +37,6 @@ pub fn main() !void {
 
     std.debug.print("🔌 Initializing connection pool...\n", .{});
 
-    // Create pool
     var pool = try PgPool.init(allocator, .{
         .host = "127.0.0.1",
         .port = 5432,
@@ -58,20 +51,17 @@ pub fn main() !void {
 
     const batches_per_worker = TOTAL_QUERIES / NUM_WORKERS / QUERIES_PER_BATCH;
     var counter = std.atomic.Value(usize).init(0);
-    var rows_counter = std.atomic.Value(usize).init(0);
+    var parsed_counter = std.atomic.Value(usize).init(0);
 
     const start = nowMillis();
 
-    // Spawn worker threads
     var threads: [NUM_WORKERS]std.Thread = undefined;
     for (0..NUM_WORKERS) |i| {
-        threads[i] = try std.Thread.spawn(.{}, workerFn, .{ &pool, &counter, &rows_counter, batches_per_worker, allocator });
+        threads[i] = try std.Thread.spawn(.{}, workerFn, .{ &pool, &counter, &parsed_counter, batches_per_worker, allocator });
     }
 
-    // Progress reporter thread
     const progress_thread = try std.Thread.spawn(.{}, progressFn, .{ &counter, start });
 
-    // Wait for all workers
     for (&threads) |*thread| {
         thread.join();
     }
@@ -80,10 +70,9 @@ pub fn main() !void {
     const elapsed_ms = end - start;
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ms)) / 1000.0;
     const total = counter.load(.acquire);
-    const rows = rows_counter.load(.acquire);
+    const parsed = parsed_counter.load(.acquire);
     const qps = @as(f64, @floatFromInt(total)) / elapsed_s;
 
-    // Signal progress thread to stop
     counter.store(TOTAL_QUERIES + 1, .release);
     progress_thread.join();
 
@@ -91,122 +80,56 @@ pub fn main() !void {
         \\
         \\📈 FINAL RESULTS:
         \\┌─────────────────────────────────────────────────┐
-        \\│ QAIL ZIG POOL BENCHMARK (FAIR)                  │
+        \\│ QAIL ZIG POOL BENCHMARK (AST Pipeline)          │
         \\├─────────────────────────────────────────────────┤
-        \\│ Query: SELECT id, name FROM harbors LIMIT $1    │
         \\│ Total Time:                       {d:.1}s │
         \\│ Queries/Second:                 {d:.0} │
-        \\│ Rows Parsed:                   {} │
+        \\│ Responses Parsed:              {} │
         \\│ Workers:                              {} │
         \\│ Pool Size:                            {} │
         \\│ Queries Completed:             {} │
         \\└─────────────────────────────────────────────────┘
         \\
-    , .{ elapsed_s, qps, rows, NUM_WORKERS, POOL_SIZE, total });
+    , .{ elapsed_s, qps, parsed, NUM_WORKERS, POOL_SIZE, total });
 }
 
-fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), rows_counter: *std.atomic.Value(usize), batches: usize, allocator: std.mem.Allocator) void {
-    // Acquire connection from pool
+fn workerFn(pool: *PgPool, counter: *std.atomic.Value(usize), parsed_counter: *std.atomic.Value(usize), batches: usize, allocator: std.mem.Allocator) void {
     var pooled_conn = pool.acquire() catch {
         std.debug.print("Failed to acquire connection\n", .{});
         return;
     };
     defer pooled_conn.release();
 
-    var conn = pooled_conn.get();
+    var pipeline = Pipeline.init(pooled_conn.get(), allocator);
+    defer pipeline.deinit();
 
-    // Create encoder for pipelining
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
+    const where = [_]WhereClause{.{
+        .condition = .{
+            .column = "id",
+            .op = .lte,
+            .value = .{ .param = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("harbors")
+        .select(&.{ Expr.col("id"), Expr.col("name") })
+        .where(&where);
 
-    // Prepare statement - MUST send Sync after Parse
-    const stmt_name = "s_pool_bench";
-    encoder.encodeParse(stmt_name, QUERY, &[_]u32{23}) catch return;
-    conn.stream.writeAll(encoder.getWritten()) catch return;
+    var stmt = pipeline.prepare(&cmd) catch return;
+    defer stmt.deinit();
 
-    encoder.encodeSync() catch return;
-    conn.stream.writeAll(encoder.getWritten()) catch return;
+    const text_params = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
 
-    // Read parse complete + ready
-    var read_buf: [65536]u8 = undefined;
-    _ = conn.stream.read(&read_buf) catch return;
-
-    // Run batches
     for (0..batches) |_| {
-        encoder.reset();
-
-        // Encode batch of 100 queries - use TEXT parameters
-        const text_params = [_][]const u8{ "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
+        var param_values: [QUERIES_PER_BATCH][1]?[]const u8 = undefined;
+        var param_rows: [QUERIES_PER_BATCH][]const ?[]const u8 = undefined;
         for (0..QUERIES_PER_BATCH) |i| {
-            const param_idx = i % 10;
-            encoder.appendBind("", stmt_name, &[_]?[]const u8{text_params[param_idx]}) catch continue;
-            encoder.appendExecute("", 0) catch continue;
-        }
-        encoder.appendSync() catch continue;
-
-        conn.stream.writeAll(encoder.getWritten()) catch continue;
-
-        // FAIR: Parse responses like Rust's pipeline_prepared_ultra
-        var rows_in_batch: usize = 0;
-        var commands: usize = 0;
-        var read_pos: usize = 0;
-        var read_len: usize = 0;
-
-        while (commands < QUERIES_PER_BATCH) {
-            // Ensure we have header (1 byte type + 4 byte length)
-            while (read_len - read_pos < 5) {
-                if (read_pos > 0) {
-                    const remaining = read_len - read_pos;
-                    std.mem.copyForwards(u8, read_buf[0..remaining], read_buf[read_pos..read_len]);
-                    read_len = remaining;
-                    read_pos = 0;
-                }
-                const n = conn.stream.read(read_buf[read_len..]) catch break;
-                if (n == 0) break;
-                read_len += n;
-            }
-
-            if (read_len - read_pos < 5) break;
-
-            const msg_type = read_buf[read_pos];
-            const length = std.mem.readInt(u32, read_buf[read_pos + 1 ..][0..4], .big);
-            const msg_len = 1 + length;
-
-            // Ensure full message
-            while (read_len - read_pos < msg_len) {
-                if (read_pos > 0) {
-                    const remaining = read_len - read_pos;
-                    std.mem.copyForwards(u8, read_buf[0..remaining], read_buf[read_pos..read_len]);
-                    read_len = remaining;
-                    read_pos = 0;
-                }
-                const n = conn.stream.read(read_buf[read_len..]) catch break;
-                if (n == 0) break;
-                read_len += n;
-            }
-
-            // Process message
-            switch (msg_type) {
-                'D' => {
-                    // DataRow - parse column count and values (like Rust)
-                    const data_start = read_pos + 5;
-                    if (data_start + 2 <= read_len) {
-                        const col_count = std.mem.readInt(u16, read_buf[data_start..][0..2], .big);
-                        _ = col_count;
-                        rows_in_batch += 1;
-                    }
-                },
-                'C' => commands += 1, // CommandComplete
-                'n' => commands += 1, // NoData
-                'Z' => break, // ReadyForQuery
-                else => {},
-            }
-
-            read_pos += msg_len;
+            param_values[i][0] = text_params[i % text_params.len];
+            param_rows[i] = param_values[i][0..];
         }
 
-        _ = counter.fetchAdd(QUERIES_PER_BATCH, .monotonic);
-        _ = rows_counter.fetchAdd(rows_in_batch, .monotonic);
+        const completed = pipeline.pipelinePreparedFast(&stmt, param_rows[0..]) catch continue;
+        _ = counter.fetchAdd(completed, .monotonic);
+        _ = parsed_counter.fetchAdd(completed, .monotonic);
     }
 }
 

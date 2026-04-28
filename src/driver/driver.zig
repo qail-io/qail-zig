@@ -1518,11 +1518,11 @@ pub const PgDriver = struct {
         try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         const sql = try self.encoder.toSqlOwned(self.allocator, cmd);
         defer self.allocator.free(sql);
-        return try self.explainEstimateSql(sql);
+        return try self.explainEstimateSqlTrusted(sql);
     }
 
-    /// Run EXPLAIN (FORMAT JSON) for raw SQL and parse estimate.
-    pub fn explainEstimateSql(self: *PgDriver, sql: []const u8) !?ExplainEstimate {
+    /// Run EXPLAIN (FORMAT JSON) for trusted SQL emitted by the AST encoder.
+    fn explainEstimateSqlTrusted(self: *PgDriver, sql: []const u8) !?ExplainEstimate {
         const explain_sql = try raw_sql_mod.buildExplainFormatJson(self.allocator, sql);
         defer self.allocator.free(explain_sql);
 

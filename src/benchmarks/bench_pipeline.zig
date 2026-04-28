@@ -35,7 +35,10 @@ pub fn main() !void {
 
     // Prepare statement
     std.debug.print("📋 Preparing statement...\n", .{});
-    var stmt = try pipeline.prepare("SELECT 1");
+    const one_cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{Expr.int(1)})
+        .limit(1);
+    var stmt = try pipeline.prepare(&one_cmd);
     defer stmt.deinit();
     std.debug.print("✅ Statement prepared: {s}\n\n", .{stmt.name});
 

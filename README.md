@@ -221,8 +221,11 @@ defer scoped.release();
 ### Prepared Statements
 
 ```zig
-const stmt = try driver.prepare("SELECT * FROM users WHERE id = $1");
-const rows = try driver.fetchPrepared(&stmt, &[_]?[]const u8{"42"});
+const cmd = qail.ast.QailCmd.get("users")
+    .where(&.{.{ .condition = .{ .column = "id", .op = .eq, .value = .{ .param = 1 } } }});
+
+try driver.prepare("users_by_id", &cmd);
+const rows = try driver.fetchPrepared("users_by_id", &[_]?[]const u8{"42"});
 ```
 
 ### COPY Protocol

@@ -30,7 +30,7 @@ const ALREADY_EXISTS_MSG = "already exists";
 const max_wire_message_len: usize = std.math.maxInt(i32);
 
 /// Prepared statement handle for fast repeated execution.
-/// Create with `prepare()`, use with `pipelinePreparedFast()`.
+/// Create from a QAIL AST with `prepare()`, use with `pipelinePreparedFast()`.
 pub const PreparedStatement = struct {
     name: []const u8,
     sql: []const u8,
@@ -122,17 +122,25 @@ pub const Pipeline = struct {
         }
     }
 
-    /// Get a cached prepared statement or create a new one.
+    /// Get a cached prepared statement for a QAIL AST or create a new one.
     /// Cached statements are automatically reused across calls.
-    pub fn getOrPrepare(self: *Pipeline, sql: []const u8) !*PreparedStatement {
+    pub fn getOrPrepare(self: *Pipeline, cmd: *const QailCmd) !*PreparedStatement {
         self.clearLastFailure();
+        try raw_policy.rejectPublicRuntimeCmd(cmd);
+
+        var ast_encoder = AstEncoder.init(self.allocator);
+        defer ast_encoder.deinit();
+        const sql = try ast_encoder.toSqlOwned(self.allocator, cmd);
+        defer self.allocator.free(sql);
+
         // Check cache first
         if (self.stmt_cache.getPtr(sql)) |cached| {
             return cached;
         }
 
         // Not in cache - prepare it
-        const stmt = try self.prepare(sql);
+        var stmt = try self.prepareSqlTrusted(sql);
+        errdefer stmt.deinit();
 
         // Cache it (uses sql as key since it's already allocated in stmt)
         try self.stmt_cache.put(stmt.sql, stmt);
@@ -143,9 +151,22 @@ pub const Pipeline = struct {
 
     // ==================== Prepared Statement Methods ====================
 
-    /// Prepare a SQL statement and return a handle for fast execution.
+    /// Prepare a QAIL AST statement and return a handle for fast execution.
     /// The statement is registered with PostgreSQL for reuse.
-    pub fn prepare(self: *Pipeline, sql: []const u8) !PreparedStatement {
+    pub fn prepare(self: *Pipeline, cmd: *const QailCmd) !PreparedStatement {
+        self.clearLastFailure();
+        try raw_policy.rejectPublicRuntimeCmd(cmd);
+
+        var ast_encoder = AstEncoder.init(self.allocator);
+        defer ast_encoder.deinit();
+        const sql = try ast_encoder.toSqlOwned(self.allocator, cmd);
+        defer self.allocator.free(sql);
+
+        return try self.prepareSqlTrusted(sql);
+    }
+
+    /// Prepare already-rendered SQL from a trusted AST encoder path only.
+    fn prepareSqlTrusted(self: *Pipeline, sql: []const u8) !PreparedStatement {
         self.clearLastFailure();
         // Generate unique statement name from SQL hash
         const hash = std.hash.Wyhash.hash(0, sql);
@@ -305,10 +326,8 @@ pub const Pipeline = struct {
 
     // ==================== Optimized Pipelining Methods ====================
 
-    /// Execute pre-encoded wire protocol bytes directly.
-    /// Maximum performance - caller is responsible for encoding
-    /// Parse/Bind/Execute/Sync messages correctly.
-    pub fn pipelineBytesFast(
+    /// Execute pre-encoded wire protocol bytes directly from trusted internal tests only.
+    fn pipelineBytesFastTrusted(
         self: *Pipeline,
         wire_bytes: []const u8,
         expected_queries: usize,

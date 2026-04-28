@@ -6,13 +6,9 @@ const QailCmd = qail.ast.QailCmd;
 const Expr = qail.ast.Expr;
 const WhereClause = qail.ast.cmd.WhereClause;
 const PgDriver = qail.driver.driver.PgDriver;
-const PgBytesRow = qail.driver.row.PgBytesRow;
 const CancelToken = qail.driver.driver.CancelToken;
 const Connection = qail.driver.connection.Connection;
 const Pipeline = qail.driver.pipeline.Pipeline;
-const Encoder = qail.protocol.Encoder;
-const Decoder = qail.protocol.Decoder;
-const AstEncoder = qail.protocol.AstEncoder;
 
 const TABLE_NAME = "qail_adversarial_cases";
 const INJECTION_TABLE = "qail_pentest_injection";
@@ -102,189 +98,33 @@ fn connectDriver(allocator: std.mem.Allocator, cfg: *const DbConfig) !PgDriver {
     );
 }
 
-fn executeSimpleSql(conn: *Connection, allocator: std.mem.Allocator, sql: []const u8) !void {
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
-    try encoder.encodeQuery(sql);
-    try conn.send(encoder.getWritten());
-
-    var saw_error = false;
-    while (true) {
-        const msg = try conn.readMessageRawFast();
-        switch (msg.msg_type) {
-            'E' => saw_error = true,
-            'Z' => {
-                if (saw_error) return error.QueryError;
-                return;
-            },
-            'C', 'I', 'T', 'D', 'n', 'N', 'S', 'A' => {},
-            else => return error.UnexpectedBackendMessageType,
-        }
-    }
+fn deinitRows(allocator: std.mem.Allocator, rows: []qail.driver.row.PgRow) void {
+    for (rows) |*row| row.deinit();
+    allocator.free(rows);
 }
 
-fn querySimpleFirstColumnSql(conn: *Connection, allocator: std.mem.Allocator, sql: []const u8) ![]u8 {
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
-    try encoder.encodeQuery(sql);
-    try conn.send(encoder.getWritten());
-
-    var first_value: ?[]u8 = null;
-    errdefer if (first_value) |value| allocator.free(value);
-    var saw_error = false;
-
-    while (true) {
-        const msg = try conn.readMessageRawFast();
-        switch (msg.msg_type) {
-            'D' => {
-                var decoder = Decoder.init(msg.payload);
-                const columns = try decoder.parseDataRowOwned(allocator);
-                defer {
-                    for (columns) |maybe_col| {
-                        if (maybe_col) |col| allocator.free(col);
-                    }
-                    allocator.free(columns);
-                }
-
-                if (first_value == null) {
-                    if (columns.len == 0) return error.EmptyRow;
-                    const raw = columns[0] orelse return error.NullValue;
-                    first_value = try allocator.dupe(u8, raw);
-                }
-            },
-            'E' => saw_error = true,
-            'Z' => {
-                if (saw_error) return error.QueryError;
-                return first_value orelse error.NoRows;
-            },
-            'T', 'C', 'I', 'n', 'N', 'S', 'A' => {},
-            else => return error.UnexpectedBackendMessageType,
-        }
-    }
+fn executeCmd(driver: *PgDriver, cmd: *const QailCmd) !void {
+    _ = try driver.execute(cmd);
 }
 
-fn executeSimpleAst(conn: *Connection, allocator: std.mem.Allocator, cmd: *const QailCmd) !void {
-    var encoder = AstEncoder.init(allocator);
-    defer encoder.deinit();
-    try encoder.encodeQuery(cmd);
-    try conn.send(encoder.getWritten());
-
-    var saw_error = false;
-    while (true) {
-        const msg = try conn.readMessageRawFast();
-        switch (msg.msg_type) {
-            'E' => saw_error = true,
-            'Z' => {
-                if (saw_error) return error.QueryError;
-                return;
-            },
-            '1', '2', 'C', 'D', 'T', 'n', 'N', 'S', 'A' => {},
-            else => return error.UnexpectedBackendMessageType,
-        }
-    }
+fn queryFirstColumnOwned(driver: *PgDriver, allocator: std.mem.Allocator, cmd: *const QailCmd) ![]u8 {
+    var row = (try driver.fetchOne(cmd)) orelse return error.NoRows;
+    defer row.deinit();
+    const raw = row.getString(0) orelse return error.NullValue;
+    return try allocator.dupe(u8, raw);
 }
 
-fn querySimpleFirstColumnAst(conn: *Connection, allocator: std.mem.Allocator, cmd: *const QailCmd) ![]u8 {
-    var encoder = AstEncoder.init(allocator);
-    defer encoder.deinit();
-    try encoder.encodeQuery(cmd);
-    try conn.send(encoder.getWritten());
-
-    var first_value: ?[]u8 = null;
-    errdefer if (first_value) |value| allocator.free(value);
-    var saw_error = false;
-
-    while (true) {
-        const msg = try conn.readMessageRawFast();
-        switch (msg.msg_type) {
-            'D' => {
-                var decoder = Decoder.init(msg.payload);
-                const columns = try decoder.parseDataRowOwned(allocator);
-                defer {
-                    for (columns) |maybe_col| {
-                        if (maybe_col) |col| allocator.free(col);
-                    }
-                    allocator.free(columns);
-                }
-
-                if (first_value == null) {
-                    if (columns.len == 0) return error.EmptyRow;
-                    const raw = columns[0] orelse return error.NullValue;
-                    first_value = try allocator.dupe(u8, raw);
-                }
-            },
-            'E' => saw_error = true,
-            'Z' => {
-                if (saw_error) return error.QueryError;
-                return first_value orelse error.NoRows;
-            },
-            '1', '2', 'T', 'C', 'n', 'N', 'S', 'A' => {},
-            else => return error.UnexpectedBackendMessageType,
-        }
-    }
+fn queryFirstColumnInt(driver: *PgDriver, cmd: *const QailCmd) !i64 {
+    var row = (try driver.fetchOne(cmd)) orelse return error.NoRows;
+    defer row.deinit();
+    return row.getInt64(0) orelse return error.InvalidInteger;
 }
 
-fn prepareStatement(conn: *Connection, allocator: std.mem.Allocator, stmt_name: []const u8, sql: []const u8) !void {
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
-    try encoder.encodeParse(stmt_name, sql, &.{});
-    try encoder.appendSync();
-    try conn.send(encoder.getWritten());
-
-    var saw_error = false;
-    while (true) {
-        const msg = try conn.readMessageRawFast();
-        switch (msg.msg_type) {
-            'E' => saw_error = true,
-            'Z' => {
-                if (saw_error) return error.QueryError;
-                return;
-            },
-            '1', 'N', 'S', 'A' => {},
-            else => return error.UnexpectedBackendMessageType,
-        }
-    }
-}
-
-fn runExtendedBatchCollectFirstColumnInts(
-    conn: *Connection,
-    allocator: std.mem.Allocator,
-    wire_bytes: []const u8,
-    expected_ready_count: usize,
-) ![]i64 {
-    try conn.send(wire_bytes);
-
-    var values: std.ArrayList(i64) = .empty;
-    errdefer values.deinit(allocator);
-
-    var ready_count: usize = 0;
-    var saw_error = false;
-    while (ready_count < expected_ready_count) {
-        const msg = try conn.readMessageRawFast();
-        switch (msg.msg_type) {
-            'D' => {
-                var decoder = Decoder.init(msg.payload);
-                const columns = try decoder.parseDataRowOwned(allocator);
-                defer {
-                    for (columns) |maybe_col| {
-                        if (maybe_col) |col| allocator.free(col);
-                    }
-                    allocator.free(columns);
-                }
-                if (columns.len == 0) return error.EmptyRow;
-                const raw = columns[0] orelse return error.NullValue;
-                const parsed = try std.fmt.parseInt(i64, raw, 10);
-                try values.append(allocator, parsed);
-            },
-            'E' => saw_error = true,
-            'Z' => ready_count += 1,
-            '2', 'C', 'T', 'N', 'S', 'A' => {},
-            else => return error.UnexpectedBackendMessageType,
-        }
-    }
-
-    if (saw_error) return error.QueryError;
-    return values.toOwnedSlice(allocator);
+fn fetchPreparedFirstColumnInt(driver: *PgDriver, allocator: std.mem.Allocator, stmt_name: []const u8, params: []const ?[]const u8) !i64 {
+    const rows = try driver.fetchPrepared(stmt_name, params);
+    defer deinitRows(allocator, rows);
+    if (rows.len == 0) return error.NoRows;
+    return rows[0].getInt64(0) orelse return error.InvalidInteger;
 }
 
 const CancelWorkerCtx = struct {
@@ -310,21 +150,32 @@ fn runCancelWorker(ctx: *CancelWorkerCtx) void {
 }
 
 fn caseUnicodeRoundtrip(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
-    var conn = try connectConnection(allocator, cfg);
-    defer conn.close();
+    var driver = try connectDriver(allocator, cfg);
+    defer driver.deinit();
 
     const drop_cmd = QailCmd.drop(TABLE_NAME);
-    executeSimpleAst(&conn, allocator, &drop_cmd) catch {};
-    defer executeSimpleAst(&conn, allocator, &drop_cmd) catch {};
+    executeCmd(&driver, &drop_cmd) catch {};
+    defer executeCmd(&driver, &drop_cmd) catch {};
 
     const ddl_cols = [_]Expr{
         Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
         Expr.defWithConstraints("note", "TEXT", &.{.not_null}),
     };
     const create_cmd = QailCmd.make(TABLE_NAME).select(&ddl_cols);
-    executeSimpleAst(&conn, allocator, &create_cmd) catch return error.Case1CreateFailed;
+    executeCmd(&driver, &create_cmd) catch return error.Case1CreateFailed;
 
-    const server_encoding = try querySimpleFirstColumnSql(&conn, allocator, "SHOW SERVER_ENCODING");
+    const server_encoding_where = [_]WhereClause{.{
+        .condition = .{
+            .column = "name",
+            .op = .eq,
+            .value = .{ .string = "server_encoding" },
+        },
+    }};
+    const server_encoding_cmd = QailCmd.get("pg_settings")
+        .select(&.{Expr.col("setting")})
+        .where(&server_encoding_where)
+        .limit(1);
+    const server_encoding = try queryFirstColumnOwned(&driver, allocator, &server_encoding_cmd);
     defer allocator.free(server_encoding);
     const sample_note = if (std.ascii.eqlIgnoreCase(server_encoding, "UTF8"))
         "Odd 😺 雪 text\nline\tquote'"
@@ -333,13 +184,13 @@ fn caseUnicodeRoundtrip(allocator: std.mem.Allocator, cfg: *const DbConfig) !voi
     const insert_cmd = QailCmd.add(TABLE_NAME).values(&.{
         .{ .column = "note", .value = .{ .string = sample_note } },
     });
-    executeSimpleAst(&conn, allocator, &insert_cmd) catch return error.Case1InsertFailed;
+    executeCmd(&driver, &insert_cmd) catch return error.Case1InsertFailed;
 
     const note_cmd = QailCmd.get(TABLE_NAME)
         .select(&.{Expr.col("note")})
         .orderBy(&.{.{ .column = "id", .order = .desc }})
         .limit(1);
-    const fetched_note = querySimpleFirstColumnAst(&conn, allocator, &note_cmd) catch return error.Case1SelectNoteFailed;
+    const fetched_note = queryFirstColumnOwned(&driver, allocator, &note_cmd) catch return error.Case1SelectNoteFailed;
     defer allocator.free(fetched_note);
     if (!std.mem.eql(u8, fetched_note, sample_note)) return error.UnicodeRoundtripMismatch;
 
@@ -355,134 +206,173 @@ fn caseUnicodeRoundtrip(allocator: std.mem.Allocator, cfg: *const DbConfig) !voi
         .select(&.{note_len_expr})
         .orderBy(&.{.{ .column = "id", .order = .desc }})
         .limit(1);
-    const payload_len_text = querySimpleFirstColumnAst(&conn, allocator, &len_cmd) catch return error.Case1SelectLenFailed;
+    const payload_len_text = queryFirstColumnOwned(&driver, allocator, &len_cmd) catch return error.Case1SelectLenFailed;
     defer allocator.free(payload_len_text);
     const parsed_len = try std.fmt.parseInt(usize, payload_len_text, 10);
     if (parsed_len != sample_note.len) return error.UnicodeByteLengthMismatch;
 }
 
 fn caseSqlInjectionLiteralContainment(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
-    var conn = try connectConnection(allocator, cfg);
-    defer conn.close();
+    var driver = try connectDriver(allocator, cfg);
+    defer driver.deinit();
 
     const drop_cmd = QailCmd.drop(INJECTION_TABLE);
-    executeSimpleAst(&conn, allocator, &drop_cmd) catch {};
-    defer executeSimpleAst(&conn, allocator, &drop_cmd) catch {};
+    executeCmd(&driver, &drop_cmd) catch {};
+    defer executeCmd(&driver, &drop_cmd) catch {};
 
     const ddl_cols = [_]Expr{
         Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
         Expr.defWithConstraints("note", "TEXT", &.{.not_null}),
     };
     const create_cmd = QailCmd.make(INJECTION_TABLE).select(&ddl_cols);
-    executeSimpleAst(&conn, allocator, &create_cmd) catch return error.Case2CreateFailed;
+    executeCmd(&driver, &create_cmd) catch return error.Case2CreateFailed;
 
     const payload = "x'); DROP TABLE qail_pentest_injection; --";
     const insert_cmd = QailCmd.add(INJECTION_TABLE).values(&.{
         .{ .column = "note", .value = .{ .string = payload } },
     });
-    executeSimpleAst(&conn, allocator, &insert_cmd) catch return error.Case2InsertFailed;
+    executeCmd(&driver, &insert_cmd) catch return error.Case2InsertFailed;
 
     const count_cmd = QailCmd.get(INJECTION_TABLE).select(&.{Expr.count()});
-    const count_text = querySimpleFirstColumnAst(&conn, allocator, &count_cmd) catch return error.Case2CountFailed;
+    const count_text = queryFirstColumnOwned(&driver, allocator, &count_cmd) catch return error.Case2CountFailed;
     defer allocator.free(count_text);
     const row_count = try std.fmt.parseInt(usize, count_text, 10);
     if (row_count != 1) return error.SqlInjectionRowCountMismatch;
 
     const fetched_payload_cmd = QailCmd.get(INJECTION_TABLE).select(&.{Expr.col("note")}).limit(1);
-    const fetched_payload = querySimpleFirstColumnAst(&conn, allocator, &fetched_payload_cmd) catch return error.Case2ReadbackFailed;
+    const fetched_payload = queryFirstColumnOwned(&driver, allocator, &fetched_payload_cmd) catch return error.Case2ReadbackFailed;
     defer allocator.free(fetched_payload);
     if (!std.mem.eql(u8, fetched_payload, payload)) return error.SqlInjectionPayloadMismatch;
 
-    const table_exists_count = try querySimpleFirstColumnSql(
-        &conn,
-        allocator,
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'qail_pentest_injection'",
-    );
+    const table_exists_where = [_]WhereClause{
+        .{
+            .condition = .{
+                .column = "table_schema",
+                .op = .eq,
+                .value = .{ .string = "public" },
+            },
+        },
+        .{
+            .condition = .{
+                .column = "table_name",
+                .op = .eq,
+                .value = .{ .string = INJECTION_TABLE },
+            },
+        },
+    };
+    const table_exists_cmd = QailCmd.get("information_schema.tables")
+        .select(&.{Expr.count()})
+        .where(&table_exists_where);
+    const table_exists_count = try queryFirstColumnOwned(&driver, allocator, &table_exists_cmd);
     defer allocator.free(table_exists_count);
     const exists_count = try std.fmt.parseInt(usize, table_exists_count, 10);
     if (exists_count != 1) return error.SqlInjectionEscapedLiteralExecuted;
 }
 
 fn casePortalReuseInterleavedSync(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
-    var conn = try connectConnection(allocator, cfg);
-    defer conn.close();
+    var driver = try connectDriver(allocator, cfg);
+    defer driver.deinit();
 
     const stmt_name = "qail_adv_stmt_portal";
-    try prepareStatement(&conn, allocator, stmt_name, "SELECT $1::int4 + 10");
-
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
+    const param = Expr.param(1);
+    const cast_param: Expr = .{
+        .cast = .{
+            .expr = &param,
+            .target_type = "int4",
+            .alias = null,
+        },
+    };
+    const ten = Expr.int(10);
+    const add_expr: Expr = .{
+        .binary = .{
+            .left = &cast_param,
+            .op = .add,
+            .right = &ten,
+            .alias = null,
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{add_expr})
+        .limit(1);
+    try driver.prepare(stmt_name, &cmd);
 
     const p1 = [_]?[]const u8{"1"};
     const p2 = [_]?[]const u8{"2"};
     const p3 = [_]?[]const u8{"3"};
+    const v1 = try fetchPreparedFirstColumnInt(&driver, allocator, stmt_name, &p1);
+    const v2 = try fetchPreparedFirstColumnInt(&driver, allocator, stmt_name, &p2);
+    const v3 = try fetchPreparedFirstColumnInt(&driver, allocator, stmt_name, &p3);
 
-    try encoder.appendBind("adv_portal", stmt_name, &p1);
-    try encoder.appendExecute("adv_portal", 0);
-    try encoder.appendSync();
-
-    try encoder.appendBind("adv_portal", stmt_name, &p2);
-    try encoder.appendExecute("adv_portal", 0);
-    try encoder.appendSync();
-
-    try encoder.appendBind("adv_portal_alt", stmt_name, &p3);
-    try encoder.appendExecute("adv_portal_alt", 0);
-    try encoder.appendSync();
-
-    const values = try runExtendedBatchCollectFirstColumnInts(&conn, allocator, encoder.getWritten(), 3);
-    defer allocator.free(values);
-
-    if (values.len != 3) return error.UnexpectedRowCount;
-    if (values[0] != 11 or values[1] != 12 or values[2] != 13) {
+    if (v1 != 11 or v2 != 12 or v3 != 13) {
         return error.UnexpectedResultValue;
     }
 }
 
 fn caseErrorRecoveryAfterFailure(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
-    var conn = try connectConnection(allocator, cfg);
-    defer conn.close();
+    var driver = try connectDriver(allocator, cfg);
+    defer driver.deinit();
 
     const stmt_name = "qail_adv_stmt_div";
-    try prepareStatement(&conn, allocator, stmt_name, "SELECT 10 / $1::int4");
+    const ten = Expr.int(10);
+    const param = Expr.param(1);
+    const cast_param: Expr = .{
+        .cast = .{
+            .expr = &param,
+            .target_type = "int4",
+            .alias = null,
+        },
+    };
+    const div_expr: Expr = .{
+        .binary = .{
+            .left = &ten,
+            .op = .div,
+            .right = &cast_param,
+            .alias = null,
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{div_expr})
+        .limit(1);
+    try driver.prepare(stmt_name, &cmd);
 
-    var failing = Encoder.init(allocator);
-    defer failing.deinit();
     const bad = [_]?[]const u8{"0"};
-    try failing.appendBind("", stmt_name, &bad);
-    try failing.appendExecute("", 0);
-    try failing.appendSync();
-
-    if (runExtendedBatchCollectFirstColumnInts(&conn, allocator, failing.getWritten(), 1)) |_| {
+    if (driver.fetchPrepared(stmt_name, &bad)) |rows| {
+        deinitRows(allocator, rows);
         return error.ExpectedQueryError;
     } else |err| switch (err) {
         error.QueryError => {},
         else => return err,
     }
 
-    var recovery = Encoder.init(allocator);
-    defer recovery.deinit();
     const good = [_]?[]const u8{"2"};
-    try recovery.appendBind("", stmt_name, &good);
-    try recovery.appendExecute("", 0);
-    try recovery.appendSync();
-
-    const values = try runExtendedBatchCollectFirstColumnInts(&conn, allocator, recovery.getWritten(), 1);
-    defer allocator.free(values);
-    if (values.len != 1 or values[0] != 5) return error.RecoveryFailed;
+    const value = try fetchPreparedFirstColumnInt(&driver, allocator, stmt_name, &good);
+    if (value != 5) return error.RecoveryFailed;
 }
 
 fn casePipelineErrorSkipsRemainingQueries(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
+    var setup_driver = try connectDriver(allocator, cfg);
+    defer setup_driver.deinit();
+
+    const drop_cmd = QailCmd.drop("qail_adv_pipeline_fail");
+    executeCmd(&setup_driver, &drop_cmd) catch {};
+    defer executeCmd(&setup_driver, &drop_cmd) catch {};
+
+    const ddl_cols = [_]Expr{
+        Expr.defWithConstraints("value", "INTEGER", &.{.not_null}),
+    };
+    const create_cmd = QailCmd.make("qail_adv_pipeline_fail").select(&ddl_cols);
+    try executeCmd(&setup_driver, &create_cmd);
+
     var conn = try connectConnection(allocator, cfg);
     defer conn.close();
 
     var pipeline = Pipeline.init(&conn, allocator);
     defer pipeline.deinit();
 
-    try executeSimpleSql(&conn, allocator, "CREATE TEMP TABLE qail_adv_pipeline_fail (value integer NOT NULL)");
-
-    const stmt = try pipeline.getOrPrepare(
-        "INSERT INTO qail_adv_pipeline_fail(value) VALUES ($1::int4)",
-    );
+    const insert_value = QailCmd.add("qail_adv_pipeline_fail").values(&.{
+        .{ .column = "value", .value = .{ .param = 1 } },
+    });
+    const stmt = try pipeline.getOrPrepare(&insert_value);
 
     const first = [_]?[]const u8{"1"};
     const failing = [_]?[]const u8{"broken"};
@@ -515,13 +405,8 @@ fn casePipelineErrorSkipsRemainingQueries(allocator: std.mem.Allocator, cfg: *co
         return error.UnexpectedPipelineFailureMessage;
     }
 
-    const count_text = try querySimpleFirstColumnSql(
-        &conn,
-        allocator,
-        "SELECT COUNT(*) FROM qail_adv_pipeline_fail",
-    );
-    defer allocator.free(count_text);
-    const rolled_back_count = try std.fmt.parseInt(usize, count_text, 10);
+    const count_cmd = QailCmd.get("qail_adv_pipeline_fail").select(&.{Expr.count()});
+    const rolled_back_count: usize = @intCast(try queryFirstColumnInt(&setup_driver, &count_cmd));
     if (rolled_back_count != 0) return error.PipelineFailureUnexpectedCommittedRowCount;
 
     const recovery = [_]?[]const u8{"42"};
@@ -530,25 +415,44 @@ fn casePipelineErrorSkipsRemainingQueries(allocator: std.mem.Allocator, cfg: *co
     if (completed != 1) return error.PipelineRecoveryUnexpectedCompletionCount;
     if (pipeline.lastFailure() != null) return error.StalePipelineFailureMetadata;
 
-    const committed_values = try querySimpleFirstColumnSql(
-        &conn,
-        allocator,
-        "SELECT string_agg(value::text, ',' ORDER BY value) FROM qail_adv_pipeline_fail",
-    );
-    defer allocator.free(committed_values);
-    if (!std.mem.eql(u8, committed_values, "42")) return error.PipelineFailureUnexpectedCommittedValues;
+    const committed_cmd = QailCmd.get("qail_adv_pipeline_fail")
+        .select(&.{Expr.col("value")})
+        .orderBy(&.{.{ .column = "value", .order = .asc }})
+        .limit(1);
+    const committed_value = try queryFirstColumnInt(&setup_driver, &committed_cmd);
+    if (committed_value != 42) return error.PipelineFailureUnexpectedCommittedValues;
 
-    const health = try querySimpleFirstColumnSql(&conn, allocator, "SELECT 99");
-    defer allocator.free(health);
-    if (!std.mem.eql(u8, health, "99")) return error.ConnectionUnhealthyAfterPipelineFailure;
+    const health_cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{Expr.int(99)})
+        .limit(1);
+    const health = try queryFirstColumnInt(&setup_driver, &health_cmd);
+    if (health != 99) return error.ConnectionUnhealthyAfterPipelineFailure;
 }
 
 fn caseLargeParamPayload(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
-    var conn = try connectConnection(allocator, cfg);
-    defer conn.close();
+    var driver = try connectDriver(allocator, cfg);
+    defer driver.deinit();
 
     const stmt_name = "qail_adv_stmt_len";
-    try prepareStatement(&conn, allocator, stmt_name, "SELECT octet_length($1::text)");
+    const param = Expr.param(1);
+    const cast_param: Expr = .{
+        .cast = .{
+            .expr = &param,
+            .target_type = "text",
+            .alias = null,
+        },
+    };
+    const len_expr: Expr = .{
+        .func_call = .{
+            .name = "octet_length",
+            .args = &[_]Expr{cast_param},
+            .alias = null,
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{len_expr})
+        .limit(1);
+    try driver.prepare(stmt_name, &cmd);
 
     const payload_len = 512 * 1024;
     const payload = try allocator.alloc(u8, payload_len);
@@ -558,79 +462,56 @@ fn caseLargeParamPayload(allocator: std.mem.Allocator, cfg: *const DbConfig) !vo
         byte.* = 'a' + offset;
     }
 
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
     const params = [_]?[]const u8{payload};
-    try encoder.appendBind("", stmt_name, &params);
-    try encoder.appendExecute("", 0);
-    try encoder.appendSync();
-
-    const values = try runExtendedBatchCollectFirstColumnInts(&conn, allocator, encoder.getWritten(), 1);
-    defer allocator.free(values);
-    if (values.len != 1) return error.UnexpectedRowCount;
-    if (values[0] != payload_len) return error.PayloadLengthMismatch;
+    const value = try fetchPreparedFirstColumnInt(&driver, allocator, stmt_name, &params);
+    if (value != payload_len) return error.PayloadLengthMismatch;
 }
 
 fn caseUnknownStatementRecovery(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
-    var conn = try connectConnection(allocator, cfg);
-    defer conn.close();
+    var driver = try connectDriver(allocator, cfg);
+    defer driver.deinit();
 
     const stmt_name = "qail_adv_stmt_known";
-    try prepareStatement(&conn, allocator, stmt_name, "SELECT $1::int4 + 1");
-
-    var encoder = Encoder.init(allocator);
-    defer encoder.deinit();
+    const param = Expr.param(1);
+    const cast_param: Expr = .{
+        .cast = .{
+            .expr = &param,
+            .target_type = "int4",
+            .alias = null,
+        },
+    };
+    const one = Expr.int(1);
+    const add_expr: Expr = .{
+        .binary = .{
+            .left = &cast_param,
+            .op = .add,
+            .right = &one,
+            .alias = null,
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{add_expr})
+        .limit(1);
+    try driver.prepare(stmt_name, &cmd);
 
     const bad = [_]?[]const u8{"9"};
     const good = [_]?[]const u8{"41"};
 
-    try encoder.appendBind("", "qail_adv_stmt_missing", &bad);
-    try encoder.appendExecute("", 0);
-    try encoder.appendSync();
-
-    try encoder.appendBind("", stmt_name, &good);
-    try encoder.appendExecute("", 0);
-    try encoder.appendSync();
-
-    try conn.send(encoder.getWritten());
-
-    var values: std.ArrayList(i64) = .empty;
-    defer values.deinit(allocator);
-
-    var ready_count: usize = 0;
-    var error_count: usize = 0;
-    while (ready_count < 2) {
-        const msg = try conn.readMessageRawFast();
-        switch (msg.msg_type) {
-            'D' => {
-                var decoder = Decoder.init(msg.payload);
-                const columns = try decoder.parseDataRowOwned(allocator);
-                defer {
-                    for (columns) |maybe_col| {
-                        if (maybe_col) |col| allocator.free(col);
-                    }
-                    allocator.free(columns);
-                }
-                if (columns.len == 0) return error.EmptyRow;
-                const raw = columns[0] orelse return error.NullValue;
-                const parsed = try std.fmt.parseInt(i64, raw, 10);
-                try values.append(allocator, parsed);
-            },
-            'E' => error_count += 1,
-            'Z' => ready_count += 1,
-            '2', 'C', 'T', 'N', 'S', 'A' => {},
-            else => return error.UnexpectedBackendMessageType,
-        }
+    if (driver.fetchPrepared("qail_adv_stmt_missing", &bad)) |rows| {
+        deinitRows(allocator, rows);
+        return error.ExpectedProtocolError;
+    } else |err| switch (err) {
+        error.QueryError, error.PreparedStatementRetryable => {},
+        else => return err,
     }
 
-    if (error_count == 0) return error.ExpectedProtocolError;
-    if (values.items.len == 0) return error.RecoveryQueryMissingResult;
-    if (values.items[values.items.len - 1] != 42) return error.RecoveryQueryWrongResult;
+    const value = try fetchPreparedFirstColumnInt(&driver, allocator, stmt_name, &good);
+    if (value != 42) return error.RecoveryQueryWrongResult;
 }
 
 fn caseAstEmbeddedNulRejected(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
-    var conn = try connectConnection(allocator, cfg);
-    defer conn.close();
+    var driver = try connectDriver(allocator, cfg);
+    defer driver.deinit();
 
     const where = [_]WhereClause{
         .{
@@ -646,16 +527,19 @@ fn caseAstEmbeddedNulRejected(allocator: std.mem.Allocator, cfg: *const DbConfig
         .where(&where)
         .limit(1);
 
-    if (executeSimpleAst(&conn, allocator, &cmd)) |_| {
+    if (driver.fetchAll(&cmd)) |rows| {
+        deinitRows(allocator, rows);
         return error.ExpectedNullByte;
     } else |err| switch (err) {
         error.NullByte => {},
         else => return err,
     }
 
-    const healthy = try querySimpleFirstColumnSql(&conn, allocator, "SELECT 1");
-    defer allocator.free(healthy);
-    if (!std.mem.eql(u8, healthy, "1")) return error.ConnectionUnhealthyAfterNullByteReject;
+    const health_cmd = QailCmd.get("pg_catalog.pg_database")
+        .select(&.{Expr.int(1)})
+        .limit(1);
+    const healthy = try queryFirstColumnInt(&driver, &health_cmd);
+    if (healthy != 1) return error.ConnectionUnhealthyAfterNullByteReject;
 }
 
 fn caseMidQueryCancelRecovery(allocator: std.mem.Allocator, cfg: *const DbConfig) !void {
@@ -777,9 +661,9 @@ pub fn main(init: std.process.Init) !void {
     var failed: usize = 0;
     runAdversarialCase(case_filter, "1", "Unicode roundtrip with QAIL DSL", allocator, &cfg, caseUnicodeRoundtrip, &passed, &failed);
     runAdversarialCase(case_filter, "2", "SQL injection payload stays literal", allocator, &cfg, caseSqlInjectionLiteralContainment, &passed, &failed);
-    runAdversarialCase(case_filter, "3", "Portal reuse with interleaved Sync", allocator, &cfg, casePortalReuseInterleavedSync, &passed, &failed);
+    runAdversarialCase(case_filter, "3", "Prepared statement reuse through public API", allocator, &cfg, casePortalReuseInterleavedSync, &passed, &failed);
     runAdversarialCase(case_filter, "4", "Error path recovery after division-by-zero", allocator, &cfg, caseErrorRecoveryAfterFailure, &passed, &failed);
-    runAdversarialCase(case_filter, "5", "Unknown statement desync + recovery", allocator, &cfg, caseUnknownStatementRecovery, &passed, &failed);
+    runAdversarialCase(case_filter, "5", "Unknown statement error + recovery", allocator, &cfg, caseUnknownStatementRecovery, &passed, &failed);
     runAdversarialCase(case_filter, "6", "AST embedded NUL rejected fail-closed", allocator, &cfg, caseAstEmbeddedNulRejected, &passed, &failed);
     runAdversarialCase(case_filter, "7", "Mid-query cancel (stop in the middle) + recover", allocator, &cfg, caseMidQueryCancelRecovery, &passed, &failed);
     runAdversarialCase(case_filter, "8", "Large parameter payload roundtrip (512 KiB)", allocator, &cfg, caseLargeParamPayload, &passed, &failed);

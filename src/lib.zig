@@ -10,7 +10,6 @@ comptime {
 }
 
 pub const ast = @import("ast/mod.zig");
-pub const protocol = @import("protocol/mod.zig");
 pub const driver = @import("driver/mod.zig");
 pub const transpiler = @import("transpiler/mod.zig");
 pub const parser = @import("parser/mod.zig");
