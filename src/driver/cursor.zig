@@ -70,13 +70,22 @@ test "Cursor SQL generation" {
     const query = QailCmd.get("users");
     const declare = try cursor.declareSql(allocator, &query);
     defer allocator.free(declare);
-    try std.testing.expectEqualStrings("DECLARE test_cursor CURSOR FOR SELECT * FROM users", declare);
+    try std.testing.expectEqualStrings("DECLARE \"test_cursor\" CURSOR FOR SELECT * FROM users", declare);
 
     const fetch = try cursor.fetchSql(allocator, 100);
     defer allocator.free(fetch);
-    try std.testing.expectEqualStrings("FETCH 100 FROM test_cursor", fetch);
+    try std.testing.expectEqualStrings("FETCH 100 FROM \"test_cursor\"", fetch);
 
     const close = try cursor.closeSql(allocator);
     defer allocator.free(close);
-    try std.testing.expectEqualStrings("CLOSE test_cursor", close);
+    try std.testing.expectEqualStrings("CLOSE \"test_cursor\"", close);
+}
+
+test "Cursor SQL generation quotes cursor name" {
+    const allocator = std.testing.allocator;
+    const cursor = Cursor.init(allocator, "c\"; DROP TABLE users; --");
+
+    const fetch = try cursor.fetchSql(allocator, 100);
+    defer allocator.free(fetch);
+    try std.testing.expectEqualStrings("FETCH 100 FROM \"c\"\"; DROP TABLE users; --\"", fetch);
 }
