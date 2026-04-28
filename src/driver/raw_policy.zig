@@ -473,6 +473,7 @@ test "source: public driver raw runtime api is not re-exported" {
     const driver_mod = @embedFile("mod.zig");
     try std.testing.expect(std.mem.indexOf(u8, driver_mod, "pub const raw_sql =") == null);
     try std.testing.expect(std.mem.indexOf(u8, driver_mod, "pub const raw_cmd =") == null);
+    try std.testing.expect(std.mem.indexOf(u8, driver_mod, "pub const cursor =") == null);
 
     const driver_src = @embedFile("driver.zig");
     try std.testing.expect(std.mem.indexOf(u8, driver_src, "pub fn executeRaw(") == null);

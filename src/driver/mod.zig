@@ -22,7 +22,6 @@ pub const io_backend = @import("io_backend.zig");
 pub const cancel = @import("cancel.zig");
 pub const transaction = @import("transaction.zig");
 pub const prepared = @import("prepared.zig");
-pub const cursor = @import("cursor.zig");
 pub const io = @import("io.zig");
 pub const metrics = @import("metrics.zig");
 pub const auth_options = @import("auth_options.zig");
