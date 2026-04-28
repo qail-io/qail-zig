@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const io = @import("../runtime/io.zig");
+const sanitize = @import("../sanitize.zig");
 const commands = @import("postgres/commands.zig");
 const render = @import("postgres/render.zig");
 const ast = struct {
@@ -29,6 +30,11 @@ const Expr = ast.Expr;
 
 /// Convert a QAIL AST command to PostgreSQL SQL string
 pub fn toSql(allocator: std.mem.Allocator, cmd: *const QailCmd) ![]const u8 {
+    if (sanitize.validateCmd(cmd)) |_| return error.UnsafeAst;
+    return toSqlTrusted(allocator, cmd);
+}
+
+fn toSqlTrusted(allocator: std.mem.Allocator, cmd: *const QailCmd) ![]const u8 {
     var writer = io.AllocatingWriter.init(allocator);
     defer writer.deinit();
 
@@ -394,7 +400,7 @@ test "transpile select with group by and having" {
     };
     const cmd = QailCmd.get("orders").select(&cols).groupBy(&groups).havingClauses(&having);
 
-    const sql = try toSql(std.testing.allocator, &cmd);
+    const sql = try toSqlTrusted(std.testing.allocator, &cmd);
     defer std.testing.allocator.free(sql);
 
     try std.testing.expectEqualStrings(
@@ -435,12 +441,12 @@ test "transpile transaction commands" {
 
 test "transpile create and drop database quote hyphenated names" {
     const create_cmd = QailCmd.createDatabase("qail-engine-db_shadow");
-    const create_sql = try toSql(std.testing.allocator, &create_cmd);
+    const create_sql = try toSqlTrusted(std.testing.allocator, &create_cmd);
     defer std.testing.allocator.free(create_sql);
     try std.testing.expectEqualStrings("CREATE DATABASE \"qail-engine-db_shadow\"", create_sql);
 
     const drop_cmd = QailCmd.dropDatabase("qail-engine-db_shadow");
-    const drop_sql = try toSql(std.testing.allocator, &drop_cmd);
+    const drop_sql = try toSqlTrusted(std.testing.allocator, &drop_cmd);
     defer std.testing.allocator.free(drop_sql);
     try std.testing.expectEqualStrings("DROP DATABASE IF EXISTS \"qail-engine-db_shadow\"", drop_sql);
 }
@@ -488,6 +494,26 @@ test "transpile string escaping" {
     );
 }
 
+test "public transpiler rejects unsafe ast" {
+    const unsafe_table = QailCmd.get("users; DROP TABLE users");
+    try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &unsafe_table));
+
+    var raw_default = QailCmd{
+        .kind = .alter_set_default,
+        .table = "users",
+        .columns = &.{Expr.col("role")},
+        .payload = "current_user; DROP TABLE users",
+    };
+    try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &raw_default));
+
+    const policy = ast.trusted_policy_sql.usingSql(
+        ast.cmd.PolicyDef.create("tenant_only", "users"),
+        "tenant_id = current_setting('app.tenant_id')::uuid",
+    );
+    const trusted_policy = QailCmd.createPolicy(policy);
+    try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &trusted_policy));
+}
+
 test "transpile grant revoke and policy commands" {
     const privs = [_][]const u8{ "SELECT", "INSERT" };
 
@@ -509,7 +535,7 @@ test "transpile grant revoke and policy commands" {
         "tenant_id = current_setting('app.tenant_id')::uuid",
     );
     const create_policy_cmd = QailCmd.createPolicy(policy);
-    const create_policy_sql = try toSql(std.testing.allocator, &create_policy_cmd);
+    const create_policy_sql = try toSqlTrusted(std.testing.allocator, &create_policy_cmd);
     defer std.testing.allocator.free(create_policy_sql);
     try std.testing.expectEqualStrings(
         "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = current_setting('app.tenant_id')::uuid) WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid)",
