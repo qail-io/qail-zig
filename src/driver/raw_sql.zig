@@ -23,6 +23,10 @@ pub fn rollback() []const u8 {
     return "ROLLBACK";
 }
 
+pub fn healthCheck() []const u8 {
+    return "SELECT 1";
+}
+
 pub fn identifySystem() []const u8 {
     return "IDENTIFY_SYSTEM";
 }
@@ -75,11 +79,14 @@ fn rlsClause(mode: AlterTableRlsMode) []const u8 {
 }
 
 fn quoteIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
+    if (ident.len == 0) return error.InvalidIdentifier;
+
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     try out.append(allocator, '"');
     for (ident) |ch| {
+        if (ch == 0) return error.InvalidIdentifier;
         if (ch == '"') {
             try out.appendSlice(allocator, "\"\"");
         } else {
@@ -106,6 +113,11 @@ test "build unlisten quotes identifier" {
     defer std.testing.allocator.free(sql);
 
     try std.testing.expectEqualStrings("UNLISTEN \"chan\"\"nel\"", sql);
+}
+
+test "build listen rejects invalid identifier bytes" {
+    try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, ""));
+    try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, "chan\x00nel"));
 }
 
 test "build alter table rls sql quotes identifier" {

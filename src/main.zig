@@ -1,7 +1,7 @@
 // QAIL Zig Example - Pure Zig PostgreSQL Driver
 //
 // This demonstrates the AST-native query building approach.
-// NO SQL STRINGS in the execution path - AST → Wire Protocol directly.
+// No public raw SQL input: app code builds AST commands.
 
 const std = @import("std");
 const qail = @import("qail");
@@ -14,7 +14,7 @@ pub fn main() !void {
     print("\n", .{});
     print("╔════════════════════════════════════════════════════════════╗\n", .{});
     print("║  QAIL Zig Native - Pure Zig PostgreSQL Driver              ║\n", .{});
-    print("║  AST-Native: No SQL strings in execution path!             ║\n", .{});
+    print("║  AST-Native: no public raw SQL input                       ║\n", .{});
     print("╚════════════════════════════════════════════════════════════╝\n", .{});
     print("\n", .{});
 
@@ -68,8 +68,8 @@ pub fn main() !void {
     // ==================== Key Point ====================
     print("═══════════════════════════════════════════════════════════════\n", .{});
     print("💡 Note: SQL shown above is for DEBUGGING ONLY!\n", .{});
-    print("   Actual execution: AST → PostgreSQL Wire Protocol (binary)\n", .{});
-    print("   No SQL string parsing overhead in the hot path.\n", .{});
+    print("   App path: AST commands → checked internal PostgreSQL frames\n", .{});
+    print("   Public raw SQL command payloads are rejected.\n", .{});
     print("═══════════════════════════════════════════════════════════════\n", .{});
     print("\n✅ QAIL Zig Native is working!\n", .{});
 }

@@ -47,6 +47,7 @@ run_check_raw() {
   "$repo_root/scripts/check_no_public_trusted_ast_helpers.sh"
   "$repo_root/scripts/check_execute_raw_allowlist.sh"
   "$repo_root/scripts/check_raw_cmd_allowlist.sh"
+  "$repo_root/scripts/check_sql_string_policy.sh"
 }
 
 run_pgzig_bench() {

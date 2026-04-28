@@ -9,6 +9,7 @@ const Connection = @import("connection.zig").Connection;
 const config_mod = @import("pool/config.zig");
 const protocol = @import("../protocol/mod.zig");
 const rls_mod = @import("rls.zig");
+const raw_sql_mod = @import("raw_sql.zig");
 const io_compat = @import("../runtime/io.zig");
 const Encoder = protocol.Encoder;
 const Decoder = protocol.Decoder;
@@ -289,7 +290,7 @@ pub const PgPool = struct {
                 self.mutex.unlock(io_compat.runtimeIo());
                 var conn = pooled.conn;
                 if (self.config.test_on_acquire) {
-                    self.executeSimple(&conn, "SELECT 1") catch {
+                    self.executeSimple(&conn, raw_sql_mod.healthCheck()) catch {
                         self.discardConnection(conn);
                         continue;
                     };
@@ -316,7 +317,7 @@ pub const PgPool = struct {
                     return err;
                 };
                 if (self.config.test_on_acquire) {
-                    self.executeSimple(&conn, "SELECT 1") catch {
+                    self.executeSimple(&conn, raw_sql_mod.healthCheck()) catch {
                         self.discardConnection(conn);
                         continue;
                     };
