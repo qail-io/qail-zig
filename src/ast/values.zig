@@ -74,17 +74,7 @@ pub const Value = union(enum) {
             .bool => |b| try writer.writeAll(if (b) "true" else "false"),
             .int => |i| try writer.print("{d}", .{i}),
             .float => |f| try writer.print("{d}", .{f}),
-            .string => |s| {
-                try writer.writeByte('\'');
-                for (s) |c| {
-                    if (c == '\'') {
-                        try writer.writeAll("''");
-                    } else {
-                        try writer.writeByte(c);
-                    }
-                }
-                try writer.writeByte('\'');
-            },
+            .string => |s| try writeSqlStringLiteral(writer, s),
             .bytes => |b| {
                 try writer.writeAll("'\\x");
                 for (b) |byte| {
@@ -104,9 +94,9 @@ pub const Value = union(enum) {
             .named_param => |name| try writer.print(":{s}", .{name}),
             .function => |f| try writer.writeAll(f),
             .column => |c| try writer.writeAll(c),
-            .uuid => |u| try writer.print("'{s}'", .{u}),
+            .uuid => |u| try writeSqlStringLiteral(writer, u),
             .interval => |iv| try writer.print("INTERVAL '{d} {s}'", .{ iv.amount, iv.unit.toSql() }),
-            .timestamp => |ts| try writer.print("'{s}'", .{ts}),
+            .timestamp => |ts| try writeSqlStringLiteral(writer, ts),
             .range => |r| try writer.print("{d} AND {d}", .{ r.low, r.high }),
             .null_uuid => try writer.writeAll("NULL"),
             .vector => |v| {
@@ -118,15 +108,8 @@ pub const Value = union(enum) {
                 try writer.writeByte(']');
             },
             .json => |j| {
-                try writer.writeByte('\'');
-                for (j) |c| {
-                    if (c == '\'') {
-                        try writer.writeAll("''");
-                    } else {
-                        try writer.writeByte(c);
-                    }
-                }
-                try writer.writeAll("'::jsonb");
+                try writeSqlStringLiteral(writer, j);
+                try writer.writeAll("::jsonb");
             },
         }
     }
@@ -173,6 +156,18 @@ pub const Value = union(enum) {
     }
 };
 
+fn writeSqlStringLiteral(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('\'');
+    for (value) |c| {
+        if (c == '\'') {
+            try writer.writeAll("''");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeByte('\'');
+}
+
 // Tests
 test "value format null" {
     var buf: [64]u8 = undefined;
@@ -188,6 +183,22 @@ test "value format string escapes quotes" {
     const v: Value = .{ .string = "it's" };
     try writer.writer().print("{f}", .{v});
     try std.testing.expectEqualStrings("'it''s'", writer.getWritten());
+}
+
+test "value format string-like variants escape quotes" {
+    var buf: [128]u8 = undefined;
+
+    var uuid_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .uuid = "x'; DROP TABLE users; --" }).format(uuid_writer.writer());
+    try std.testing.expectEqualStrings("'x''; DROP TABLE users; --'", uuid_writer.getWritten());
+
+    var ts_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .timestamp = "2026-01-01T00:00:00Z'; DROP TABLE users; --" }).format(ts_writer.writer());
+    try std.testing.expectEqualStrings("'2026-01-01T00:00:00Z''; DROP TABLE users; --'", ts_writer.getWritten());
+
+    var json_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .json = "{\"x\":\"O'Brien\"}" }).format(json_writer.writer());
+    try std.testing.expectEqualStrings("'{\"x\":\"O''Brien\"}'::jsonb", json_writer.getWritten());
 }
 
 test "value format param" {
