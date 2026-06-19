@@ -35,27 +35,27 @@ pub const Timestamp = struct {
 
     /// Create from Unix epoch seconds
     pub fn fromUnixSecs(unix_secs: i64) Timestamp {
-        return .{ .usec = unix_secs * 1_000_000 - PG_EPOCH_OFFSET_USEC };
+        return .{ .usec = saturatingSubI64(saturatingMulI64(unix_secs, 1_000_000), PG_EPOCH_OFFSET_USEC) };
     }
 
     /// Create from Unix epoch milliseconds
     pub fn fromUnixMillis(unix_ms: i64) Timestamp {
-        return .{ .usec = unix_ms * 1_000 - PG_EPOCH_OFFSET_USEC };
+        return .{ .usec = saturatingSubI64(saturatingMulI64(unix_ms, 1_000), PG_EPOCH_OFFSET_USEC) };
     }
 
     /// Convert to Unix epoch seconds
     pub fn toUnixSecs(self: Timestamp) i64 {
-        return @divTrunc(self.usec + PG_EPOCH_OFFSET_USEC, 1_000_000);
+        return @divTrunc(self.toUnixUsec(), 1_000_000);
     }
 
     /// Convert to Unix epoch milliseconds
     pub fn toUnixMillis(self: Timestamp) i64 {
-        return @divTrunc(self.usec + PG_EPOCH_OFFSET_USEC, 1_000);
+        return @divTrunc(self.toUnixUsec(), 1_000);
     }
 
     /// Convert to Unix epoch microseconds
     pub fn toUnixUsec(self: Timestamp) i64 {
-        return self.usec + PG_EPOCH_OFFSET_USEC;
+        return saturatingAddI64(self.usec, PG_EPOCH_OFFSET_USEC);
     }
 
     /// Parse from binary (8 bytes, big endian)
@@ -141,6 +141,12 @@ pub const Time = struct {
 
     /// Create from hours, minutes, seconds, microseconds
     pub fn new(h: u8, m: u8, s: u8, us: u32) Time {
+        return Time.tryNew(h, m, s, us) catch @panic("invalid time components");
+    }
+
+    /// Fallible constructor from hours, minutes, seconds, microseconds.
+    pub fn tryNew(h: u8, m: u8, s: u8, us: u32) !Time {
+        try validateTimeComponents(h, m, s, us);
         return .{
             .usec = @as(i64, h) * 3_600_000_000 +
                 @as(i64, m) * 60_000_000 +
@@ -262,12 +268,50 @@ fn daysFromYmd(year: i32, month: u8, day: u8) i32 {
     return days;
 }
 
+fn validateTimeComponents(h: u8, m: u8, s: u8, us: u32) !void {
+    if (h > 23) return error.InvalidTimeComponent;
+    if (m > 59) return error.InvalidTimeComponent;
+    if (s > 59) return error.InvalidTimeComponent;
+    if (us >= 1_000_000) return error.InvalidTimeComponent;
+}
+
+fn saturatingMulI64(a: i64, b: i64) i64 {
+    return std.math.mul(i64, a, b) catch {
+        const opposite_signs = (a < 0) != (b < 0);
+        return if (opposite_signs) std.math.minInt(i64) else std.math.maxInt(i64);
+    };
+}
+
+fn saturatingAddI64(a: i64, b: i64) i64 {
+    return std.math.add(i64, a, b) catch {
+        return if (b >= 0) std.math.maxInt(i64) else std.math.minInt(i64);
+    };
+}
+
+fn saturatingSubI64(a: i64, b: i64) i64 {
+    return std.math.sub(i64, a, b) catch {
+        return if (b >= 0) std.math.minInt(i64) else std.math.maxInt(i64);
+    };
+}
+
 // ==================== Tests ====================
 
 test "Timestamp Unix conversion" {
     const unix_secs: i64 = 1704067200; // 2024-01-01 00:00:00 UTC
     const ts = Timestamp.fromUnixSecs(unix_secs);
     try std.testing.expectEqual(unix_secs, ts.toUnixSecs());
+}
+
+test "Timestamp extreme Unix conversion saturates" {
+    try std.testing.expectEqual(
+        std.math.maxInt(i64) - PG_EPOCH_OFFSET_USEC,
+        Timestamp.fromUnixSecs(std.math.maxInt(i64)).usec,
+    );
+    try std.testing.expectEqual(
+        std.math.minInt(i64),
+        Timestamp.fromUnixSecs(std.math.minInt(i64)).usec,
+    );
+    try std.testing.expectEqual(std.math.maxInt(i64), Timestamp.fromPgUsec(std.math.maxInt(i64)).toUnixUsec());
 }
 
 test "Timestamp binary roundtrip" {
@@ -292,6 +336,13 @@ test "Time components" {
     try std.testing.expectEqual(@as(u8, 30), time.minute());
     try std.testing.expectEqual(@as(u8, 45), time.second());
     try std.testing.expectEqual(@as(u32, 123456), time.microsecond());
+}
+
+test "Time tryNew rejects invalid components" {
+    try std.testing.expectError(error.InvalidTimeComponent, Time.tryNew(24, 0, 0, 0));
+    try std.testing.expectError(error.InvalidTimeComponent, Time.tryNew(23, 60, 0, 0));
+    try std.testing.expectError(error.InvalidTimeComponent, Time.tryNew(23, 59, 60, 0));
+    try std.testing.expectError(error.InvalidTimeComponent, Time.tryNew(23, 59, 59, 1_000_000));
 }
 
 test "Time fromBinary rejects out-of-range values" {
