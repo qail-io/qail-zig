@@ -77,6 +77,45 @@ fn appendPath(allocator: Allocator, dir_path: []const u8, file_name: []const u8)
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, file_name });
 }
 
+fn filenameComponent(allocator: Allocator, raw: []const u8) ![]u8 {
+    var safe = std.ArrayList(u8).initCapacity(allocator, raw.len) catch unreachable;
+    errdefer safe.deinit(allocator);
+
+    var last_was_separator = false;
+    for (raw) |ch| {
+        const is_safe = std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-' or ch == '.';
+        if (is_safe) {
+            try safe.append(allocator, ch);
+            last_was_separator = false;
+        } else if (!last_was_separator) {
+            try safe.append(allocator, '_');
+            last_was_separator = true;
+        }
+    }
+
+    const trimmed = std.mem.trim(u8, safe.items, "_-.");
+    if (trimmed.len == 0) {
+        safe.deinit(allocator);
+        return allocator.dupe(u8, "unnamed");
+    }
+
+    const out = try allocator.dupe(u8, trimmed);
+    safe.deinit(allocator);
+    return out;
+}
+
+fn schemaModuleFilename(allocator: Allocator, table_name: []const u8) ![]u8 {
+    const safe_name = try filenameComponent(allocator, table_name);
+    defer allocator.free(safe_name);
+
+    if (std.mem.eql(u8, safe_name, table_name)) {
+        return std.fmt.allocPrint(allocator, "{s}.qail", .{safe_name});
+    }
+
+    const digest = std.hash.Fnv1a_64.hash(table_name);
+    return std.fmt.allocPrint(allocator, "{s}_{x:0>16}.qail", .{ safe_name, digest });
+}
+
 fn addUniqueName(allocator: Allocator, set: *NameSet, value: []const u8) !bool {
     const owned = try allocator.dupe(u8, value);
     errdefer allocator.free(owned);
@@ -412,7 +451,7 @@ pub fn splitSchema(allocator: Allocator, input: []const u8, out_dir: []const u8,
     }
 
     for (schema.tables.items) |*table| {
-        const file_name = try std.fmt.allocPrint(allocator, "{s}.qail", .{table.name});
+        const file_name = try schemaModuleFilename(allocator, table.name);
         defer allocator.free(file_name);
         const file_path = try appendPath(allocator, out_dir, file_name);
         defer allocator.free(file_path);
@@ -512,4 +551,58 @@ pub fn make(comptime Cli: type) type {
             }
         }
     };
+}
+
+test "schema module filenames preserve common table names" {
+    const allocator = std.testing.allocator;
+
+    const users = try schemaModuleFilename(allocator, "users");
+    defer allocator.free(users);
+    try std.testing.expectEqualStrings("users.qail", users);
+
+    const qualified = try schemaModuleFilename(allocator, "public.users");
+    defer allocator.free(qualified);
+    try std.testing.expectEqualStrings("public.users.qail", qualified);
+
+    const tenant_users = try schemaModuleFilename(allocator, "tenant_users");
+    defer allocator.free(tenant_users);
+    try std.testing.expectEqualStrings("tenant_users.qail", tenant_users);
+}
+
+test "schema module filenames sanitize path-like names" {
+    const allocator = std.testing.allocator;
+
+    const filename = try schemaModuleFilename(allocator, "../../tenant/users\n");
+    defer allocator.free(filename);
+
+    try std.testing.expect(std.mem.startsWith(u8, filename, "tenant_users_"));
+    try std.testing.expect(std.mem.endsWith(u8, filename, ".qail"));
+    try std.testing.expect(std.mem.indexOfScalar(u8, filename, '/') == null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, filename, '\\') == null);
+    try std.testing.expect(std.mem.indexOf(u8, filename, "..") == null);
+}
+
+test "schema module filenames hash sanitized collisions" {
+    const allocator = std.testing.allocator;
+
+    const slash_name = try schemaModuleFilename(allocator, "tenant/users");
+    defer allocator.free(slash_name);
+    const question_name = try schemaModuleFilename(allocator, "tenant?users");
+    defer allocator.free(question_name);
+
+    try std.testing.expect(!std.mem.eql(u8, slash_name, question_name));
+    try std.testing.expect(std.mem.startsWith(u8, slash_name, "tenant_users_"));
+    try std.testing.expect(std.mem.startsWith(u8, question_name, "tenant_users_"));
+}
+
+test "schema filename component fails closed for empty names" {
+    const allocator = std.testing.allocator;
+
+    const dots = try filenameComponent(allocator, "...");
+    defer allocator.free(dots);
+    try std.testing.expectEqualStrings("unnamed", dots);
+
+    const whitespace = try filenameComponent(allocator, " \n\t ");
+    defer allocator.free(whitespace);
+    try std.testing.expectEqualStrings("unnamed", whitespace);
 }
