@@ -43,10 +43,7 @@ pub fn parseFieldsClause(allocator: std.mem.Allocator, input: []const u8) ParseE
     errdefer columns.deinit(allocator);
 
     // Parse first column (required if "fields" present)
-    const first = parseColumnExpr(trimmed) catch |err| {
-        columns.deinit(allocator);
-        return err;
-    };
+    const first = try parseColumnExpr(trimmed);
     columns.append(allocator, first.value) catch return ParseError.InvalidSyntax;
     trimmed = skipWhitespace(first.remaining);
 

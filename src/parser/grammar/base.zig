@@ -50,6 +50,30 @@ fn isIdentChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c == '.';
 }
 
+fn isBareIdentChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+fn isIdentStart(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '_';
+}
+
+fn isValidIdentPart(part: []const u8) bool {
+    if (part.len == 0 or !isIdentStart(part[0])) return false;
+    for (part[1..]) |ch| {
+        if (!isBareIdentChar(ch)) return false;
+    }
+    return true;
+}
+
+fn isValidQualifiedIdentifier(identifier: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, identifier, '.');
+    while (parts.next()) |part| {
+        if (!isValidIdentPart(part)) return false;
+    }
+    return true;
+}
+
 /// Case-insensitive string comparison
 pub fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
@@ -79,24 +103,42 @@ pub fn consumeTag(input: []const u8, tag: []const u8) ?[]const u8 {
 
 // ==================== Core Parsers ====================
 
+/// Parse a bare identifier (column, alias, or named parameter; no dots).
+pub fn parseBareIdentifier(input: []const u8) ParseError!ParseResult([]const u8) {
+    const trimmed = skipWhitespace(input);
+    if (trimmed.len == 0) return ParseError.UnexpectedEnd;
+    if (!isIdentStart(trimmed[0])) return ParseError.InvalidSyntax;
+
+    var end: usize = 0;
+    while (end < trimmed.len and isBareIdentChar(trimmed[end])) : (end += 1) {}
+    if (end < trimmed.len and trimmed[end] == '.') return ParseError.InvalidSyntax;
+
+    const identifier = trimmed[0..end];
+    if (!isValidIdentPart(identifier)) return ParseError.InvalidSyntax;
+
+    return .{
+        .remaining = trimmed[end..],
+        .value = identifier,
+    };
+}
+
 /// Parse an identifier (table name, column name, or qualified table.column)
 pub fn parseIdentifier(input: []const u8) ParseError!ParseResult([]const u8) {
     const trimmed = skipWhitespace(input);
     if (trimmed.len == 0) return ParseError.UnexpectedEnd;
 
     // Check for valid start character
-    if (!std.ascii.isAlphabetic(trimmed[0]) and trimmed[0] != '_') {
-        return ParseError.InvalidSyntax;
-    }
+    if (!isIdentStart(trimmed[0])) return ParseError.InvalidSyntax;
 
     var end: usize = 0;
     while (end < trimmed.len and isIdentChar(trimmed[end])) : (end += 1) {}
 
-    if (end == 0) return ParseError.InvalidSyntax;
+    const identifier = trimmed[0..end];
+    if (!isValidQualifiedIdentifier(identifier)) return ParseError.InvalidSyntax;
 
     return .{
         .remaining = trimmed[end..],
-        .value = trimmed[0..end],
+        .value = identifier,
     };
 }
 
@@ -116,10 +158,8 @@ pub fn parseValue(input: []const u8) ParseError!ParseResult(Value) {
 
     // Named parameter: :name
     if (trimmed[0] == ':') {
-        var end: usize = 1;
-        while (end < trimmed.len and (std.ascii.isAlphanumeric(trimmed[end]) or trimmed[end] == '_')) : (end += 1) {}
-        if (end == 1) return ParseError.InvalidSyntax;
-        return .{ .remaining = trimmed[end..], .value = .{ .named_param = trimmed[1..end] } };
+        const ident = try parseBareIdentifier(trimmed[1..]);
+        return .{ .remaining = ident.remaining, .value = .{ .named_param = ident.value } };
     }
 
     // Boolean: true, false
@@ -263,6 +303,35 @@ test "parseIdentifier" {
     try std.testing.expectEqualStrings("user_profiles.id", result2.value);
 }
 
+test "parseIdentifier rejects malformed identifiers" {
+    const invalid = [_][]const u8{
+        "1users",
+        ".users",
+        "users.",
+        "users..archive",
+    };
+
+    for (invalid) |input| {
+        try std.testing.expectError(ParseError.InvalidSyntax, parseIdentifier(input));
+    }
+}
+
+test "parseBareIdentifier rejects qualified or malformed identifiers" {
+    const result = try parseBareIdentifier("user_id ");
+    try std.testing.expectEqualStrings("user_id", result.value);
+
+    const invalid = [_][]const u8{
+        "1id",
+        ".id",
+        "id.",
+        "users.id",
+    };
+
+    for (invalid) |input| {
+        try std.testing.expectError(ParseError.InvalidSyntax, parseBareIdentifier(input));
+    }
+}
+
 test "parseValue - integers" {
     const result = try parseValue("42 ");
     try std.testing.expectEqual(Value{ .int = 42 }, result.value);
@@ -276,6 +345,11 @@ test "parseValue - strings" {
 test "parseValue - params" {
     const result = try parseValue("$1 and");
     try std.testing.expectEqual(Value{ .param = 1 }, result.value);
+}
+
+test "parseValue rejects malformed named params" {
+    try std.testing.expectError(ParseError.InvalidSyntax, parseValue(":1active"));
+    try std.testing.expectError(ParseError.InvalidSyntax, parseValue(":.active"));
 }
 
 test "parseOperator" {

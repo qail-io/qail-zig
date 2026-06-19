@@ -144,24 +144,77 @@ const Parser = struct {
         }
     }
 
+    fn isIdentifierStart(c: u8) bool {
+        return std.ascii.isAlphabetic(c) or c == '_';
+    }
+
+    fn isIdentifierPart(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_';
+    }
+
+    fn isQualifiedIdentifierPart(c: u8) bool {
+        return isIdentifierPart(c) or c == '.';
+    }
+
+    fn validateIdentifierPart(part: []const u8) bool {
+        if (part.len == 0 or !isIdentifierStart(part[0])) return false;
+        for (part[1..]) |ch| {
+            if (!isIdentifierPart(ch)) return false;
+        }
+        return true;
+    }
+
+    fn validateQualifiedIdentifier(identifier: []const u8) bool {
+        var parts = std.mem.splitScalar(u8, identifier, '.');
+        while (parts.next()) |part| {
+            if (!validateIdentifierPart(part)) return false;
+        }
+        return true;
+    }
+
     fn parseIdentifier(self: *Parser) ![]const u8 {
         self.skipWhitespace();
         const start = self.pos;
+        const first = self.current() orelse return error.ExpectedIdentifier;
+        if (!isIdentifierStart(first)) return error.ExpectedIdentifier;
+        self.advance();
 
         while (self.pos < self.input.len) {
             const c = self.input[self.pos];
-            if (std.ascii.isAlphanumeric(c) or c == '_' or c == '.') {
+            if (isQualifiedIdentifierPart(c)) {
                 self.pos += 1;
             } else {
                 break;
             }
         }
 
-        if (self.pos == start) {
-            return error.ExpectedIdentifier;
-        }
+        const identifier = self.input[start..self.pos];
+        if (!validateQualifiedIdentifier(identifier)) return error.ExpectedIdentifier;
 
-        return self.allocator.dupe(u8, self.input[start..self.pos]);
+        return self.allocator.dupe(u8, identifier);
+    }
+
+    fn parseBareIdentifier(self: *Parser) ![]const u8 {
+        self.skipWhitespace();
+        const start = self.pos;
+        const first = self.current() orelse return error.ExpectedIdentifier;
+        if (!isIdentifierStart(first)) return error.ExpectedIdentifier;
+        self.advance();
+
+        while (self.pos < self.input.len) {
+            const c = self.input[self.pos];
+            if (isIdentifierPart(c)) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if (self.current() == '.') return error.ExpectedIdentifier;
+
+        const identifier = self.input[start..self.pos];
+        if (!validateIdentifierPart(identifier)) return error.ExpectedIdentifier;
+
+        return self.allocator.dupe(u8, identifier);
     }
 
     fn expectChar(self: *Parser, c: u8) !void {
@@ -615,7 +668,7 @@ const Parser = struct {
     }
 
     fn parseColumn(self: *Parser) !ColumnDef {
-        const name = try self.parseIdentifier();
+        const name = try self.parseBareIdentifier();
         errdefer self.allocator.free(name);
         const type_info = try self.parseTypeInfo();
         errdefer {
@@ -1534,6 +1587,47 @@ test "schema parser rejects malformed types and params" {
         ,
         \\table users (
         \\    id varchar(255
+        \\)
+        ,
+    };
+
+    for (invalid_inputs) |input| {
+        try expectSchemaParseFailure(input);
+    }
+}
+
+test "schema parser rejects malformed identifiers" {
+    const invalid_inputs = [_][]const u8{
+        \\table 1users (
+        \\    id uuid
+        \\)
+        ,
+        \\table .users (
+        \\    id uuid
+        \\)
+        ,
+        \\table users. (
+        \\    id uuid
+        \\)
+        ,
+        \\table users..archive (
+        \\    id uuid
+        \\)
+        ,
+        \\table users (
+        \\    1id uuid
+        \\)
+        ,
+        \\table users (
+        \\    .id uuid
+        \\)
+        ,
+        \\table users (
+        \\    id. uuid
+        \\)
+        ,
+        \\table users (
+        \\    profile.id uuid
         \\)
         ,
     };

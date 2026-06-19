@@ -36,11 +36,20 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) !QailCmd {
     if (result.remaining.len > 0) {
         const trimmed = skipWhitespace(result.remaining);
         if (trimmed.len > 0) {
+            var cmd = result.value;
+            freeParsedCommandAllocations(allocator, &cmd);
             return ParseError.InvalidSyntax;
         }
     }
 
     return result.value;
+}
+
+fn freeParsedCommandAllocations(allocator: std.mem.Allocator, cmd: *QailCmd) void {
+    if (cmd.joins.len > 0) allocator.free(cmd.joins);
+    if (cmd.columns.len > 0) allocator.free(cmd.columns);
+    if (cmd.where_clauses.len > 0) allocator.free(cmd.where_clauses);
+    if (cmd.order_by.len > 0) allocator.free(cmd.order_by);
 }
 
 /// Parse root entry point - returns QailCmd and remaining input
@@ -80,6 +89,7 @@ pub fn parseRoot(allocator: std.mem.Allocator, input: []const u8) !ParseResult(Q
         .make => QailCmd.make(table_result.value),
         else => QailCmd.get(table_result.value),
     };
+    errdefer freeParsedCommandAllocations(allocator, &cmd);
     cmd.distinct = distinct;
 
     // Parse optional joins
@@ -221,6 +231,35 @@ test "parse full query" {
     try std.testing.expectEqual(@as(usize, 2), cmd.where_clauses.len);
     try std.testing.expectEqual(@as(usize, 1), cmd.order_by.len);
     try std.testing.expectEqual(@as(?i64, 10), cmd.limit_val);
+}
+
+test "parse rejects malformed identifiers across query clauses" {
+    const allocator = std.testing.allocator;
+    const invalid_inputs = [_][]const u8{
+        "get 1users",
+        "get .users",
+        "get users.",
+        "get users..archive",
+        "get users fields .id",
+        "get users fields id.",
+        "get users fields id as 1alias",
+        "get users fields id as alias.",
+        "get users fields id where .active = true",
+        "get users fields id where active. = true",
+        "get users fields id where active = .other",
+        "get users fields id where active = other.",
+        "get users fields id where active = :1active",
+        "get users fields id order by .created_at",
+        "get users fields id order by created_at.",
+        "get users join .posts on users.id = posts.user_id",
+        "get users join posts. on users.id = posts.user_id",
+        "get users join posts on .users.id = posts.user_id",
+        "get users join posts on users.id = posts.user_id.",
+    };
+
+    for (invalid_inputs) |input| {
+        try std.testing.expectError(ParseError.InvalidSyntax, parse(allocator, input));
+    }
 }
 
 test "parse transaction commands" {
