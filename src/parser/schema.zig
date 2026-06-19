@@ -380,33 +380,66 @@ const Parser = struct {
         };
     }
 
-    fn parseTypeInfo(self: *Parser) !struct {
+    const TypeInfo = struct {
         name: []const u8,
         params: ?[]const u8,
         is_array: bool,
         is_serial: bool,
-    } {
+
+        fn deinit(self: *TypeInfo, allocator: Allocator) void {
+            allocator.free(self.name);
+            if (self.params) |params| allocator.free(params);
+        }
+    };
+
+    fn isTypeNameStart(c: u8) bool {
+        return std.ascii.isAlphabetic(c) or c == '_';
+    }
+
+    fn isTypeNamePart(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_';
+    }
+
+    fn validateTypeParams(params: []const u8) !void {
+        if (std.mem.indexOfAny(u8, params, "\r\n") != null) return error.InvalidTypeParams;
+
+        var saw_part = false;
+        var parts = std.mem.splitScalar(u8, params, ',');
+        while (parts.next()) |raw_part| {
+            const part = std.mem.trim(u8, raw_part, " \t");
+            if (part.len == 0) return error.InvalidTypeParams;
+            for (part) |ch| {
+                if (!std.ascii.isDigit(ch)) return error.InvalidTypeParams;
+            }
+            saw_part = true;
+        }
+
+        if (!saw_part) return error.InvalidTypeParams;
+    }
+
+    fn parseTypeInfo(self: *Parser) !TypeInfo {
         self.skipWhitespace();
         const start = self.pos;
+        const first = self.current() orelse return error.ExpectedType;
+        if (!isTypeNameStart(first)) return error.ExpectedType;
+        self.advance();
 
         // Parse type name
         while (self.pos < self.input.len) {
             const c = self.input[self.pos];
-            if (std.ascii.isAlphanumeric(c)) {
+            if (isTypeNamePart(c)) {
                 self.pos += 1;
             } else {
                 break;
             }
         }
 
-        if (self.pos == start) {
-            return error.ExpectedType;
-        }
-
         const type_name = try self.allocator.dupe(u8, self.input[start..self.pos]);
+        errdefer self.allocator.free(type_name);
 
         // Check for type params like (255) or (10, 2)
         var params: ?[]const u8 = null;
+        errdefer if (params) |owned_params| self.allocator.free(owned_params);
         if (self.current() == '(') {
             self.advance();
             const param_start = self.pos;
@@ -414,7 +447,10 @@ const Parser = struct {
                 if (c == ')') break;
                 self.advance();
             }
-            params = try self.allocator.dupe(u8, self.input[param_start..self.pos]);
+            if (self.current() != ')') return error.UnterminatedTypeParams;
+            const raw_params = self.input[param_start..self.pos];
+            try validateTypeParams(raw_params);
+            params = try self.allocator.dupe(u8, raw_params);
             self.advance(); // skip )
         }
 
@@ -444,10 +480,24 @@ const Parser = struct {
         references: ?[]const u8 = null,
         default_value: ?[]const u8 = null,
         check: ?[]const u8 = null,
+
+        fn deinit(self: *ConstraintResult, allocator: Allocator) void {
+            if (self.references) |refs| allocator.free(refs);
+            if (self.default_value) |default_value| allocator.free(default_value);
+            if (self.check) |check| allocator.free(check);
+        }
     };
 
     fn parseConstraints(self: *Parser) !ConstraintResult {
         var result = ConstraintResult{};
+        errdefer result.deinit(self.allocator);
+        var seen_primary_key = false;
+        var seen_not_null = false;
+        var seen_nullable = false;
+        var seen_unique = false;
+        var seen_references = false;
+        var seen_default = false;
+        var seen_check = false;
 
         // Parse constraint keywords until we hit , or ) or } or newline
         while (true) {
@@ -457,14 +507,34 @@ const Parser = struct {
 
             if (self.matchKeyword("primary_key") or self.matchKeyword("primary")) {
                 _ = self.matchKeyword("key"); // optional "key" part
+                if (seen_primary_key) return error.DuplicateColumnConstraint;
+                if (seen_nullable) return error.InvalidColumnConstraint;
+                seen_primary_key = true;
                 result.primary_key = true;
                 result.nullable = false;
-            } else if (self.matchKeyword("not_null") or self.matchKeyword("not")) {
-                _ = self.matchKeyword("null");
+            } else if (self.matchKeyword("not_null")) {
+                if (!seen_not_null and seen_nullable) return error.InvalidColumnConstraint;
+                if (seen_not_null) return error.DuplicateColumnConstraint;
+                seen_not_null = true;
                 result.nullable = false;
+            } else if (self.matchKeyword("not")) {
+                if (!seen_not_null and seen_nullable) return error.InvalidColumnConstraint;
+                if (seen_not_null) return error.DuplicateColumnConstraint;
+                if (!self.matchKeyword("null")) return error.InvalidColumnConstraint;
+                seen_not_null = true;
+                result.nullable = false;
+            } else if (self.matchKeyword("nullable") or self.matchKeyword("null")) {
+                if (seen_nullable) return error.DuplicateColumnConstraint;
+                if (seen_primary_key or seen_not_null) return error.InvalidColumnConstraint;
+                seen_nullable = true;
+                result.nullable = true;
             } else if (self.matchKeyword("unique")) {
+                if (seen_unique) return error.DuplicateColumnConstraint;
+                seen_unique = true;
                 result.unique = true;
             } else if (self.matchKeyword("references")) {
+                if (seen_references) return error.DuplicateColumnConstraint;
+                seen_references = true;
                 self.skipWhitespace();
                 const ref_start = self.pos;
                 // Parse table(column) - track parens depth
@@ -487,8 +557,12 @@ const Parser = struct {
                         self.advance();
                     }
                 }
-                result.references = try self.allocator.dupe(u8, self.input[ref_start..self.pos]);
+                const refs = std.mem.trim(u8, self.input[ref_start..self.pos], " \t\r\n");
+                if (refs.len == 0) return error.InvalidColumnConstraint;
+                result.references = try self.allocator.dupe(u8, refs);
             } else if (self.matchKeyword("default")) {
+                if (seen_default) return error.DuplicateColumnConstraint;
+                seen_default = true;
                 self.skipWhitespace();
                 const def_start = self.pos;
                 // Parse default value - track parens for function calls like NOW()
@@ -510,8 +584,12 @@ const Parser = struct {
                         self.advance();
                     }
                 }
-                result.default_value = try self.allocator.dupe(u8, self.input[def_start..self.pos]);
+                const default_value = std.mem.trim(u8, self.input[def_start..self.pos], " \t\r\n");
+                if (default_value.len == 0) return error.InvalidColumnConstraint;
+                result.default_value = try self.allocator.dupe(u8, default_value);
             } else if (self.matchKeyword("check")) {
+                if (seen_check) return error.DuplicateColumnConstraint;
+                seen_check = true;
                 try self.expectChar('(');
                 const check_start = self.pos;
                 var depth: usize = 1;
@@ -523,13 +601,13 @@ const Parser = struct {
                     }
                     self.advance();
                 }
-                result.check = try self.allocator.dupe(u8, self.input[check_start..self.pos]);
+                if (self.current() != ')') return error.UnterminatedExpression;
+                const check_expr = std.mem.trim(u8, self.input[check_start..self.pos], " \t\r\n");
+                if (check_expr.len == 0) return error.InvalidColumnConstraint;
+                result.check = try self.allocator.dupe(u8, check_expr);
                 self.advance(); // skip closing )
             } else {
-                // Unknown token - only skip if it's not a terminator
-                const ch = self.current() orelse break;
-                if (ch == '\n' or ch == ',' or ch == ')' or ch == '}') break;
-                self.advance();
+                return error.InvalidColumnConstraint;
             }
         }
 
@@ -538,7 +616,12 @@ const Parser = struct {
 
     fn parseColumn(self: *Parser) !ColumnDef {
         const name = try self.parseIdentifier();
+        errdefer self.allocator.free(name);
         const type_info = try self.parseTypeInfo();
+        errdefer {
+            var owned_type_info = type_info;
+            owned_type_info.deinit(self.allocator);
+        }
         const constraints = try self.parseConstraints();
 
         return ColumnDef{
@@ -563,6 +646,7 @@ const Parser = struct {
 
         const name = try self.parseIdentifier();
         var table = TableDef.init(self.allocator, name);
+        errdefer table.deinit(self.allocator);
 
         // Support both () and {} for table definitions (like qail.rs uses {})
         self.skipWhitespace();
@@ -591,6 +675,7 @@ const Parser = struct {
 
     pub fn parseSchema(self: *Parser) !Schema {
         var schema = Schema.init(self.allocator);
+        errdefer schema.deinit();
 
         while (true) {
             self.skipWhitespace();
@@ -1384,7 +1469,8 @@ test "parse type params" {
     const input =
         \\table items (
         \\    id serial primary_key,
-        \\    name varchar(255) not null
+        \\    name varchar(255) not null,
+        \\    amount numeric(10, 2)
         \\)
     ;
 
@@ -1400,6 +1486,122 @@ test "parse type params" {
     const name = items.findColumn("name").?;
     try std.testing.expectEqualStrings("varchar", name.typ);
     try std.testing.expectEqualStrings("255", name.type_params.?);
+
+    const amount = items.findColumn("amount").?;
+    try std.testing.expectEqualStrings("numeric", amount.typ);
+    try std.testing.expectEqualStrings("10, 2", amount.type_params.?);
+}
+
+fn expectSchemaParseFailure(input: []const u8) !void {
+    var schema = Schema.parse(std.testing.allocator, input) catch return;
+    defer schema.deinit();
+    return error.ExpectedSchemaParseFailure;
+}
+
+test "schema parser rejects malformed types and params" {
+    const invalid_inputs = [_][]const u8{
+        \\table users (
+        \\    id 1uuid
+        \\)
+        ,
+        \\table users (
+        \\    id uuid-name
+        \\)
+        ,
+        \\table users (
+        \\    id varchar()
+        \\)
+        ,
+        \\table users (
+        \\    id varchar( )
+        \\)
+        ,
+        \\table users (
+        \\    id varchar(255,)
+        \\)
+        ,
+        \\table users (
+        \\    id varchar(,255)
+        \\)
+        ,
+        \\table users (
+        \\    id varchar(255,,10)
+        \\)
+        ,
+        \\table users (
+        \\    id varchar(size)
+        \\)
+        ,
+        \\table users (
+        \\    id varchar(255
+        \\)
+        ,
+    };
+
+    for (invalid_inputs) |input| {
+        try expectSchemaParseFailure(input);
+    }
+}
+
+test "schema parser rejects duplicate and contradictory column constraints" {
+    const invalid_inputs = [_][]const u8{
+        \\table users (
+        \\    id uuid primary_key primary_key
+        \\)
+        ,
+        \\table users (
+        \\    id uuid primary key primary_key
+        \\)
+        ,
+        \\table users (
+        \\    id uuid unique unique
+        \\)
+        ,
+        \\table users (
+        \\    id uuid nullable null
+        \\)
+        ,
+        \\table users (
+        \\    id uuid not null not_null
+        \\)
+        ,
+        \\table users (
+        \\    id uuid default 1 default 2
+        \\)
+        ,
+        \\table users (
+        \\    id uuid check (id > 0) check (id < 10)
+        \\)
+        ,
+        \\table users (
+        \\    id uuid primary_key null
+        \\)
+        ,
+        \\table users (
+        \\    id uuid nullable primary_key
+        \\)
+        ,
+        \\table users (
+        \\    id uuid not nullable
+        \\)
+        ,
+        \\table users (
+        \\    id uuid references users(id) references accounts(id)
+        \\)
+        ,
+        \\table users (
+        \\    id uuid default
+        \\)
+        ,
+        \\table users (
+        \\    id uuid check ()
+        \\)
+        ,
+    };
+
+    for (invalid_inputs) |input| {
+        try expectSchemaParseFailure(input);
+    }
 }
 
 test "parse policy block" {
