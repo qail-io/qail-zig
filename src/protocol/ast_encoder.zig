@@ -332,7 +332,9 @@ pub const AstEncoder = struct {
         // First check for raw_sql (used for pre-generated DDL). Commands
         // that use raw_sql as a nested source fragment handle it below.
         if (cmd.raw_sql) |raw| {
-            if (cmd.kind != .create_view and cmd.kind != .create_materialized_view) {
+            if (cmd.kind != .create_view and cmd.kind != .create_materialized_view and
+                cmd.kind != .add and cmd.kind != .put and cmd.kind != .upsert)
+            {
                 try writer.writeAll(raw);
                 return;
             }
@@ -346,7 +348,7 @@ pub const AstEncoder = struct {
                 try validateUpdateShape(cmd);
                 try writer.writeAll("UPDATE ");
                 if (cmd.only_table) try writer.writeAll("ONLY ");
-                try writer.writeAll(cmd.table);
+                try writeTableReferenceOrError(writer, cmd.table);
                 try writer.writeAll(" SET ");
 
                 for (cmd.assignments, 0..) |assign, i| {
@@ -369,7 +371,7 @@ pub const AstEncoder = struct {
             .del => {
                 try writer.writeAll("DELETE FROM ");
                 if (cmd.only_table) try writer.writeAll("ONLY ");
-                try writer.writeAll(cmd.table);
+                try writeTableReferenceOrError(writer, cmd.table);
 
                 try writeWhereClauses(writer, cmd.where_clauses);
 
@@ -386,7 +388,7 @@ pub const AstEncoder = struct {
             .merge => try writeMerge(writer, cmd),
             .truncate => {
                 try writer.writeAll("TRUNCATE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .listen => {
                 try writer.writeAll("LISTEN ");
@@ -688,7 +690,7 @@ pub const AstEncoder = struct {
                     try writer.writeAll(raw);
                 } else if (cmd.table.len > 0) {
                     try writer.writeAll("SELECT * FROM ");
-                    try writer.writeAll(cmd.table);
+                    try writeTableReferenceOrError(writer, cmd.table);
                 } else {
                     return error.MissingExplainQuery;
                 }
@@ -701,7 +703,7 @@ pub const AstEncoder = struct {
                     try writer.writeAll(raw);
                 } else if (cmd.table.len > 0) {
                     try writer.writeAll("SELECT * FROM ");
-                    try writer.writeAll(cmd.table);
+                    try writeTableReferenceOrError(writer, cmd.table);
                 } else {
                     return error.MissingExplainQuery;
                 }
@@ -730,7 +732,7 @@ pub const AstEncoder = struct {
                         try writer.writeAll("NEXT ");
                     }
                     try writer.writeAll("FROM ");
-                    try writer.writeAll(cmd.table);
+                    try writeIdentifierOrError(writer, cmd.table);
                 }
             },
             .over => try writeSelect(writer, cmd, false),
@@ -963,7 +965,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
     } else {
         try writer.writeAll(" FROM ");
     }
-    try writer.writeAll(cmd.table);
+    try writeTableReferenceOrError(writer, cmd.table);
 
     if (cmd.sample_method) |method| {
         try writer.print(" TABLESAMPLE {s}(", .{method.toSql()});
@@ -978,20 +980,20 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
 
     if (cmd.table_alias) |alias| {
         try writer.writeAll(" AS ");
-        try writer.writeAll(alias);
+        try writeIdentifierOrError(writer, alias);
     }
 
     for (cmd.joins) |join| {
         try writer.print(" {s} ", .{join.kind.toSql()});
-        try writer.writeAll(join.table);
+        try writeTableReferenceOrError(writer, join.table);
         if (join.alias) |alias| {
             try writer.writeAll(" AS ");
-            try writer.writeAll(alias);
+            try writeIdentifierOrError(writer, alias);
         }
         try writer.writeAll(" ON ");
-        try writer.writeAll(join.on_left);
+        try writeIdentifierOrError(writer, join.on_left);
         try writer.writeAll(" = ");
-        try writer.writeAll(join.on_right);
+        try writeIdentifierOrError(writer, join.on_right);
     }
 
     try writeWhereClauses(writer, cmd.where_clauses);
@@ -1000,7 +1002,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
         try writer.writeAll(" GROUP BY ");
         for (cmd.group_by, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(col);
+            try writeIdentifierOrError(writer, col);
         }
     }
 
@@ -1018,7 +1020,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
         try writer.writeAll(" ORDER BY ");
         for (cmd.order_by, 0..) |order, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(order.column);
+            try writeIdentifierOrError(writer, order.column);
             try writer.print(" {s}", .{order.order.toSql()});
         }
     }
@@ -1065,11 +1067,11 @@ fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
     try writeCtePrefix(writer, cmd);
 
     try writer.writeAll("MERGE INTO ");
-    try writer.writeAll(cmd.table);
+    try writeTableReferenceOrError(writer, cmd.table);
 
     if (merge.target_alias) |alias| {
         try writer.writeAll(" AS ");
-        try writer.writeAll(alias);
+        try writeIdentifierOrError(writer, alias);
     }
 
     try writer.writeAll(" USING ");
@@ -1107,10 +1109,10 @@ fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
 fn writeMergeSource(writer: anytype, source: *const ast.cmd.MergeSource) !void {
     switch (source.*) {
         .table => |table| {
-            try writer.writeAll(table.name);
+            try writeTableReferenceOrError(writer, table.name);
             if (table.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierOrError(writer, alias);
             }
         },
         .query => |query| {
@@ -1119,7 +1121,7 @@ fn writeMergeSource(writer: anytype, source: *const ast.cmd.MergeSource) !void {
             try writer.writeByte(')');
             if (query.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierOrError(writer, alias);
             }
         },
     }
@@ -1453,7 +1455,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
     try validateInsertShape(cmd);
 
     try writer.writeAll("INSERT INTO ");
-    try writer.writeAll(cmd.table);
+    try writeIdentifierOrError(writer, cmd.table);
 
     // Column list (skip for DEFAULT VALUES and INSERT .. SELECT without explicit target columns)
     if (!cmd.default_values and cmd.columns.len > 0) {
@@ -1483,7 +1485,8 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
         try writeNestedQueryableCmd(writer, source_query);
     } else if (cmd.raw_sql) |source_sql| {
         try writer.writeByte(' ');
-        try writer.writeAll(source_sql);
+        const checked_source = checkedSqlExprFragment(source_sql) orelse "SELECT NULL WHERE FALSE";
+        try writer.writeAll(checked_source);
     } else if (cmd.insert_values.len > 0) {
         try writer.writeAll(" VALUES (");
         for (cmd.insert_values, 0..) |val, i| {
@@ -2109,6 +2112,49 @@ fn writeIdentifierOrStar(writer: anytype, value: []const u8) !void {
     }
 }
 
+const TableReference = struct {
+    table: []const u8,
+    alias: ?[]const u8 = null,
+    explicit_as: bool = false,
+};
+
+fn splitTableReference(value: []const u8) ?TableReference {
+    var parts = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    const table = parts.next() orelse return null;
+    const second = parts.next();
+    const third = parts.next();
+    if (parts.next() != null) return null;
+
+    if (second == null) {
+        return .{ .table = table };
+    }
+
+    if (third == null) {
+        if (std.ascii.eqlIgnoreCase(second.?, "as")) return null;
+        return .{ .table = table, .alias = second.? };
+    }
+
+    if (!std.ascii.eqlIgnoreCase(second.?, "as")) return null;
+    return .{ .table = table, .alias = third.?, .explicit_as = true };
+}
+
+fn writeTableReferenceOrError(writer: anytype, value: []const u8) !void {
+    const ref = splitTableReference(value) orelse {
+        try writeIdentifierOrError(writer, value);
+        return;
+    };
+
+    try writeIdentifierOrError(writer, ref.table);
+    if (ref.alias) |alias| {
+        if (ref.explicit_as) {
+            try writer.writeAll(" AS ");
+        } else {
+            try writer.writeByte(' ');
+        }
+        try writeIdentifierOrError(writer, alias);
+    }
+}
+
 fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
     switch (expr.*) {
         .star => try writer.writeAll("*"),
@@ -2532,6 +2578,66 @@ test "ast encoder select renders table modifiers and sort nulls" {
     );
 }
 
+test "ast encoder renders table references without raw injection" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const cols = [_]Expr{Expr.col("u.id")};
+    const groups = [_][]const u8{"u.id"};
+    const orders = [_]ast.cmd.OrderBy{.{ .column = "u.id", .order = .desc }};
+    const joins = [_]ast.cmd.Join{.{
+        .kind = .left,
+        .table = "public.profiles AS p",
+        .on_left = "u.id",
+        .on_right = "p.user_id",
+    }};
+    const safe = QailCmd.get("public.users AS u")
+        .select(&cols)
+        .join(&joins)
+        .groupBy(&groups)
+        .orderBy(&orders);
+
+    var safe_buf: [512]u8 = undefined;
+    var safe_writer = io.FixedBufferWriter.init(&safe_buf);
+    try encoder.writeAstToSql(safe_writer.writer(), &safe);
+    try std.testing.expectEqualStrings(
+        "SELECT u.id FROM public.users AS u LEFT JOIN public.profiles AS p ON u.id = p.user_id GROUP BY u.id ORDER BY u.id DESC",
+        safe_writer.getWritten(),
+    );
+
+    const unsafe = QailCmd.get("users WHERE tenant_id <> 'tenant-a'; DROP TABLE users; --");
+    var unsafe_buf: [512]u8 = undefined;
+    var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
+    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe);
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM \"users WHERE tenant_id <> 'tenant-a'; DROP TABLE users; --\"",
+        unsafe_writer.getWritten(),
+    );
+}
+
+test "ast encoder renders mutation targets without raw injection" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const update_cmd = QailCmd.set("users u").setValue("email", .{ .string = "new@example.com" });
+    var update_buf: [256]u8 = undefined;
+    var update_writer = io.FixedBufferWriter.init(&update_buf);
+    try encoder.writeAstToSql(update_writer.writer(), &update_cmd);
+    try std.testing.expectEqualStrings(
+        "UPDATE users u SET email = 'new@example.com'",
+        update_writer.getWritten(),
+    );
+
+    const delete_cmd = QailCmd.del("users; DROP TABLE users; --");
+    var delete_buf: [256]u8 = undefined;
+    var delete_writer = io.FixedBufferWriter.init(&delete_buf);
+    try encoder.writeAstToSql(delete_writer.writer(), &delete_cmd);
+    try std.testing.expectEqualStrings(
+        "DELETE FROM \"users; DROP TABLE users; --\"",
+        delete_writer.getWritten(),
+    );
+}
+
 test "ast encoder where groups and + or clauses like qail.rs or_filter semantics" {
     const wheres = [_]ast.cmd.WhereClause{
         ast.cmd.filter("is_active", .eq, .{ .bool = true }),
@@ -2841,6 +2947,43 @@ test "ast encoder insert uses typed source query" {
     try std.testing.expectEqualStrings(
         "INSERT INTO users (id, email) SELECT id, email FROM users_archive",
         writer.getWritten(),
+    );
+}
+
+test "ast encoder insert renders targets and raw sources defensively" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const values = [_]Value{.{ .int = 1 }};
+    var unsafe_target = QailCmd.add("users; DROP TABLE users; --").select(&.{Expr.col("id")});
+    unsafe_target.insert_values = &values;
+
+    var target_buf: [256]u8 = undefined;
+    var target_writer = io.FixedBufferWriter.init(&target_buf);
+    try encoder.writeAstToSql(target_writer.writer(), &unsafe_target);
+    try std.testing.expectEqualStrings(
+        "INSERT INTO \"users; DROP TABLE users; --\" (id) VALUES (1)",
+        target_writer.getWritten(),
+    );
+
+    var safe_source = QailCmd.add("events");
+    safe_source.raw_sql = "SELECT 'semi;inside' AS note";
+    var safe_buf: [256]u8 = undefined;
+    var safe_writer = io.FixedBufferWriter.init(&safe_buf);
+    try encoder.writeAstToSql(safe_writer.writer(), &safe_source);
+    try std.testing.expectEqualStrings(
+        "INSERT INTO events SELECT 'semi;inside' AS note",
+        safe_writer.getWritten(),
+    );
+
+    var unsafe_source = QailCmd.add("events");
+    unsafe_source.raw_sql = "SELECT id FROM users; DROP TABLE users; --";
+    var unsafe_buf: [256]u8 = undefined;
+    var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
+    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_source);
+    try std.testing.expectEqualStrings(
+        "INSERT INTO events SELECT NULL WHERE FALSE",
+        unsafe_writer.getWritten(),
     );
 }
 
@@ -3410,6 +3553,37 @@ test "ast encoder merge renders update and insert clauses" {
 
     try std.testing.expectEqualStrings(
         "MERGE INTO users AS u USING staging_users AS s ON u.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED BY TARGET THEN INSERT (id, name) VALUES (s.id, s.name)",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder merge renders table references defensively" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const on = [_]ast.expr.Condition{.{
+        .left = Expr.col("u.id"),
+        .op = .eq,
+        .value = Value.fromColumn("s.id"),
+    }};
+    const clauses = [_]ast.cmd.MergeClause{.{
+        .match_kind = .not_matched_by_target,
+        .action = .do_nothing,
+    }};
+    const merge = ast.cmd.Merge{
+        .target_alias = "u",
+        .source = ast.cmd.MergeSource.fromTable("public.staging_users s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("users; DROP TABLE users; --").withMerge(merge);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "MERGE INTO \"users; DROP TABLE users; --\" AS u USING public.staging_users s ON u.id = s.id WHEN NOT MATCHED BY TARGET THEN DO NOTHING",
         writer.getWritten(),
     );
 }
