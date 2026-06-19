@@ -206,7 +206,9 @@ pub fn parseValue(input: []const u8) ParseError!ParseResult(Value) {
         }
 
         if (is_float) {
+            if (numericSignificantDigits(trimmed[0..end]) > 15) return ParseError.InvalidNumber;
             const num = std.fmt.parseFloat(f64, trimmed[0..end]) catch return ParseError.InvalidNumber;
+            if (!std.math.isFinite(num)) return ParseError.InvalidNumber;
             return .{ .remaining = trimmed[end..], .value = .{ .float = num } };
         } else {
             const num = std.fmt.parseInt(i64, trimmed[0..end], 10) catch return ParseError.InvalidNumber;
@@ -217,6 +219,19 @@ pub fn parseValue(input: []const u8) ParseError!ParseResult(Value) {
     // Column reference (identifier)
     const ident = try parseIdentifier(trimmed);
     return .{ .remaining = ident.remaining, .value = .{ .column = ident.value } };
+}
+
+fn numericSignificantDigits(value: []const u8) usize {
+    var count: usize = 0;
+    var seen_non_zero = false;
+
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) continue;
+        if (byte != '0') seen_non_zero = true;
+        if (seen_non_zero) count += 1;
+    }
+
+    return count;
 }
 
 /// Parse comparison operator
@@ -335,6 +350,15 @@ test "parseBareIdentifier rejects qualified or malformed identifiers" {
 test "parseValue - integers" {
     const result = try parseValue("42 ");
     try std.testing.expectEqual(Value{ .int = 42 }, result.value);
+}
+
+test "parseValue rejects overflowing numeric literals" {
+    const huge_int = "999999999999999999999999999999999999999999999999";
+    const huge_float =
+        "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.0";
+
+    try std.testing.expectError(ParseError.InvalidNumber, parseValue(huge_int));
+    try std.testing.expectError(ParseError.InvalidNumber, parseValue(huge_float));
 }
 
 test "parseValue - strings" {

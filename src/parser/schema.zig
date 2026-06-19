@@ -1206,7 +1206,7 @@ fn parseOwnedPolicyExpr(allocator: Allocator, input: []const u8) !Expr {
 
     var parser = PolicyExprParser.init(arena.allocator(), input);
     const arena_expr = parser.parse() catch |err| switch (err) {
-        error.OutOfMemory => return err,
+        error.OutOfMemory, error.InvalidPolicyNumeric => return err,
         else => return error.InvalidPolicyExpression,
     };
 
@@ -1846,12 +1846,17 @@ const PolicyExprParser = struct {
 
         const digits = self.input[start..self.pos];
         if (digits.len == 0 or digits[0] == '.') return error.InvalidPolicyExpression;
+        if (self.current() == '.') return error.InvalidPolicyNumeric;
 
         if (std.mem.indexOfScalar(u8, digits, '.')) |_| {
-            return .{ .literal = Value.fromFloat(try std.fmt.parseFloat(f64, digits)) };
+            if (policyNumberSignificantDigits(digits) > 15) return error.InvalidPolicyNumeric;
+            const value = std.fmt.parseFloat(f64, digits) catch return error.InvalidPolicyNumeric;
+            if (!std.math.isFinite(value)) return error.InvalidPolicyNumeric;
+            return .{ .literal = Value.fromFloat(value) };
         }
 
-        return .{ .literal = Value.fromInt(try std.fmt.parseInt(i64, digits, 10)) };
+        const value = std.fmt.parseInt(i64, digits, 10) catch return error.InvalidPolicyNumeric;
+        return .{ .literal = Value.fromInt(value) };
     }
 
     fn parseIdentifier(self: *PolicyExprParser) anyerror![]const u8 {
@@ -1916,6 +1921,19 @@ const PolicyExprParser = struct {
         return expr;
     }
 };
+
+fn policyNumberSignificantDigits(value: []const u8) usize {
+    var count: usize = 0;
+    var seen_non_zero = false;
+
+    for (value) |byte| {
+        if (!std.ascii.isDigit(byte)) continue;
+        if (byte != '0') seen_non_zero = true;
+        if (seen_non_zero) count += 1;
+    }
+
+    return count;
+}
 
 // ============================================================================
 // Tests
@@ -2541,6 +2559,35 @@ test "parse policy block handles escaped strings and rejects unterminated string
         \\    for select
         \\    using (name = 'unterminated)
     );
+}
+
+test "parse policy block rejects overflowing numeric literals" {
+    const huge_int = "999999999999999999999999999999999999999999999999";
+    const huge_float =
+        "999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.0";
+    const bad_literals = [_][]const u8{
+        huge_int,
+        huge_float,
+        "1.2.3",
+        "9007199254740993.25",
+    };
+
+    for (bad_literals) |literal| {
+        const input = try std.fmt.allocPrint(
+            std.testing.allocator,
+            \\table users (
+            \\    id uuid primary_key,
+            \\    risk numeric
+            \\)
+            \\policy users_risk on users
+            \\    using (risk = {s})
+        ,
+            .{literal},
+        );
+        defer std.testing.allocator.free(input);
+
+        try expectSchemaParseFailure(input);
+    }
 }
 
 test "parse policy block ignores parentheses inside double quoted identifiers" {
