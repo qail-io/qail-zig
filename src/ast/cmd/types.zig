@@ -327,6 +327,10 @@ pub const IndexDef = struct {
     table: []const u8,
     columns: []const []const u8 = &.{},
     unique: bool = false,
+    index_type: ?[]const u8 = null,
+    include: []const []const u8 = &.{},
+    concurrently: bool = false,
+    where_clause: ?[]const u8 = null,
 };
 
 /// Table-level constraint for CREATE TABLE

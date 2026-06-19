@@ -1913,6 +1913,46 @@ test "migration create index qail command preserves index columns" {
     try std.testing.expectEqualStrings("status", qail_cmd.index_def.?.columns[1]);
 }
 
+test "migration create index qail command preserves rich index options" {
+    const allocator = std.testing.allocator;
+
+    const cmd = MigrationCmd{
+        .action = .create_index,
+        .table = "users",
+        .index = .{
+            .name = "idx_users_active_email",
+            .table = "users",
+            .columns = "email, created_at DESC NULLS LAST, embedding vector_l2_ops",
+            .unique = true,
+            .index_type = "gin",
+            .include = "name, created_at",
+            .concurrently = true,
+            .where_clause = "deleted_at IS NULL",
+        },
+    };
+
+    const qail_cmd = try cmd.toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+
+    const idx = qail_cmd.index_def.?;
+    try std.testing.expect(idx.unique);
+    try std.testing.expect(idx.concurrently);
+    try std.testing.expectEqualStrings("gin", idx.index_type.?);
+    try std.testing.expectEqualStrings("deleted_at IS NULL", idx.where_clause.?);
+    try std.testing.expectEqual(@as(usize, 3), idx.columns.len);
+    try std.testing.expectEqualStrings("created_at DESC NULLS LAST", idx.columns[1]);
+    try std.testing.expectEqualStrings("embedding vector_l2_ops", idx.columns[2]);
+    try std.testing.expectEqual(@as(usize, 2), idx.include.len);
+    try std.testing.expectEqualStrings("name", idx.include[0]);
+
+    const sql = try cmd.toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX CONCURRENTLY idx_users_active_email ON users USING gin (email, created_at DESC NULLS LAST, embedding vector_l2_ops) INCLUDE (name, created_at) WHERE deleted_at IS NULL",
+        sql,
+    );
+}
+
 test "migration create index qail command rejects unsupported index expressions" {
     const allocator = std.testing.allocator;
 

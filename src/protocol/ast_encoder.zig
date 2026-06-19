@@ -531,15 +531,34 @@ pub const AstEncoder = struct {
                     } else {
                         try writer.writeAll("CREATE INDEX ");
                     }
+                    if (idx.concurrently) {
+                        try writer.writeAll("CONCURRENTLY ");
+                    }
                     try writeIdentifierOrError(writer, idx.name);
                     try writer.writeAll(" ON ");
                     try writeIdentifierOrError(writer, idx.table);
+                    if (idx.index_type) |index_type| {
+                        try writer.writeAll(" USING ");
+                        try writeIndexMethodOrError(writer, index_type);
+                    }
                     try writer.writeAll(" (");
                     for (idx.columns, 0..) |col, i| {
                         if (i > 0) try writer.writeAll(", ");
-                        try writeIdentifierOrError(writer, col);
+                        try writeIndexElementOrError(writer, col);
                     }
                     try writer.writeAll(")");
+                    if (idx.include.len > 0) {
+                        try writer.writeAll(" INCLUDE (");
+                        for (idx.include, 0..) |col, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            try writeIdentifierOrError(writer, col);
+                        }
+                        try writer.writeAll(")");
+                    }
+                    if (idx.where_clause) |where_clause| {
+                        try writer.writeAll(" WHERE ");
+                        try writeCheckedRawExpression(writer, where_clause);
+                    }
                 }
             },
             .drop_index => {
@@ -1855,6 +1874,79 @@ fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
         return;
     };
     try writer.writeAll(checked);
+}
+
+fn writeIndexMethodOrError(writer: anytype, method: []const u8) !void {
+    const trimmed = std.mem.trim(u8, method, " \t\r\n");
+    if (!isAllowedIndexMethod(trimmed)) {
+        try writer.writeAll(INVALID_IDENTIFIER);
+        return;
+    }
+    try writer.writeAll(trimmed);
+}
+
+fn isAllowedIndexMethod(method: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(method, "btree") or
+        std.ascii.eqlIgnoreCase(method, "hash") or
+        std.ascii.eqlIgnoreCase(method, "gin") or
+        std.ascii.eqlIgnoreCase(method, "gist") or
+        std.ascii.eqlIgnoreCase(method, "brin") or
+        std.ascii.eqlIgnoreCase(method, "spgist") or
+        std.ascii.eqlIgnoreCase(method, "hnsw") or
+        std.ascii.eqlIgnoreCase(method, "ivfflat");
+}
+
+fn writeIndexElementOrError(writer: anytype, element: []const u8) !void {
+    const trimmed = std.mem.trim(u8, element, " \t\r\n");
+    if (trimmed.len == 0 or
+        containsUnquotedStatementDelimiter(trimmed) or
+        std.mem.indexOfScalar(u8, trimmed, '(') != null or
+        std.mem.indexOfScalar(u8, trimmed, ')') != null or
+        std.mem.indexOfScalar(u8, trimmed, '\'') != null or
+        std.mem.indexOfScalar(u8, trimmed, '"') != null)
+    {
+        try writer.writeAll(INVALID_IDENTIFIER);
+        return;
+    }
+
+    var tokens = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
+    const column = tokens.next() orelse {
+        try writer.writeAll(INVALID_IDENTIFIER);
+        return;
+    };
+    if (!isValidQualifiedIdentifier(column)) {
+        try writer.writeAll(INVALID_IDENTIFIER);
+        return;
+    }
+
+    try writeIdentifierOrError(writer, column);
+    while (tokens.next()) |token| {
+        if (!isAllowedIndexModifier(token)) {
+            try writer.writeAll(" ");
+            try writer.writeAll(INVALID_IDENTIFIER);
+            return;
+        }
+        try writer.writeByte(' ');
+        try writer.writeAll(token);
+    }
+}
+
+fn isAllowedIndexModifier(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "asc") or
+        std.ascii.eqlIgnoreCase(token, "desc") or
+        std.ascii.eqlIgnoreCase(token, "nulls") or
+        std.ascii.eqlIgnoreCase(token, "first") or
+        std.ascii.eqlIgnoreCase(token, "last") or
+        isAllowedIndexOpclass(token);
+}
+
+fn isAllowedIndexOpclass(token: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, token, '_') == null) return false;
+    if (token.len == 0 or !std.ascii.isAlphabetic(token[0])) return false;
+    for (token[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+    return true;
 }
 
 fn writeCheckedSubquerySql(writer: anytype, sql: []const u8) !void {
@@ -4421,8 +4513,41 @@ test "ast encoder hardens ddl identifier lists and constrained fragments" {
     var index_writer = io.FixedBufferWriter.init(&index_buf);
     try encoder.writeAstToSql(index_writer.writer(), &index_cmd);
     try std.testing.expectEqualStrings(
-        "CREATE INDEX idx_users_name ON users (\"name; DROP TABLE users; --\")",
+        "CREATE INDEX idx_users_name ON users (/* ERROR: Invalid identifier */)",
         index_writer.getWritten(),
+    );
+
+    const rich_idx = ast.cmd.IndexDef{
+        .name = "idx_users_active_email",
+        .table = "users",
+        .columns = &.{ "email", "created_at DESC NULLS LAST", "embedding vector_l2_ops" },
+        .unique = true,
+        .index_type = "gin",
+        .include = &.{ "name", "created_at" },
+        .concurrently = true,
+        .where_clause = "deleted_at IS NULL",
+    };
+    const rich_index_cmd = QailCmd.createIndex("users").withIndex(rich_idx);
+    var rich_index_buf: [512]u8 = undefined;
+    var rich_index_writer = io.FixedBufferWriter.init(&rich_index_buf);
+    try encoder.writeAstToSql(rich_index_writer.writer(), &rich_index_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX CONCURRENTLY idx_users_active_email ON users USING gin (email, created_at DESC NULLS LAST, embedding vector_l2_ops) INCLUDE (name, created_at) WHERE deleted_at IS NULL",
+        rich_index_writer.getWritten(),
+    );
+
+    const expr_idx = ast.cmd.IndexDef{
+        .name = "idx_users_lower_email",
+        .table = "users",
+        .columns = &.{"lower(email)"},
+    };
+    const expr_index_cmd = QailCmd.createIndex("users").withIndex(expr_idx);
+    var expr_index_buf: [256]u8 = undefined;
+    var expr_index_writer = io.FixedBufferWriter.init(&expr_index_buf);
+    try encoder.writeAstToSql(expr_index_writer.writer(), &expr_index_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE INDEX idx_users_lower_email ON users (/* ERROR: Invalid identifier */)",
+        expr_index_writer.getWritten(),
     );
 
     var enum_cmd = QailCmd{ .kind = .create_enum, .table = "mood", .payload = "'semi;inside', 'sad'" };

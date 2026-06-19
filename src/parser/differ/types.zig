@@ -133,6 +133,11 @@ pub const MigrationCmd = struct {
                 const idx_cols_many: [*][]const u8 = @constCast(idx_cols_ptr);
                 allocator.free(idx_cols_many[0..idx.columns.len]);
             }
+            if (idx.include.len > 0) {
+                const include_ptr: [*]const []const u8 = idx.include.ptr;
+                const include_many: [*][]const u8 = @constCast(include_ptr);
+                allocator.free(include_many[0..idx.include.len]);
+            }
         }
     }
 
@@ -209,12 +214,18 @@ pub const MigrationCmd = struct {
                 if (self.index) |idx| {
                     const index_columns = try allocIndexColumns(allocator, idx.columns);
                     errdefer allocator.free(index_columns);
+                    const include_columns = try allocIndexIdentifiers(allocator, idx.include);
+                    errdefer allocator.free(include_columns);
                     var cmd = QailCmd.createIndex(idx.table);
                     cmd.index_def = .{
                         .name = idx.name,
                         .table = idx.table,
                         .columns = index_columns,
                         .unique = idx.unique,
+                        .index_type = idx.index_type,
+                        .include = include_columns,
+                        .concurrently = idx.concurrently,
+                        .where_clause = idx.where_clause,
                     };
                     break :blk cmd;
                 }
@@ -329,18 +340,39 @@ pub const MigrationCmd = struct {
             },
             .create_index => {
                 if (self.index) |idx| {
+                    const index_columns = try allocIndexColumns(allocator, idx.columns);
+                    defer allocator.free(index_columns);
+
                     if (idx.unique) {
-                        try w.print("CREATE UNIQUE INDEX {s} ON {s} ({s})", .{
-                            idx.name,
-                            idx.table,
-                            idx.columns,
-                        });
+                        try w.writeAll("CREATE UNIQUE INDEX ");
                     } else {
-                        try w.print("CREATE INDEX {s} ON {s} ({s})", .{
-                            idx.name,
-                            idx.table,
-                            idx.columns,
-                        });
+                        try w.writeAll("CREATE INDEX ");
+                    }
+                    if (idx.concurrently) try w.writeAll("CONCURRENTLY ");
+                    try w.print("{s} ON {s}", .{ idx.name, idx.table });
+                    if (idx.index_type) |index_type| {
+                        if (!isAllowedIndexMethod(index_type)) return error.InvalidIndexMethod;
+                        try w.print(" USING {s}", .{index_type});
+                    }
+                    try w.writeAll(" (");
+                    for (index_columns, 0..) |col, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        try w.writeAll(col);
+                    }
+                    try w.writeByte(')');
+                    const include_columns = try allocIndexIdentifiers(allocator, idx.include);
+                    defer allocator.free(include_columns);
+                    if (include_columns.len > 0) {
+                        try w.writeAll(" INCLUDE (");
+                        for (include_columns, 0..) |col, i| {
+                            if (i > 0) try w.writeAll(", ");
+                            try w.writeAll(col);
+                        }
+                        try w.writeByte(')');
+                    }
+                    if (idx.where_clause) |where_clause| {
+                        const checked = checkedSqlExprFragment(where_clause) orelse return error.UnsafeSqlFragment;
+                        try w.print(" WHERE {s}", .{checked});
                     }
                 }
             },
@@ -543,7 +575,7 @@ fn allocIndexColumns(allocator: Allocator, columns: []const u8) ![]const []const
     var parts = std.mem.splitScalar(u8, columns, ',');
     while (parts.next()) |part| {
         const column = std.mem.trim(u8, part, " \t\r\n");
-        if (!isSimpleIndexColumn(column)) return error.InvalidIndexColumns;
+        if (!isSafeIndexElement(column)) return error.InvalidIndexColumns;
         try out.append(allocator, column);
     }
 
@@ -551,13 +583,85 @@ fn allocIndexColumns(allocator: Allocator, columns: []const u8) ![]const []const
     return try out.toOwnedSlice(allocator);
 }
 
-fn isSimpleIndexColumn(column: []const u8) bool {
-    if (column.len == 0) return false;
-    if (!(std.ascii.isAlphabetic(column[0]) or column[0] == '_')) return false;
-    for (column[1..]) |ch| {
-        if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return false;
+fn allocIndexIdentifiers(allocator: Allocator, columns: []const u8) ![]const []const u8 {
+    const trimmed = std.mem.trim(u8, columns, " \t\r\n");
+    if (trimmed.len == 0) return &.{};
+
+    var out = std.ArrayList([]const u8).empty;
+    errdefer out.deinit(allocator);
+
+    var parts = std.mem.splitScalar(u8, trimmed, ',');
+    while (parts.next()) |part| {
+        const column = std.mem.trim(u8, part, " \t\r\n");
+        if (!isSimpleIndexIdentifier(column)) return error.InvalidIndexColumns;
+        try out.append(allocator, column);
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn isSafeIndexElement(element: []const u8) bool {
+    if (element.len == 0 or containsUnquotedStatementDelimiter(element)) return false;
+    if (std.mem.indexOfScalar(u8, element, '(') != null or
+        std.mem.indexOfScalar(u8, element, ')') != null or
+        std.mem.indexOfScalar(u8, element, '\'') != null or
+        std.mem.indexOfScalar(u8, element, '"') != null)
+    {
+        return false;
+    }
+
+    var tokens = std.mem.tokenizeAny(u8, element, " \t\r\n");
+    const column = tokens.next() orelse return false;
+    if (!isSimpleIndexIdentifier(column)) return false;
+
+    while (tokens.next()) |token| {
+        if (!isAllowedIndexModifier(token)) return false;
     }
     return true;
+}
+
+fn isAllowedIndexModifier(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "asc") or
+        std.ascii.eqlIgnoreCase(token, "desc") or
+        std.ascii.eqlIgnoreCase(token, "nulls") or
+        std.ascii.eqlIgnoreCase(token, "first") or
+        std.ascii.eqlIgnoreCase(token, "last") or
+        isAllowedIndexOpclass(token);
+}
+
+fn isAllowedIndexOpclass(token: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, token, '_') == null) return false;
+    if (token.len == 0 or !std.ascii.isAlphabetic(token[0])) return false;
+    for (token[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+    return true;
+}
+
+fn isSimpleIndexIdentifier(identifier: []const u8) bool {
+    if (identifier.len == 0 or std.mem.startsWith(u8, identifier, ".") or std.mem.endsWith(u8, identifier, ".")) {
+        return false;
+    }
+    var parts = std.mem.splitScalar(u8, identifier, '.');
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        if (!(std.ascii.isAlphabetic(part[0]) or part[0] == '_')) return false;
+        for (part[1..]) |ch| {
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return false;
+        }
+    }
+    return true;
+}
+
+fn isAllowedIndexMethod(method: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(method, "btree") or
+        std.ascii.eqlIgnoreCase(method, "hash") or
+        std.ascii.eqlIgnoreCase(method, "gin") or
+        std.ascii.eqlIgnoreCase(method, "gist") or
+        std.ascii.eqlIgnoreCase(method, "brin") or
+        std.ascii.eqlIgnoreCase(method, "spgist") or
+        std.ascii.eqlIgnoreCase(method, "hnsw") or
+        std.ascii.eqlIgnoreCase(method, "ivfflat");
 }
 
 fn containsUnquotedStatementDelimiter(value: []const u8) bool {
@@ -613,4 +717,8 @@ pub const IndexInfo = struct {
     table: []const u8,
     columns: []const u8,
     unique: bool = false,
+    index_type: ?[]const u8 = null,
+    include: []const u8 = "",
+    concurrently: bool = false,
+    where_clause: ?[]const u8 = null,
 };
