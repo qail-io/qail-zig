@@ -27,6 +27,7 @@ const ast = struct {
 
 const QailCmd = ast.QailCmd;
 const Expr = ast.Expr;
+const Value = ast.Value;
 
 /// Convert a QAIL AST command to PostgreSQL SQL string
 pub fn toSql(allocator: std.mem.Allocator, cmd: *const QailCmd) ![]const u8 {
@@ -796,6 +797,24 @@ test "trusted transpiler hardens mutation target identifiers" {
     try std.testing.expectEqualStrings(
         "INSERT INTO users (\"name; DROP TABLE users; --\") VALUES ('Alice')",
         insert_sql,
+    );
+}
+
+test "trusted transpiler quotes condition column identifiers" {
+    const values = [_]Value{ Value.fromString("active"), Value.fromString("paused") };
+    const between_values = [_]Value{ Value.fromInt(1), Value.fromInt(9) };
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("id; DROP TABLE users; --", .eq, Value.fromInt(7)),
+        ast.cmd.filter("status; DROP TABLE users; --", .in, .{ .array = &values }),
+        ast.cmd.filter("score; DROP TABLE users; --", .between, .{ .array = &between_values }),
+    };
+    const cmd = QailCmd.get("users").where(&wheres);
+    const sql = try toSqlTrusted(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE \"id; DROP TABLE users; --\" = 7 AND \"status; DROP TABLE users; --\" IN ('active', 'paused') AND \"score; DROP TABLE users; --\" BETWEEN 1 AND 9",
+        sql,
     );
 }
 

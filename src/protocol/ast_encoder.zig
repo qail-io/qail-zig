@@ -1661,11 +1661,51 @@ fn writeCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*
 
 fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*const QailCmd) anyerror!void {
     if (condition.column.len != 0) {
-        try writeColumnReference(writer, condition.column, cmd);
+        try writeConditionColumnReference(writer, condition.column, cmd);
     } else {
         var left = condition.left;
         try writeExpr(writer, &left, cmd);
     }
+}
+
+fn writeConditionColumnReference(writer: anytype, column: []const u8, cmd: ?*const QailCmd) !void {
+    const trimmed = std.mem.trim(u8, column, " \t\r\n");
+    if (try writeConditionFunctionReference(writer, trimmed, cmd)) return;
+    try writeColumnReference(writer, trimmed, cmd);
+}
+
+fn writeConditionFunctionReference(writer: anytype, value: []const u8, cmd: ?*const QailCmd) !bool {
+    const open = std.mem.indexOfScalar(u8, value, '(') orelse return false;
+    if (!std.mem.endsWith(u8, value, ")")) return false;
+
+    const name = std.mem.trim(u8, value[0..open], " \t\r\n");
+    if (!isSafeFunctionName(name)) return false;
+    const args = std.mem.trim(u8, value[open + 1 .. value.len - 1], " \t\r\n");
+    if (std.mem.indexOfScalar(u8, args, '(') != null or std.mem.indexOfScalar(u8, args, ')') != null) {
+        return false;
+    }
+
+    var validate_parts = std.mem.splitScalar(u8, args, ',');
+    while (validate_parts.next()) |raw_part| {
+        const part = std.mem.trim(u8, raw_part, " \t\r\n");
+        if (args.len != 0 and part.len == 0) return false;
+    }
+
+    try writer.writeAll(name);
+    try writer.writeByte('(');
+    if (args.len != 0) {
+        var parts = std.mem.splitScalar(u8, args, ',');
+        var first = true;
+        while (parts.next()) |raw_part| {
+            const part = std.mem.trim(u8, raw_part, " \t\r\n");
+            if (part.len == 0) return false;
+            if (!first) try writer.writeAll(", ");
+            first = false;
+            try writeIdentifierOrStarWithContext(writer, part, cmd);
+        }
+    }
+    try writer.writeByte(')');
+    return true;
 }
 
 fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*const QailCmd) !void {
@@ -3152,6 +3192,43 @@ test "ast encoder aggregates" {
     const bytes = encoder.getWritten();
 
     try std.testing.expect(bytes.len > 20);
+}
+
+test "ast encoder quotes condition columns and preserves safe function shorthand" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const cols = [_]Expr{ Expr.col("status"), Expr.count() };
+    const groups = [_][]const u8{"status"};
+    const having = [_]ast.cmd.WhereClause{.{
+        .condition = .{ .column = "COUNT(*)", .op = .gt, .value = .{ .int = 5 } },
+    }};
+    const grouped = QailCmd.get("orders").select(&cols).groupBy(&groups).havingClauses(&having);
+
+    var grouped_buf: [256]u8 = undefined;
+    var grouped_writer = io.FixedBufferWriter.init(&grouped_buf);
+    try encoder.writeAstToSql(grouped_writer.writer(), &grouped);
+    try std.testing.expectEqualStrings(
+        "SELECT status, COUNT(*) FROM orders GROUP BY status HAVING COUNT(*) > 5",
+        grouped_writer.getWritten(),
+    );
+
+    const values = [_]Value{ Value.fromString("active"), Value.fromString("paused") };
+    const between_values = [_]Value{ Value.fromInt(1), Value.fromInt(9) };
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("id; DROP TABLE users; --", .eq, Value.fromInt(7)),
+        ast.cmd.filter("status; DROP TABLE users; --", .in, .{ .array = &values }),
+        ast.cmd.filter("score; DROP TABLE users; --", .between, .{ .array = &between_values }),
+    };
+    const unsafe = QailCmd.get("users").where(&wheres);
+
+    var unsafe_buf: [512]u8 = undefined;
+    var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
+    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe);
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE \"id; DROP TABLE users; --\" = 7 AND \"status; DROP TABLE users; --\" IN ('active', 'paused') AND \"score; DROP TABLE users; --\" BETWEEN 1 AND 9",
+        unsafe_writer.getWritten(),
+    );
 }
 
 test "ast encoder select shape validation fails closed" {

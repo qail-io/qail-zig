@@ -92,11 +92,51 @@ pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) any
 
 fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition) anyerror!void {
     if (condition.column.len != 0) {
-        try writer.writeAll(condition.column);
+        try writeConditionColumnReference(writer, condition.column);
     } else {
         var left = condition.left;
         try writeExpr(writer, &left);
     }
+}
+
+fn writeConditionColumnReference(writer: anytype, column: []const u8) !void {
+    const trimmed = std.mem.trim(u8, column, " \t\r\n");
+    if (try writeConditionFunctionReference(writer, trimmed)) return;
+    try writeIdentifierOrError(writer, trimmed);
+}
+
+fn writeConditionFunctionReference(writer: anytype, value: []const u8) !bool {
+    const open = std.mem.indexOfScalar(u8, value, '(') orelse return false;
+    if (!std.mem.endsWith(u8, value, ")")) return false;
+
+    const name = std.mem.trim(u8, value[0..open], " \t\r\n");
+    if (!isSafeFunctionName(name)) return false;
+    const args = std.mem.trim(u8, value[open + 1 .. value.len - 1], " \t\r\n");
+    if (std.mem.indexOfScalar(u8, args, '(') != null or std.mem.indexOfScalar(u8, args, ')') != null) {
+        return false;
+    }
+
+    var validate_parts = std.mem.splitScalar(u8, args, ',');
+    while (validate_parts.next()) |raw_part| {
+        const part = std.mem.trim(u8, raw_part, " \t\r\n");
+        if (args.len != 0 and part.len == 0) return false;
+    }
+
+    try writer.writeAll(name);
+    try writer.writeByte('(');
+    if (args.len != 0) {
+        var parts = std.mem.splitScalar(u8, args, ',');
+        var first = true;
+        while (parts.next()) |raw_part| {
+            const part = std.mem.trim(u8, raw_part, " \t\r\n");
+            if (part.len == 0) return false;
+            if (!first) try writer.writeAll(", ");
+            first = false;
+            try writeIdentifierOrStar(writer, part);
+        }
+    }
+    try writer.writeByte(')');
+    return true;
 }
 
 fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
