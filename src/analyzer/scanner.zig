@@ -388,7 +388,11 @@ pub const CodebaseScanner = struct {
 
 /// Check if file is a source file worth scanning
 fn isSourceFile(name: []const u8) bool {
-    const extensions = [_][]const u8{ ".rs", ".ts", ".js", ".py", ".zig", ".go", ".rb", ".php" };
+    const extensions = [_][]const u8{
+        ".rs",  ".ts",  ".tsx", ".js",  ".jsx", ".mjs", ".cjs",
+        ".mts", ".cts", ".py",  ".sql", ".zig", ".go",  ".rb",
+        ".php",
+    };
     for (extensions) |ext| {
         if (std.mem.endsWith(u8, name, ext)) return true;
     }
@@ -1285,6 +1289,12 @@ test "sql scanner keeps qualified table references" {
 test "isSourceFile" {
     try std.testing.expect(isSourceFile("main.rs"));
     try std.testing.expect(isSourceFile("app.ts"));
+    try std.testing.expect(isSourceFile("app.tsx"));
+    try std.testing.expect(isSourceFile("query.mjs"));
+    try std.testing.expect(isSourceFile("query.cjs"));
+    try std.testing.expect(isSourceFile("query.mts"));
+    try std.testing.expect(isSourceFile("query.cts"));
+    try std.testing.expect(isSourceFile("query.sql"));
     try std.testing.expect(isSourceFile("server.zig"));
     try std.testing.expect(!isSourceFile("readme.md"));
     try std.testing.expect(!isSourceFile("config.json"));
