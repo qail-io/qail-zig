@@ -126,11 +126,14 @@ pub const CodebaseScanner = struct {
 
         var line_num: usize = 1;
         var line_start: usize = 0;
+        var in_block_comment = false;
 
         for (content, 0..) |c, i| {
             if (c == '\n') {
                 const line = content[line_start..i];
-                try self.scanLine(file_path, line_num, line);
+                const scan_line = try stripBlockCommentsFromLine(self.allocator, line, &in_block_comment);
+                defer self.allocator.free(scan_line);
+                try self.scanLine(file_path, line_num, scan_line);
                 line_start = i + 1;
                 line_num += 1;
             }
@@ -138,7 +141,9 @@ pub const CodebaseScanner = struct {
         // Handle last line without newline
         if (line_start < content.len) {
             const line = content[line_start..];
-            try self.scanLine(file_path, line_num, line);
+            const scan_line = try stripBlockCommentsFromLine(self.allocator, line, &in_block_comment);
+            defer self.allocator.free(scan_line);
+            try self.scanLine(file_path, line_num, scan_line);
         }
 
         try self.scanQailBuilderChains(file_path, content, &bindings);
@@ -443,6 +448,72 @@ fn lineBeforeSourceComment(line: []const u8) []const u8 {
     }
 
     return line;
+}
+
+fn stripBlockCommentsFromLine(allocator: std.mem.Allocator, line: []const u8, in_block_comment: *bool) ![]u8 {
+    const out = try allocator.alloc(u8, line.len);
+    errdefer allocator.free(out);
+
+    var in_single = false;
+    var in_double = false;
+    var in_backtick = false;
+    var escape = false;
+    var i: usize = 0;
+
+    while (i < line.len) {
+        const c = line[i];
+
+        if (in_block_comment.*) {
+            out[i] = ' ';
+            if (c == '*' and i + 1 < line.len and line[i + 1] == '/') {
+                out[i + 1] = ' ';
+                in_block_comment.* = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        out[i] = c;
+        if (escape) {
+            escape = false;
+            i += 1;
+            continue;
+        }
+
+        if (in_single or in_double or in_backtick) {
+            if (c == '\\') {
+                escape = true;
+            } else if (in_single and c == '\'') {
+                in_single = false;
+            } else if (in_double and c == '"') {
+                in_double = false;
+            } else if (in_backtick and c == '`') {
+                in_backtick = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (c == '\'') {
+            in_single = true;
+        } else if (c == '"') {
+            in_double = true;
+        } else if (c == '`') {
+            in_backtick = true;
+        } else if (c == '/' and i + 1 < line.len and line[i + 1] == '*') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            in_block_comment.* = true;
+            i += 2;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    return out;
 }
 
 fn isSqlWordByte(c: u8) bool {
@@ -1166,6 +1237,32 @@ test "sql scanner ignores source comments outside string literals" {
     try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
     try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
     try std.testing.expectEqualStrings("audit.events", scanner.refs.items[1].table);
+}
+
+test "scanFile ignores multiline block comments" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\/*
+        \\const q = "get::block_users:'id'";
+        \\const s = "DELETE FROM block_users";
+        \\*/
+        \\const sql = "SELECT id FROM users";
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.ts", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.ts", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try std.testing.expectEqual(QueryType.raw_sql, scanner.refs.items[0].query_type);
 }
 
 test "sql scanner keeps qualified table references" {
