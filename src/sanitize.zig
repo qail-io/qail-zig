@@ -21,6 +21,7 @@ pub const SanitizeError = struct {
 };
 
 const MAX_IDENT_LEN: usize = 63; // Postgres NAMEDATALEN - 1
+const MAX_RAW_FUNCTION_LEN: usize = 1024;
 
 fn isSafeIdent(s: []const u8) bool {
     if (s.len == 0 or s.len > MAX_IDENT_LEN) return false;
@@ -33,7 +34,8 @@ fn isSafeIdent(s: []const u8) bool {
 
 fn isSafeParam(s: []const u8) bool {
     if (s.len == 0) return false;
-    for (s) |c| {
+    if (!std.ascii.isAlphabetic(s[0]) and s[0] != '_') return false;
+    for (s[1..]) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
         if (!ok) return false;
     }
@@ -70,10 +72,27 @@ fn checkParam(field: []const u8, value: []const u8) ?SanitizeError {
         return .{
             .field = field,
             .value = shortValue(value),
-            .reason = "parameter names must match [a-zA-Z0-9_]",
+            .reason = "named parameters must match [a-zA-Z_][a-zA-Z0-9_]*",
         };
     }
     return null;
+}
+
+fn checkRawFunctionValue(field: []const u8, value: []const u8) ?SanitizeError {
+    if (value.len <= MAX_RAW_FUNCTION_LEN and
+        std.mem.indexOfScalar(u8, value, 0) == null and
+        std.mem.indexOfScalar(u8, value, ';') == null and
+        std.mem.indexOf(u8, value, "--") == null and
+        std.mem.indexOf(u8, value, "/*") == null and
+        std.mem.indexOf(u8, value, "*/") == null)
+    {
+        return null;
+    }
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "raw function values cannot contain NUL, statement separators, or comments",
+    };
 }
 
 fn containsUnquotedStatementDelimiter(value: []const u8) bool {
@@ -136,9 +155,9 @@ fn checkSqlExprFragment(field: []const u8, value: []const u8) ?SanitizeError {
 
 fn checkValue(field: []const u8, value: *const Value) ?SanitizeError {
     return switch (value.*) {
-        .column => |c| checkIdent(field, c),
-        .function => |f| checkIdent(field, f),
-        .named_param => |p| checkParam(field, p),
+        .column => |c| checkIdent("value.column", c),
+        .function => |f| checkRawFunctionValue("value.function", f),
+        .named_param => |p| checkParam("value.named_param", p),
         .array => |arr| blk: {
             for (arr) |v| {
                 if (checkValue(field, &v)) |err| break :blk err;

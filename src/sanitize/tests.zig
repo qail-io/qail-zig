@@ -117,6 +117,46 @@ test "sanitize: raw default payload rejected" {
     try std.testing.expectEqualStrings("payload", err.field);
 }
 
+test "sanitize: unsafe named parameter rejected" {
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .column = "id",
+            .op = .eq,
+            .value = .{ .named_param = "1bad" },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("value.named_param", err.field);
+}
+
+test "sanitize: unsafe raw function value rejected" {
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .column = "updated_at",
+            .op = .lt,
+            .value = .{ .function = "now(); DROP TABLE users; --" },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("value.function", err.field);
+}
+
+test "sanitize: safe raw function value passes" {
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .column = "updated_at",
+            .op = .lt,
+            .value = .{ .function = "now()" },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
 test "sanitize: alter add constraint checks payload fragment" {
     const safe = QailCmd.alterAddConstraint("events", "events_kind_check", "kind <> 'semi;inside'");
     try std.testing.expect(validateCmd(&safe) == null);

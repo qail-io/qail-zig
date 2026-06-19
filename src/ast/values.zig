@@ -5,6 +5,8 @@
 const std = @import("std");
 const io = @import("../runtime/io.zig");
 
+const MAX_RAW_FUNCTION_LEN: usize = 1024;
+
 /// Time interval unit for duration expressions
 pub const IntervalUnit = enum {
     second,
@@ -91,9 +93,27 @@ pub const Value = union(enum) {
                 try writer.writeByte(']');
             },
             .param => |p| try writer.print("${d}", .{p}),
-            .named_param => |name| try writer.print(":{s}", .{name}),
-            .function => |f| try writer.writeAll(f),
-            .column => |c| try writer.writeAll(c),
+            .named_param => |name| {
+                if (!isSafeNamedParam(name)) {
+                    try writer.writeAll("/* ERROR: Invalid parameter name */");
+                    return;
+                }
+                try writer.print(":{s}", .{name});
+            },
+            .function => |f| {
+                if (!isSafeRawFunctionValue(f)) {
+                    try writer.writeAll("/* ERROR: Invalid function expression */");
+                    return;
+                }
+                try writer.writeAll(f);
+            },
+            .column => |c| {
+                if (!isSafeIdentifier(c)) {
+                    try writer.writeAll("/* ERROR: Invalid identifier */");
+                    return;
+                }
+                try writer.writeAll(c);
+            },
             .uuid => |u| try writeSqlStringLiteral(writer, u),
             .interval => |iv| try writer.print("INTERVAL '{d} {s}'", .{ iv.amount, iv.unit.toSql() }),
             .timestamp => |ts| try writeSqlStringLiteral(writer, ts),
@@ -156,6 +176,37 @@ pub const Value = union(enum) {
     }
 };
 
+fn isSafeIdentifier(value: []const u8) bool {
+    if (value.len == 0) return false;
+    var parts = std.mem.splitScalar(u8, value, '.');
+    while (parts.next()) |part| {
+        if (part.len == 0 or part.len > 63) return false;
+        for (part) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+        }
+    }
+    return true;
+}
+
+fn isSafeNamedParam(value: []const u8) bool {
+    if (value.len == 0) return false;
+    const first = value[0];
+    if (!std.ascii.isAlphabetic(first) and first != '_') return false;
+    for (value[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    return true;
+}
+
+fn isSafeRawFunctionValue(value: []const u8) bool {
+    return value.len <= MAX_RAW_FUNCTION_LEN and
+        std.mem.indexOfScalar(u8, value, 0) == null and
+        std.mem.indexOfScalar(u8, value, ';') == null and
+        std.mem.indexOf(u8, value, "--") == null and
+        std.mem.indexOf(u8, value, "/*") == null and
+        std.mem.indexOf(u8, value, "*/") == null;
+}
+
 fn writeSqlStringLiteral(writer: anytype, value: []const u8) !void {
     try writer.writeByte('\'');
     for (value) |c| {
@@ -207,6 +258,30 @@ test "value format param" {
     const v: Value = .{ .param = 1 };
     try v.format(writer.writer());
     try std.testing.expectEqualStrings("$1", writer.getWritten());
+}
+
+test "value format validates named parameters" {
+    var buf: [64]u8 = undefined;
+
+    var ok_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .named_param = "_user_id1" }).format(ok_writer.writer());
+    try std.testing.expectEqualStrings(":_user_id1", ok_writer.getWritten());
+
+    var bad_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .named_param = "1bad" }).format(bad_writer.writer());
+    try std.testing.expectEqualStrings("/* ERROR: Invalid parameter name */", bad_writer.getWritten());
+}
+
+test "value format validates raw function fragments" {
+    var buf: [64]u8 = undefined;
+
+    var ok_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .function = "now()" }).format(ok_writer.writer());
+    try std.testing.expectEqualStrings("now()", ok_writer.getWritten());
+
+    var bad_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .function = "now(); DROP TABLE users; --" }).format(bad_writer.writer());
+    try std.testing.expectEqualStrings("/* ERROR: Invalid function expression */", bad_writer.getWritten());
 }
 
 // ==================== Comptime Exhaustive Tests ====================
