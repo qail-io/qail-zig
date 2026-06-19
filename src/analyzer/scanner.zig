@@ -305,95 +305,72 @@ pub const CodebaseScanner = struct {
 
     /// Find SQL SELECT pattern
     fn findSqlSelect(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
-        // Case-insensitive search for "SELECT ... FROM table"
-        const lower = try toLowerAlloc(self.allocator, line);
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
         defer self.allocator.free(lower);
 
-        if (std.mem.indexOf(u8, lower, "select")) |_| {
-            if (std.mem.indexOf(u8, lower, " from ")) |from_pos| {
-                const table_start = from_pos + 6;
-                const table_end = findIdentifierEnd(lower, table_start);
-                if (table_end > table_start) {
-                    try self.refs.append(self.allocator, .{
-                        .file = try self.allocator.dupe(u8, file_path),
-                        .line = line_num,
-                        .table = try self.allocator.dupe(u8, line[table_start..table_end]),
-                        .columns = .empty,
-                        .query_type = .raw_sql,
-                        .snippet = try self.allocator.dupe(u8, trimSnippet(line)),
-                        .allocator = self.allocator,
-                    });
-                }
-            }
-        }
+        const select_pos = findKeyword(lower, "select", 0) orelse return;
+        const from_pos = findKeyword(lower, "from", select_pos + "select".len) orelse return;
+        const table_start = skipSqlWs(lower, from_pos + "from".len);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
     }
 
     /// Find SQL INSERT pattern
     fn findSqlInsert(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
-        const lower = try toLowerAlloc(self.allocator, line);
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
         defer self.allocator.free(lower);
 
-        if (std.mem.indexOf(u8, lower, "insert into ")) |pos| {
-            const table_start = pos + 12;
-            const table_end = findIdentifierEnd(lower, table_start);
-            if (table_end > table_start) {
-                try self.refs.append(self.allocator, .{
-                    .file = try self.allocator.dupe(u8, file_path),
-                    .line = line_num,
-                    .table = try self.allocator.dupe(u8, line[table_start..table_end]),
-                    .columns = .empty,
-                    .query_type = .raw_sql,
-                    .snippet = try self.allocator.dupe(u8, trimSnippet(line)),
-                    .allocator = self.allocator,
-                });
-            }
-        }
+        const insert_pos = findKeyword(lower, "insert", 0) orelse return;
+        const into_pos = findKeyword(lower, "into", insert_pos + "insert".len) orelse return;
+        const table_start = skipSqlWs(lower, into_pos + "into".len);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
     }
 
     /// Find SQL UPDATE pattern
     fn findSqlUpdate(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
-        const lower = try toLowerAlloc(self.allocator, line);
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
         defer self.allocator.free(lower);
 
-        if (std.mem.indexOf(u8, lower, "update ")) |pos| {
-            if (std.mem.indexOf(u8, lower, " set ")) |_| {
-                const table_start = pos + 7;
-                const table_end = findIdentifierEnd(lower, table_start);
-                if (table_end > table_start) {
-                    try self.refs.append(self.allocator, .{
-                        .file = try self.allocator.dupe(u8, file_path),
-                        .line = line_num,
-                        .table = try self.allocator.dupe(u8, line[table_start..table_end]),
-                        .columns = .empty,
-                        .query_type = .raw_sql,
-                        .snippet = try self.allocator.dupe(u8, trimSnippet(line)),
-                        .allocator = self.allocator,
-                    });
-                }
-            }
-        }
+        const update_pos = findKeyword(lower, "update", 0) orelse return;
+        if (findKeyword(lower, "set", update_pos + "update".len) == null) return;
+        const table_start = skipSqlWs(lower, update_pos + "update".len);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
     }
 
     /// Find SQL DELETE pattern
     fn findSqlDelete(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
-        const lower = try toLowerAlloc(self.allocator, line);
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
         defer self.allocator.free(lower);
 
-        if (std.mem.indexOf(u8, lower, "delete from ")) |pos| {
-            const table_start = pos + 12;
-            const table_end = findIdentifierEnd(lower, table_start);
-            if (table_end > table_start) {
-                try self.refs.append(self.allocator, .{
-                    .file = try self.allocator.dupe(u8, file_path),
-                    .line = line_num,
-                    .table = try self.allocator.dupe(u8, line[table_start..table_end]),
-                    .columns = .empty,
-                    .query_type = .raw_sql,
-                    .snippet = try self.allocator.dupe(u8, trimSnippet(line)),
-                    .allocator = self.allocator,
-                });
-            }
-        }
+        const delete_pos = findKeyword(lower, "delete", 0) orelse return;
+        const from_pos = findKeyword(lower, "from", delete_pos + "delete".len) orelse return;
+        const table_start = skipSqlWs(lower, from_pos + "from".len);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
+    }
+
+    fn appendRawSqlTableRef(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        table_start: usize,
+        lower_scan_line: []const u8,
+    ) !void {
+        const table_end = findSqlIdentifierEnd(lower_scan_line, table_start);
+        if (table_end <= table_start) return;
+
+        try self.refs.append(self.allocator, .{
+            .file = try self.allocator.dupe(u8, file_path),
+            .line = line_num,
+            .table = try self.allocator.dupe(u8, line[table_start..table_end]),
+            .columns = .empty,
+            .query_type = .raw_sql,
+            .snippet = try self.allocator.dupe(u8, trimSnippet(line)),
+            .allocator = self.allocator,
+        });
     }
 
     /// Get collected references
@@ -421,6 +398,112 @@ fn findIdentifierEnd(s: []const u8, start: usize) usize {
         if (!std.ascii.isAlphanumeric(c) and c != '_') break;
     }
     return i;
+}
+
+fn lineBeforeSourceComment(line: []const u8) []const u8 {
+    var in_single = false;
+    var in_double = false;
+    var in_backtick = false;
+    var escape = false;
+
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (in_single or in_double or in_backtick) {
+            if (c == '\\') {
+                escape = true;
+                continue;
+            }
+            if (in_single and c == '\'') in_single = false;
+            if (in_double and c == '"') in_double = false;
+            if (in_backtick and c == '`') in_backtick = false;
+            continue;
+        }
+
+        if (c == '\'') {
+            in_single = true;
+            continue;
+        }
+        if (c == '"') {
+            in_double = true;
+            continue;
+        }
+        if (c == '`') {
+            in_backtick = true;
+            continue;
+        }
+        if (c == '/' and i + 1 < line.len and line[i + 1] == '/') return line[0..i];
+        if (c == '#' and (i == 0 or std.ascii.isWhitespace(line[i - 1]))) return line[0..i];
+        if (c == '/' and i + 1 < line.len and line[i + 1] == '*') return line[0..i];
+    }
+
+    return line;
+}
+
+fn isSqlWordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+}
+
+fn keywordBoundaryAt(s: []const u8, start: usize, len: usize) bool {
+    if (start > 0 and isSqlWordByte(s[start - 1])) return false;
+    const end = start + len;
+    if (end < s.len and isSqlWordByte(s[end])) return false;
+    return true;
+}
+
+fn findKeyword(s: []const u8, keyword: []const u8, start: usize) ?usize {
+    var idx = start;
+    while (std.mem.indexOfPos(u8, s, idx, keyword)) |pos| {
+        if (keywordBoundaryAt(s, pos, keyword.len)) return pos;
+        idx = pos + 1;
+    }
+    return null;
+}
+
+fn skipSqlWs(s: []const u8, start: usize) usize {
+    var i = start;
+    while (i < s.len and std.ascii.isWhitespace(s[i])) : (i += 1) {}
+    return i;
+}
+
+fn isSqlIdentifierStart(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '_';
+}
+
+fn isSqlIdentifierContinue(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_';
+}
+
+fn findSqlIdentifierEnd(s: []const u8, start: usize) usize {
+    var i = start;
+    var part_start = true;
+    var saw_part = false;
+
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (part_start) {
+            if (!isSqlIdentifierStart(c)) break;
+            part_start = false;
+            saw_part = true;
+            continue;
+        }
+
+        if (isSqlIdentifierContinue(c)) continue;
+        if (c == '.') {
+            if (!saw_part or i + 1 >= s.len or !isSqlIdentifierStart(s[i + 1])) break;
+            part_start = true;
+            saw_part = false;
+            continue;
+        }
+        break;
+    }
+
+    return if (part_start) start else i;
 }
 
 fn skipWs(s: []const u8, start: usize) usize {
@@ -1056,6 +1139,50 @@ test "find sql select pattern" {
     try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
     try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
     try std.testing.expectEqual(QueryType.raw_sql, scanner.refs.items[0].query_type);
+}
+
+test "sql scanner requires keyword boundaries" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "let preselected = \"preselect name from users\";");
+    try scanner.scanLine("test.rs", 2, "let updated_at = \"last_update set users\";");
+    try scanner.scanLine("test.rs", 3, "let deleted = \"notdeleted from users\";");
+
+    try std.testing.expectEqual(@as(usize, 0), scanner.refs.items.len);
+}
+
+test "sql scanner ignores source comments outside string literals" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "// SELECT id FROM users");
+    try scanner.scanLine("test.py", 2, "# INSERT INTO users VALUES (1)");
+    try scanner.scanLine("test.rs", 3, "let sql = \"SELECT id FROM users\"; // SELECT id FROM ignored");
+    try scanner.scanLine("test.rs", 4, "let raw = r#\"SELECT id FROM audit.events\"#;");
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("audit.events", scanner.refs.items[1].table);
+}
+
+test "sql scanner keeps qualified table references" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "sqlx::query(\"SELECT id FROM tenant.users WHERE id = $1\")");
+    try scanner.scanLine("test.rs", 2, "sqlx::query(\"INSERT INTO audit.events(id) VALUES ($1)\")");
+    try scanner.scanLine("test.rs", 3, "sqlx::query(\"UPDATE billing.invoices SET status = $1\")");
+    try scanner.scanLine("test.rs", 4, "sqlx::query(\"DELETE FROM archive.logs WHERE id = $1\")");
+
+    try std.testing.expectEqual(@as(usize, 4), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("tenant.users", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("audit.events", scanner.refs.items[1].table);
+    try std.testing.expectEqualStrings("billing.invoices", scanner.refs.items[2].table);
+    try std.testing.expectEqualStrings("archive.logs", scanner.refs.items[3].table);
 }
 
 test "isSourceFile" {
