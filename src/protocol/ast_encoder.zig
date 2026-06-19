@@ -439,12 +439,12 @@ pub const AstEncoder = struct {
             },
             .drop => {
                 try writer.writeAll("DROP TABLE IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .alter => {
                 // ALTER TABLE ADD COLUMN
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 for (cmd.columns) |col| {
                     try writer.writeAll(" ADD COLUMN ");
                     try writeExpr(writer, &col);
@@ -456,9 +456,9 @@ pub const AstEncoder = struct {
                 if (!isSafeSqlExprFragment(expr)) return error.UnsafeSqlFragment;
 
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" ADD CONSTRAINT ");
-                try writer.writeAll(name);
+                try writeIdentifierOrError(writer, name);
                 try writer.writeAll(" CHECK (");
                 try writer.writeAll(std.mem.trim(u8, expr, " \t\r\n"));
                 try writer.writeByte(')');
@@ -466,14 +466,14 @@ pub const AstEncoder = struct {
             .alter_drop_constraint => {
                 const name = cmd.channel orelse return error.MissingConstraintName;
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" DROP CONSTRAINT ");
-                try writer.writeAll(name);
+                try writeIdentifierOrError(writer, name);
             },
             .alter_drop => {
                 // ALTER TABLE DROP COLUMN
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 for (cmd.columns) |col| {
                     try writer.writeAll(" DROP COLUMN ");
                     try writeExpr(writer, &col);
@@ -504,9 +504,9 @@ pub const AstEncoder = struct {
                     } else {
                         try writer.writeAll("CREATE INDEX ");
                     }
-                    try writer.writeAll(idx.name);
+                    try writeIdentifierOrError(writer, idx.name);
                     try writer.writeAll(" ON ");
-                    try writer.writeAll(idx.table);
+                    try writeIdentifierOrError(writer, idx.table);
                     try writer.writeAll(" (");
                     for (idx.columns, 0..) |col, i| {
                         if (i > 0) try writer.writeAll(", ");
@@ -517,11 +517,11 @@ pub const AstEncoder = struct {
             },
             .drop_index => {
                 try writer.writeAll("DROP INDEX IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .create_view => {
                 try writer.writeAll("CREATE VIEW ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" AS ");
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
@@ -534,11 +534,11 @@ pub const AstEncoder = struct {
             },
             .drop_view => {
                 try writer.writeAll("DROP VIEW IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .create_materialized_view => {
                 try writer.writeAll("CREATE MATERIALIZED VIEW ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" AS ");
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
@@ -551,18 +551,18 @@ pub const AstEncoder = struct {
             },
             .refresh_materialized_view => {
                 try writer.writeAll("REFRESH MATERIALIZED VIEW ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .drop_materialized_view => {
                 try writer.writeAll("DROP MATERIALIZED VIEW IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .create_function => {
                 if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 } else if (cmd.payload) |definition| {
                     try writer.writeAll("CREATE FUNCTION ");
-                    try writer.writeAll(cmd.table);
+                    try writeIdentifierOrError(writer, cmd.table);
                     try writer.writeAll(" ");
                     try writer.writeAll(definition);
                 } else {
@@ -583,7 +583,7 @@ pub const AstEncoder = struct {
                     try writer.writeAll(raw);
                 } else if (cmd.payload) |definition| {
                     try writer.writeAll("CREATE TRIGGER ");
-                    try writer.writeAll(cmd.table);
+                    try writeIdentifierOrError(writer, cmd.table);
                     try writer.writeByte(' ');
                     try writer.writeAll(definition);
                 } else {
@@ -592,31 +592,31 @@ pub const AstEncoder = struct {
             },
             .drop_trigger => {
                 try writer.writeAll("DROP TRIGGER IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 if (cmd.payload) |on_table| {
                     try writer.writeAll(" ON ");
-                    try writer.writeAll(on_table);
+                    try writeIdentifierOrError(writer, on_table);
                 }
             },
             .create_extension => {
                 try writer.writeAll("CREATE EXTENSION IF NOT EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .drop_extension => {
                 try writer.writeAll("DROP EXTENSION IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .create_sequence => {
                 try writer.writeAll("CREATE SEQUENCE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .drop_sequence => {
                 try writer.writeAll("DROP SEQUENCE IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .create_enum => {
                 try writer.writeAll("CREATE TYPE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" AS ENUM (");
 
                 if (cmd.insert_values.len > 0) {
@@ -633,11 +633,11 @@ pub const AstEncoder = struct {
             },
             .drop_enum => {
                 try writer.writeAll("DROP TYPE IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
             },
             .alter_enum_add_value => {
                 try writer.writeAll("ALTER TYPE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" ADD VALUE ");
                 if (cmd.payload) |val| {
                     try writer.writeByte('\'');
@@ -650,19 +650,19 @@ pub const AstEncoder = struct {
             .drop_col => {
                 const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" DROP COLUMN ");
-                try writer.writeAll(col_name);
+                try writeIdentifierOrError(writer, col_name);
             },
             .rename_col => {
                 const from = firstColumnName(cmd) orelse return error.MissingColumnName;
                 const to = if (cmd.payload) |p| p else columnNameAt(cmd, 1) orelse return error.MissingRenameTarget;
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" RENAME COLUMN ");
-                try writer.writeAll(from);
+                try writeIdentifierOrError(writer, from);
                 try writer.writeAll(" TO ");
-                try writer.writeAll(to);
+                try writeIdentifierOrError(writer, to);
             },
             .copy_out => {
                 try writer.writeAll("COPY (");
@@ -671,7 +671,7 @@ pub const AstEncoder = struct {
             },
             .lock_table => {
                 try writer.writeAll("LOCK TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 if (cmd.table_lock_mode) |mode| {
                     try writer.writeByte(' ');
                     try writer.writeAll(mode.toSql());
@@ -751,25 +751,25 @@ pub const AstEncoder = struct {
             .alter_set_not_null => {
                 const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" ALTER COLUMN ");
-                try writer.writeAll(col_name);
+                try writeIdentifierOrError(writer, col_name);
                 try writer.writeAll(" SET NOT NULL");
             },
             .alter_drop_not_null => {
                 const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" ALTER COLUMN ");
-                try writer.writeAll(col_name);
+                try writeIdentifierOrError(writer, col_name);
                 try writer.writeAll(" DROP NOT NULL");
             },
             .alter_set_default => {
                 const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" ALTER COLUMN ");
-                try writer.writeAll(col_name);
+                try writeIdentifierOrError(writer, col_name);
                 try writer.writeAll(" SET DEFAULT ");
                 const default_expr = if (cmd.payload) |payload|
                     checkedSqlExprFragment(payload) orelse "NULL"
@@ -780,29 +780,29 @@ pub const AstEncoder = struct {
             .alter_drop_default => {
                 const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" ALTER COLUMN ");
-                try writer.writeAll(col_name);
+                try writeIdentifierOrError(writer, col_name);
                 try writer.writeAll(" DROP DEFAULT");
             },
             .alter_enable_rls => {
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" ENABLE ROW LEVEL SECURITY");
             },
             .alter_disable_rls => {
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" DISABLE ROW LEVEL SECURITY");
             },
             .alter_force_rls => {
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" FORCE ROW LEVEL SECURITY");
             },
             .alter_no_force_rls => {
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" NO FORCE ROW LEVEL SECURITY");
             },
             .call => {
