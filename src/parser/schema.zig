@@ -280,27 +280,57 @@ const Parser = struct {
 
         var depth: usize = 1;
         var in_single = false;
+        var in_double = false;
         while (self.current()) |ch| {
-            if (ch == '\'') {
-                self.advance();
-                if (in_single and self.current() == '\'') {
+            if (in_single) {
+                if (ch == '\'') {
                     self.advance();
+                    if (self.current() == '\'') {
+                        self.advance();
+                        continue;
+                    }
+                    in_single = false;
                     continue;
                 }
-                in_single = !in_single;
+                self.advance();
                 continue;
             }
 
-            if (!in_single and ch == '(') {
+            if (in_double) {
+                if (ch == '"') {
+                    self.advance();
+                    if (self.current() == '"') {
+                        self.advance();
+                        continue;
+                    }
+                    in_double = false;
+                    continue;
+                }
+                self.advance();
+                continue;
+            }
+
+            if (ch == '\'') {
+                in_single = true;
+                self.advance();
+                continue;
+            }
+            if (ch == '"') {
+                in_double = true;
+                self.advance();
+                continue;
+            }
+
+            if (ch == '(') {
                 depth += 1;
-            } else if (!in_single and ch == ')') {
+            } else if (ch == ')') {
                 depth -= 1;
                 if (depth == 0) break;
             }
             self.advance();
         }
 
-        if (in_single) return error.UnterminatedStringLiteral;
+        if (in_single or in_double) return error.UnterminatedStringLiteral;
         if (self.current() == null) return error.UnterminatedExpression;
         const expr_end = self.pos;
         self.advance(); // Skip closing ')'
@@ -703,34 +733,59 @@ const Parser = struct {
                 // Parse default value - track parens for function calls like NOW()
                 var paren_depth: usize = 0;
                 var in_single = false;
+                var in_double = false;
                 while (self.current()) |ch| {
-                    if (ch == '\'') {
-                        self.advance();
-                        if (in_single and self.current() == '\'') {
+                    if (in_single) {
+                        if (ch == '\'') {
                             self.advance();
+                            if (self.current() == '\'') {
+                                self.advance();
+                                continue;
+                            }
+                            in_single = false;
                             continue;
                         }
-                        in_single = !in_single;
+                        self.advance();
                         continue;
                     }
 
-                    if (!in_single and ch == '(') {
+                    if (in_double) {
+                        if (ch == '"') {
+                            self.advance();
+                            if (self.current() == '"') {
+                                self.advance();
+                                continue;
+                            }
+                            in_double = false;
+                            continue;
+                        }
+                        self.advance();
+                        continue;
+                    }
+
+                    if (ch == '\'') {
+                        in_single = true;
+                        self.advance();
+                    } else if (ch == '"') {
+                        in_double = true;
+                        self.advance();
+                    } else if (ch == '(') {
                         paren_depth += 1;
                         self.advance();
-                    } else if (!in_single and ch == ')') {
+                    } else if (ch == ')') {
                         if (paren_depth > 0) {
                             paren_depth -= 1;
                             self.advance();
                         } else {
                             break; // End of table definition
                         }
-                    } else if (!in_single and (ch == ' ' or ch == '\t' or ch == ',' or ch == '}' or ch == '\n') and paren_depth == 0) {
+                    } else if ((ch == ' ' or ch == '\t' or ch == ',' or ch == '}' or ch == '\n') and paren_depth == 0) {
                         break;
                     } else {
                         self.advance();
                     }
                 }
-                if (in_single) return error.UnterminatedStringLiteral;
+                if (in_single or in_double) return error.UnterminatedStringLiteral;
                 const default_value = std.mem.trim(u8, self.input[def_start..self.pos], " \t\r\n");
                 if (default_value.len == 0) return error.InvalidColumnConstraint;
                 result.default_value = try self.allocator.dupe(u8, default_value);
@@ -739,24 +794,54 @@ const Parser = struct {
                 const check_start = self.pos;
                 var depth: usize = 1;
                 var in_single = false;
+                var in_double = false;
                 while (self.current()) |ch| {
-                    if (ch == '\'') {
-                        self.advance();
-                        if (in_single and self.current() == '\'') {
+                    if (in_single) {
+                        if (ch == '\'') {
                             self.advance();
+                            if (self.current() == '\'') {
+                                self.advance();
+                                continue;
+                            }
+                            in_single = false;
                             continue;
                         }
-                        in_single = !in_single;
+                        self.advance();
                         continue;
                     }
-                    if (!in_single and ch == '(') depth += 1;
-                    if (!in_single and ch == ')') {
+
+                    if (in_double) {
+                        if (ch == '"') {
+                            self.advance();
+                            if (self.current() == '"') {
+                                self.advance();
+                                continue;
+                            }
+                            in_double = false;
+                            continue;
+                        }
+                        self.advance();
+                        continue;
+                    }
+
+                    if (ch == '\'') {
+                        in_single = true;
+                        self.advance();
+                        continue;
+                    }
+                    if (ch == '"') {
+                        in_double = true;
+                        self.advance();
+                        continue;
+                    }
+                    if (ch == '(') depth += 1;
+                    if (ch == ')') {
                         depth -= 1;
                         if (depth == 0) break;
                     }
                     self.advance();
                 }
-                if (in_single) return error.UnterminatedStringLiteral;
+                if (in_single or in_double) return error.UnterminatedStringLiteral;
                 if (self.current() != ')') return error.UnterminatedExpression;
                 const check_expr = std.mem.trim(u8, self.input[check_start..self.pos], " \t\r\n");
                 if (check_expr.len == 0) return error.InvalidColumnConstraint;
@@ -2233,6 +2318,25 @@ test "schema parser preserves multiple column checks" {
     try std.testing.expectEqualStrings("score <= 100", score.extra_checks[0]);
 }
 
+test "schema parser ignores parentheses inside double quoted SQL fragments" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table products (
+        \\    weird text,
+        \\    label text default coalesce("weird)", 'fallback') check ("weird)" <> '(')
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const products = schema.tables.items[0];
+    const label = products.findColumn("label").?;
+    try std.testing.expectEqualStrings("coalesce(\"weird)\", 'fallback')", label.default_value.?);
+    try std.testing.expectEqualStrings("\"weird)\" <> '('", label.check.?);
+}
+
 test "schema parser validates column check references" {
     const invalid_input =
         \\table orders (
@@ -2437,6 +2541,26 @@ test "parse policy block handles escaped strings and rejects unterminated string
         \\    for select
         \\    using (name = 'unterminated)
     );
+}
+
+test "parse policy block ignores parentheses inside double quoted identifiers" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table users (
+        \\    tenant text
+        \\)
+        \\policy users_tenant on users
+        \\    using ("tenant)" = current_setting('app.tenant_id'))
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const policy = schema.policies.items[0];
+    const expr = policy.using_expr.?;
+    try std.testing.expect(expr == .raw);
+    try std.testing.expectEqualStrings("\"tenant)\" = current_setting('app.tenant_id')", expr.raw);
 }
 
 test "parse policy block gives and higher precedence than or" {
