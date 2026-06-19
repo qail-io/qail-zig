@@ -21,6 +21,7 @@ const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */"
 const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
 const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
 const INVALID_INSERT_COLUMN = "/* ERROR: Invalid insert column */";
+const INVALID_RAW_FRAGMENT = "/* ERROR: Invalid raw SQL fragment */";
 
 pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
     var has_and = false;
@@ -212,7 +213,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
         },
         .subquery => |sq| {
             try writer.writeByte('(');
-            try writer.writeAll(sq.sql);
+            try writeCheckedSubquerySql(writer, sq.sql);
             try writer.writeByte(')');
             if (sq.alias) |alias| {
                 try writer.writeAll(" AS ");
@@ -320,7 +321,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
             } else {
                 try writer.writeAll("EXISTS (");
             }
-            try writer.writeAll(sq.sql);
+            try writeCheckedSubquerySql(writer, sq.sql);
             try writer.writeByte(')');
             if (sq.alias) |alias| {
                 try writer.writeAll(" AS ");
@@ -334,7 +335,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
             }
             try writeExpr(writer, u.operand);
         },
-        .raw => |raw| try writer.writeAll(raw),
+        .raw => |raw| try writeCheckedRawExpression(writer, raw),
         else => {},
     }
 }
@@ -374,6 +375,73 @@ fn checkedSqlTypeFragment(fragment: []const u8) ?[]const u8 {
         if (!ok) return null;
     }
     return trimmed;
+}
+
+fn containsUnquotedStatementDelimiter(value: []const u8) bool {
+    var i: usize = 0;
+    var in_single = false;
+    var in_double = false;
+
+    while (i < value.len) {
+        const b = value[i];
+        if (b == 0) return true;
+
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < value.len and value[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (in_double) {
+            if (b == '"') {
+                if (i + 1 < value.len and value[i + 1] == '"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        switch (b) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ';' => return true,
+            '-' => if (i + 1 < value.len and value[i + 1] == '-') return true,
+            '/' => if (i + 1 < value.len and value[i + 1] == '*') return true,
+            '*' => if (i + 1 < value.len and value[i + 1] == '/') return true,
+            else => {},
+        }
+        i += 1;
+    }
+
+    return false;
+}
+
+fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0 or containsUnquotedStatementDelimiter(trimmed)) return null;
+    return trimmed;
+}
+
+fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
+    const checked = checkedSqlExprFragment(fragment) orelse {
+        try writer.writeAll(INVALID_RAW_FRAGMENT);
+        return;
+    };
+    try writer.writeAll(checked);
+}
+
+fn writeCheckedSubquerySql(writer: anytype, sql: []const u8) !void {
+    const checked = checkedSqlExprFragment(sql) orelse "SELECT NULL WHERE FALSE";
+    try writer.writeAll(checked);
 }
 
 fn isValidQualifiedIdentifier(value: []const u8) bool {

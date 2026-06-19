@@ -31,6 +31,7 @@ allowlist=(
   "src/protocol/ast_encoder.zig|primary AST-to-Postgres renderer"
   "src/transpiler/postgres.zig|debug SQL transpiler"
   "src/transpiler/postgres/commands.zig|debug SQL transpiler command renderer"
+  "src/transpiler/postgres/render.zig|debug SQL transpiler expression renderer"
 )
 
 roots=(

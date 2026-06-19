@@ -41,6 +41,7 @@ const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */"
 const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
 const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
 const INVALID_INSERT_COLUMN = "/* ERROR: Invalid insert column */";
+const INVALID_RAW_FRAGMENT = "/* ERROR: Invalid raw SQL fragment */";
 const INVALID_COLUMN_TYPE = "/* ERROR: Invalid column type */";
 const INVALID_COLUMN_FRAGMENT = "/* ERROR: Invalid column definition fragment */";
 
@@ -1057,7 +1058,7 @@ fn writeNestedQueryableCmd(writer: anytype, cmd: *const QailCmd) anyerror!void {
         .cnt => writeSelect(writer, cmd, true),
         .search => writeSelect(writer, cmd, false),
         .over => writeSelect(writer, cmd, false),
-        .raw => try writer.writeAll(cmd.raw_sql orelse return error.MissingNestedRawQuery),
+        .raw => try writeCheckedSubquerySql(writer, cmd.raw_sql orelse return error.MissingNestedRawQuery),
         else => error.UnsupportedNestedQueryCommand,
     };
 }
@@ -1761,6 +1762,19 @@ fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
     return trimmed;
 }
 
+fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
+    const checked = checkedSqlExprFragment(fragment) orelse {
+        try writer.writeAll(INVALID_RAW_FRAGMENT);
+        return;
+    };
+    try writer.writeAll(checked);
+}
+
+fn writeCheckedSubquerySql(writer: anytype, sql: []const u8) !void {
+    const checked = checkedSqlExprFragment(sql) orelse "SELECT NULL WHERE FALSE";
+    try writer.writeAll(checked);
+}
+
 fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
     const needs_quotes = blk: {
         if (ident.len == 0) break :blk true;
@@ -2301,7 +2315,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
         },
         .subquery => |sq| {
             try writer.writeByte('(');
-            try writer.writeAll(sq.sql);
+            try writeCheckedSubquerySql(writer, sq.sql);
             try writer.writeByte(')');
             if (sq.alias) |alias| {
                 try writer.writeAll(" AS ");
@@ -2349,7 +2363,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
                 try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
-        .raw => |raw| try writer.writeAll(raw),
+        .raw => |raw| try writeCheckedRawExpression(writer, raw),
         .column_def => |def| try writeColumnDefExpr(writer, def),
         .window => |w| try writeWindowExpr(writer, w),
         .col_mod => |m| {
@@ -2446,7 +2460,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             } else {
                 try writer.writeAll("EXISTS (");
             }
-            try writer.writeAll(sq.sql);
+            try writeCheckedSubquerySql(writer, sq.sql);
             try writer.writeByte(')');
             if (sq.alias) |alias| {
                 try writer.writeAll(" AS ");
@@ -3982,6 +3996,42 @@ test "ast encoder expression fragments fail closed" {
     try std.testing.expectEqualStrings(
         "SELECT /* ERROR: Invalid cast target type */ FROM users",
         cast_writer.getWritten(),
+    );
+
+    const raw_cols = [_]Expr{.{ .raw = "pg_sleep(1); DROP TABLE users; --" }};
+    const raw_cmd = QailCmd.get("users").select(&raw_cols);
+    var raw_buf: [256]u8 = undefined;
+    var raw_writer = io.FixedBufferWriter.init(&raw_buf);
+    try encoder.writeAstToSql(raw_writer.writer(), &raw_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT /* ERROR: Invalid raw SQL fragment */ FROM users",
+        raw_writer.getWritten(),
+    );
+
+    const subquery_cols = [_]Expr{.{ .subquery = .{
+        .sql = "SELECT 1; DROP TABLE users; --",
+        .alias = "safe_alias",
+    } }};
+    const subquery_cmd = QailCmd.get("users").select(&subquery_cols);
+    var subquery_buf: [256]u8 = undefined;
+    var subquery_writer = io.FixedBufferWriter.init(&subquery_buf);
+    try encoder.writeAstToSql(subquery_writer.writer(), &subquery_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT (SELECT NULL WHERE FALSE) AS safe_alias FROM users",
+        subquery_writer.getWritten(),
+    );
+
+    const exists_cols = [_]Expr{.{ .exists_subquery = .{
+        .sql = "SELECT 1; DROP TABLE users; --",
+        .alias = "safe_exists",
+    } }};
+    const exists_cmd = QailCmd.get("users").select(&exists_cols);
+    var exists_buf: [256]u8 = undefined;
+    var exists_writer = io.FixedBufferWriter.init(&exists_buf);
+    try encoder.writeAstToSql(exists_writer.writer(), &exists_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_exists FROM users",
+        exists_writer.getWritten(),
     );
 }
 

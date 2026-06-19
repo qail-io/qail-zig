@@ -694,6 +694,39 @@ test "trusted transpiler expression fragments fail closed" {
         "SELECT /* ERROR: Invalid cast target type */ FROM users",
         bad_cast_sql,
     );
+
+    const raw_cols = [_]Expr{.{ .raw = "pg_sleep(1); DROP TABLE users; --" }};
+    const raw_cmd = QailCmd.get("users").select(&raw_cols);
+    const raw_sql = try toSqlTrusted(std.testing.allocator, &raw_cmd);
+    defer std.testing.allocator.free(raw_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT /* ERROR: Invalid raw SQL fragment */ FROM users",
+        raw_sql,
+    );
+
+    const subquery_cols = [_]Expr{.{ .subquery = .{
+        .sql = "SELECT 1; DROP TABLE users; --",
+        .alias = "safe_alias",
+    } }};
+    const subquery_cmd = QailCmd.get("users").select(&subquery_cols);
+    const subquery_sql = try toSqlTrusted(std.testing.allocator, &subquery_cmd);
+    defer std.testing.allocator.free(subquery_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT (SELECT NULL WHERE FALSE) AS safe_alias FROM users",
+        subquery_sql,
+    );
+
+    const exists_cols = [_]Expr{.{ .exists_subquery = .{
+        .sql = "SELECT 1; DROP TABLE users; --",
+        .alias = "safe_exists",
+    } }};
+    const exists_cmd = QailCmd.get("users").select(&exists_cols);
+    const exists_sql = try toSqlTrusted(std.testing.allocator, &exists_cmd);
+    defer std.testing.allocator.free(exists_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_exists FROM users",
+        exists_sql,
+    );
 }
 
 test "trusted transpiler hardens mutation target identifiers" {
