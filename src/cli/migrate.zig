@@ -13,7 +13,12 @@ fn parseMigrationUpFileName(file_name: []const u8) !MigrationFileNameParts {
     if (!std.mem.endsWith(u8, file_name, ".up.qail")) return error.NotUpMigrationFile;
 
     const stem = file_name[0 .. file_name.len - ".up.qail".len];
+    return parseMigrationStem(stem);
+}
+
+fn parseMigrationStem(stem: []const u8) !MigrationFileNameParts {
     if (stem.len == 0) return error.InvalidMigrationFileName;
+    if (!std.ascii.isAlphanumeric(stem[0])) return error.InvalidMigrationFileName;
 
     for (stem) |c| {
         if (!isMigrationFileStemByte(c)) return error.InvalidMigrationFileName;
@@ -26,6 +31,7 @@ fn parseMigrationUpFileName(file_name: []const u8) !MigrationFileNameParts {
     } else stem;
 
     if (name.len == 0) return error.InvalidMigrationFileName;
+    if (!std.ascii.isAlphanumeric(name[0])) return error.InvalidMigrationFileName;
     return .{ .stem = stem, .name = name };
 }
 
@@ -831,6 +837,53 @@ pub fn make(comptime Cli: type) type {
             return pathContainsMigrationPhaseToken(path, applyPhaseToken(phase));
         }
 
+        fn migrationPathExists(path: []const u8) !bool {
+            _ = std.Io.Dir.cwd().statFile(io_compat.runtimeIo(), path, .{}) catch |err| {
+                if (err == error.FileNotFound) return false;
+                return err;
+            };
+            return true;
+        }
+
+        fn appendMigrationFileEntry(
+            allocator: Allocator,
+            entries: *std.ArrayList(MigrationFileEntry),
+            version: []const u8,
+            name: []const u8,
+            path: []const u8,
+        ) !void {
+            for (entries.items) |existing| {
+                if (std.mem.eql(u8, existing.version, version)) {
+                    return error.DuplicateMigrationVersion;
+                }
+                if (std.mem.eql(u8, existing.name, name)) {
+                    return error.DuplicateMigrationName;
+                }
+            }
+
+            const version_copy = try allocator.dupe(u8, version);
+            errdefer allocator.free(version_copy);
+            const name_copy = try allocator.dupe(u8, name);
+            errdefer allocator.free(name_copy);
+            const path_copy = try allocator.dupe(u8, path);
+            errdefer allocator.free(path_copy);
+
+            try entries.append(allocator, .{
+                .version = version_copy,
+                .name = name_copy,
+                .path = path_copy,
+            });
+        }
+
+        fn migrationDownPath(allocator: Allocator, version: []const u8) ![]u8 {
+            const flat = try std.fmt.allocPrint(allocator, "migrations/{s}.down.qail", .{version});
+            errdefer allocator.free(flat);
+            if (try migrationPathExists(flat)) return flat;
+
+            allocator.free(flat);
+            return try std.fmt.allocPrint(allocator, "migrations/{s}/down.qail", .{version});
+        }
+
         fn collectUpMigrationFiles(allocator: Allocator) !std.ArrayList(MigrationFileEntry) {
             var entries: std.ArrayList(MigrationFileEntry) = .empty;
             errdefer deinitMigrationFileEntries(allocator, &entries);
@@ -844,34 +897,30 @@ pub fn make(comptime Cli: type) type {
 
             var iter = dir.iterate();
             while (try iter.next(io_iface)) |entry| {
-                if (entry.kind != .file) continue;
-                const parts = parseMigrationUpFileName(entry.name) catch |err| switch (err) {
-                    error.NotUpMigrationFile => continue,
-                    else => return err,
-                };
+                switch (entry.kind) {
+                    .file => {
+                        if (std.mem.endsWith(u8, entry.name, ".up.sql")) return error.UnsupportedSqlMigrationFile;
+                        const parts = parseMigrationUpFileName(entry.name) catch |err| switch (err) {
+                            error.NotUpMigrationFile => continue,
+                            else => return err,
+                        };
+                        const path = try std.fmt.allocPrint(allocator, "migrations/{s}", .{entry.name});
+                        defer allocator.free(path);
+                        try appendMigrationFileEntry(allocator, &entries, parts.stem, parts.name, path);
+                    },
+                    .directory => {
+                        const up_qail = try std.fmt.allocPrint(allocator, "migrations/{s}/up.qail", .{entry.name});
+                        defer allocator.free(up_qail);
+                        const up_sql = try std.fmt.allocPrint(allocator, "migrations/{s}/up.sql", .{entry.name});
+                        defer allocator.free(up_sql);
 
-                for (entries.items) |existing| {
-                    if (std.mem.eql(u8, existing.version, parts.stem)) {
-                        return error.DuplicateMigrationVersion;
-                    }
-                    if (std.mem.eql(u8, existing.name, parts.name)) {
-                        return error.DuplicateMigrationName;
-                    }
-                }
+                        if (try migrationPathExists(up_sql)) return error.UnsupportedSqlMigrationFile;
+                        if (!try migrationPathExists(up_qail)) continue;
 
-                {
-                    const version_copy = try allocator.dupe(u8, parts.stem);
-                    errdefer allocator.free(version_copy);
-                    const name_copy = try allocator.dupe(u8, parts.name);
-                    errdefer allocator.free(name_copy);
-                    const path_copy = try std.fmt.allocPrint(allocator, "migrations/{s}", .{entry.name});
-                    errdefer allocator.free(path_copy);
-
-                    try entries.append(allocator, .{
-                        .version = version_copy,
-                        .name = name_copy,
-                        .path = path_copy,
-                    });
+                        const parts = try parseMigrationStem(entry.name);
+                        try appendMigrationFileEntry(allocator, &entries, parts.stem, parts.name, up_qail);
+                    },
+                    else => continue,
                 }
             }
 
@@ -946,7 +995,7 @@ pub fn make(comptime Cli: type) type {
                         const entry = applied.items[idx];
 
                         const matches_phase = blk: {
-                            const down_path = try std.fmt.allocPrint(allocator, "migrations/{s}.down.qail", .{entry.version});
+                            const down_path = try migrationDownPath(allocator, entry.version);
                             defer allocator.free(down_path);
                             break :blk try migrationFileMatchesPhase(allocator, down_path, phase);
                         };
@@ -1207,7 +1256,7 @@ pub fn make(comptime Cli: type) type {
                 idx -= 1;
                 const entry = applied.items[idx];
 
-                const down_path = try std.fmt.allocPrint(allocator, "migrations/{s}.down.qail", .{entry.version});
+                const down_path = try migrationDownPath(allocator, entry.version);
                 defer allocator.free(down_path);
 
                 print("  ↩ {s}\n", .{entry.version});
@@ -1895,6 +1944,77 @@ pub fn make(comptime Cli: type) type {
             }
             return .{ .old = null, .new = null };
         }
+
+        test "collect up migrations keeps legacy subdir history and rejects sql" {
+            const allocator = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const old_cwd = try std.posix.getcwd(&cwd_buf);
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const root = try tmp.dir.realPath(std.testing.io, ".", &root_buf);
+            try std.posix.chdir(root);
+            defer std.posix.chdir(old_cwd) catch {};
+
+            const io_iface = io_compat.runtimeIo();
+            try std.Io.Dir.cwd().createDirPath(io_iface, "migrations/001_legacy_core");
+            try std.Io.Dir.cwd().createDirPath(io_iface, "migrations/ignored_notes");
+            try std.Io.Dir.cwd().writeFile(io_iface, .{
+                .sub_path = "migrations/001_legacy_core/up.qail",
+                .data = "get::users\n",
+            });
+            try std.Io.Dir.cwd().writeFile(io_iface, .{
+                .sub_path = "migrations/002_flat_core.up.qail",
+                .data = "get::orders\n",
+            });
+
+            var found = try collectUpMigrationFiles(allocator);
+            defer deinitMigrationFileEntries(allocator, &found);
+
+            try std.testing.expectEqual(@as(usize, 2), found.items.len);
+            try std.testing.expectEqualStrings("001_legacy_core", found.items[0].version);
+            try std.testing.expectEqualStrings("migrations/001_legacy_core/up.qail", found.items[0].path);
+            try std.testing.expectEqualStrings("002_flat_core", found.items[1].version);
+            try std.testing.expectEqualStrings("migrations/002_flat_core.up.qail", found.items[1].path);
+
+            try std.Io.Dir.cwd().writeFile(io_iface, .{
+                .sub_path = "migrations/001_legacy_core/up.sql",
+                .data = "SELECT 1;\n",
+            });
+            try std.testing.expectError(error.UnsupportedSqlMigrationFile, collectUpMigrationFiles(allocator));
+        }
+
+        test "migration down path prefers flat file and falls back to legacy subdir" {
+            const allocator = std.testing.allocator;
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const old_cwd = try std.posix.getcwd(&cwd_buf);
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const root = try tmp.dir.realPath(std.testing.io, ".", &root_buf);
+            try std.posix.chdir(root);
+            defer std.posix.chdir(old_cwd) catch {};
+
+            const io_iface = io_compat.runtimeIo();
+            try std.Io.Dir.cwd().createDirPath(io_iface, "migrations/001_legacy_core");
+            try std.Io.Dir.cwd().writeFile(io_iface, .{
+                .sub_path = "migrations/001_legacy_core/down.qail",
+                .data = "del::users\n",
+            });
+            const legacy = try migrationDownPath(allocator, "001_legacy_core");
+            defer allocator.free(legacy);
+            try std.testing.expectEqualStrings("migrations/001_legacy_core/down.qail", legacy);
+
+            try std.Io.Dir.cwd().writeFile(io_iface, .{
+                .sub_path = "migrations/001_legacy_core.down.qail",
+                .data = "del::users\n",
+            });
+            const flat = try migrationDownPath(allocator, "001_legacy_core");
+            defer allocator.free(flat);
+            try std.testing.expectEqualStrings("migrations/001_legacy_core.down.qail", flat);
+        }
     };
 }
 
@@ -1932,7 +2052,10 @@ test "migration up filenames reject malformed logical names" {
 
     try std.testing.expectError(error.NotUpMigrationFile, parseMigrationUpFileName("notes.txt"));
     try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName(".up.qail"));
+    try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("..up.qail"));
+    try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("-001_init.up.qail"));
     try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("_init.up.qail"));
     try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("001_.up.qail"));
+    try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("001_.hidden.up.qail"));
     try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("001 add users.up.qail"));
 }
