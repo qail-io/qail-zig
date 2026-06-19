@@ -340,7 +340,9 @@ pub const AstEncoder = struct {
             .with => try writeSelect(writer, cmd, false),
             .cnt => try writeSelect(writer, cmd, true),
             .set => {
+                try validateUpdateShape(cmd);
                 try writer.writeAll("UPDATE ");
+                if (cmd.only_table) try writer.writeAll("ONLY ");
                 try writer.writeAll(cmd.table);
                 try writer.writeAll(" SET ");
 
@@ -363,6 +365,7 @@ pub const AstEncoder = struct {
             },
             .del => {
                 try writer.writeAll("DELETE FROM ");
+                if (cmd.only_table) try writer.writeAll("ONLY ");
                 try writer.writeAll(cmd.table);
 
                 try writeWhereClauses(writer, cmd.where_clauses);
@@ -918,6 +921,7 @@ pub const AstEncoder = struct {
 };
 
 fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
+    try validateSelectShape(cmd);
     try writeCtePrefix(writer, cmd);
 
     try writer.writeAll("SELECT ");
@@ -1330,7 +1334,107 @@ fn columnNameAt(cmd: *const QailCmd, idx: usize) ?[]const u8 {
     };
 }
 
+fn validateSelectShape(cmd: *const QailCmd) !void {
+    if (cmd.assignments.len != 0) return error.InvalidSelectShape;
+    if (cmd.fetch_with_ties and cmd.order_by.len == 0) return error.FetchWithTiesRequiresOrderBy;
+
+    if (cmd.sample_method != null and cmd.sample_percent == null) return error.MissingTableSamplePercent;
+    if (cmd.sample_percent) |pct| {
+        if (!std.math.isFinite(pct) or pct < 0 or pct > 100) return error.InvalidTableSamplePercent;
+        if (cmd.sample_method == null) return error.MissingTableSampleMethod;
+    }
+}
+
+fn validateInsertShape(cmd: *const QailCmd) !void {
+    const has_values = cmd.insert_values.len != 0;
+    const has_assignments = cmd.assignments.len != 0;
+    const has_source = cmd.source_query != null;
+    const has_raw_source = cmd.raw_sql != null;
+
+    if (cmd.default_values) {
+        if (cmd.columns.len != 0 or has_values or has_assignments or has_source or has_raw_source) {
+            return error.InvalidInsertShape;
+        }
+        try validateOnConflictShape(cmd);
+        return;
+    }
+
+    if (has_source and (has_raw_source or has_values or has_assignments)) return error.InvalidInsertShape;
+    if (has_raw_source and (has_values or has_assignments)) return error.InvalidInsertShape;
+    if (has_values and has_assignments) return error.InvalidInsertShape;
+    if (!has_source and !has_raw_source and !has_values and !has_assignments) return error.MissingInsertValues;
+
+    if (cmd.columns.len != 0) {
+        try validateInsertTargetColumns(cmd.columns);
+        const value_count = if (has_values) cmd.insert_values.len else if (has_assignments) cmd.assignments.len else 0;
+        if (value_count != 0 and cmd.columns.len != value_count) return error.InvalidInsertShape;
+    } else if (has_assignments) {
+        try validateAssignmentTargets(cmd.assignments);
+    }
+
+    try validateOnConflictShape(cmd);
+}
+
+fn validateUpdateShape(cmd: *const QailCmd) !void {
+    if (cmd.assignments.len == 0) return error.MissingUpdateAssignments;
+    if (cmd.columns.len != 0) return error.InvalidUpdateShape;
+    try validateAssignmentTargets(cmd.assignments);
+}
+
+fn validateOnConflictShape(cmd: *const QailCmd) !void {
+    const conflict = cmd.on_conflict orelse return;
+
+    try validateWriteTargetNames(conflict.columns);
+    switch (conflict.action) {
+        .do_nothing => {},
+        .do_update => {
+            if (conflict.columns.len == 0) return error.InvalidOnConflictShape;
+            const updates = if (conflict.update_columns.len != 0) conflict.update_columns else cmd.assignments;
+            if (updates.len == 0) return error.InvalidOnConflictShape;
+            try validateAssignmentTargets(updates);
+        },
+    }
+}
+
+fn validateInsertTargetColumns(columns: []const Expr) !void {
+    for (columns, 0..) |column, i| {
+        const name = switch (column) {
+            .named => |name| name,
+            else => return error.InvalidInsertColumn,
+        };
+        if (!isBareIdentifier(name)) return error.InvalidInsertColumn;
+
+        for (columns[0..i]) |prev| {
+            const prev_name = switch (prev) {
+                .named => |p| p,
+                else => continue,
+            };
+            if (std.ascii.eqlIgnoreCase(prev_name, name)) return error.DuplicateWriteTarget;
+        }
+    }
+}
+
+fn validateAssignmentTargets(assignments: []const ast.cmd.Assignment) !void {
+    for (assignments, 0..) |assignment, i| {
+        if (!isBareIdentifier(assignment.column)) return error.InvalidWriteTarget;
+        for (assignments[0..i]) |prev| {
+            if (std.ascii.eqlIgnoreCase(prev.column, assignment.column)) return error.DuplicateWriteTarget;
+        }
+    }
+}
+
+fn validateWriteTargetNames(columns: []const []const u8) !void {
+    for (columns, 0..) |column, i| {
+        if (!isBareIdentifier(column)) return error.InvalidWriteTarget;
+        for (columns[0..i]) |prev| {
+            if (std.ascii.eqlIgnoreCase(prev, column)) return error.DuplicateWriteTarget;
+        }
+    }
+}
+
 fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) !void {
+    try validateInsertShape(cmd);
+
     try writer.writeAll("INSERT INTO ");
     try writer.writeAll(cmd.table);
 
@@ -1381,7 +1485,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
         return error.MissingInsertValues;
     }
 
-    if (include_conflict) {
+    if (include_conflict or cmd.on_conflict != null) {
         if (cmd.on_conflict) |conflict| {
             try writer.writeAll(" ON CONFLICT");
             if (conflict.columns.len > 0) {
@@ -2112,6 +2216,50 @@ test "ast encoder aggregates" {
     try std.testing.expect(bytes.len > 20);
 }
 
+test "ast encoder select shape validation fails closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const fetch_ties = QailCmd.get("events").fetchWithTies(5);
+    var fetch_buf: [512]u8 = undefined;
+    var fetch_writer = io.FixedBufferWriter.init(&fetch_buf);
+    try std.testing.expectError(error.FetchWithTiesRequiresOrderBy, encoder.writeAstToSql(fetch_writer.writer(), &fetch_ties));
+
+    const sample = QailCmd.get("events").tablesampleSystem(std.math.nan(f64));
+    var sample_buf: [512]u8 = undefined;
+    var sample_writer = io.FixedBufferWriter.init(&sample_buf);
+    try std.testing.expectError(error.InvalidTableSamplePercent, encoder.writeAstToSql(sample_writer.writer(), &sample));
+
+    const payload = QailCmd.get("events").setValue("status", .{ .string = "closed" });
+    var payload_buf: [512]u8 = undefined;
+    var payload_writer = io.FixedBufferWriter.init(&payload_buf);
+    try std.testing.expectError(error.InvalidSelectShape, encoder.writeAstToSql(payload_writer.writer(), &payload));
+}
+
+test "ast encoder select renders table modifiers and sort nulls" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const cols = [_]Expr{Expr.col("id")};
+    const order = [_]ast.cmd.OrderBy{.{ .column = "created_at", .order = .asc_nulls_last }};
+    const cmd = QailCmd.get("events")
+        .only()
+        .tablesampleSystem(12.5)
+        .repeatable(7)
+        .select(&cols)
+        .orderBy(&order)
+        .forKeyShare();
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "SELECT id FROM ONLY events TABLESAMPLE SYSTEM(12.5) REPEATABLE(7) ORDER BY created_at ASC NULLS LAST FOR KEY SHARE",
+        writer.getWritten(),
+    );
+}
+
 test "ast encoder where groups and + or clauses like qail.rs or_filter semantics" {
     const wheres = [_]ast.cmd.WhereClause{
         ast.cmd.filter("is_active", .eq, .{ .bool = true }),
@@ -2177,6 +2325,51 @@ test "ast encoder update with or-filter grouping" {
         "UPDATE kb SET archived = true WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')",
         sql,
     );
+}
+
+test "ast encoder update shape validation fails closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const empty = QailCmd.set("kb");
+    var empty_buf: [512]u8 = undefined;
+    var empty_writer = io.FixedBufferWriter.init(&empty_buf);
+    try std.testing.expectError(error.MissingUpdateAssignments, encoder.writeAstToSql(empty_writer.writer(), &empty));
+
+    const cols = [_]Expr{Expr.col("archived")};
+    const assigns = [_]ast.cmd.Assignment{.{ .column = "archived", .value = .{ .bool = true } }};
+    const ambiguous = QailCmd.set("kb").select(&cols).values(&assigns);
+    var ambiguous_buf: [512]u8 = undefined;
+    var ambiguous_writer = io.FixedBufferWriter.init(&ambiguous_buf);
+    try std.testing.expectError(error.InvalidUpdateShape, encoder.writeAstToSql(ambiguous_writer.writer(), &ambiguous));
+
+    const dup_assigns = [_]ast.cmd.Assignment{
+        .{ .column = "status", .value = .{ .string = "ready" } },
+        .{ .column = "STATUS", .value = .{ .string = "closed" } },
+    };
+    const duplicate = QailCmd.set("kb").values(&dup_assigns);
+    var duplicate_buf: [512]u8 = undefined;
+    var duplicate_writer = io.FixedBufferWriter.init(&duplicate_buf);
+    try std.testing.expectError(error.DuplicateWriteTarget, encoder.writeAstToSql(duplicate_writer.writer(), &duplicate));
+}
+
+test "ast encoder update and delete render only table" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const assigns = [_]ast.cmd.Assignment{.{ .column = "archived", .value = .{ .bool = true } }};
+    const update = QailCmd.set("kb").only().values(&assigns);
+
+    var update_buf: [512]u8 = undefined;
+    var update_writer = io.FixedBufferWriter.init(&update_buf);
+    try encoder.writeAstToSql(update_writer.writer(), &update);
+    try std.testing.expectEqualStrings("UPDATE ONLY kb SET archived = true", update_writer.getWritten());
+
+    const delete = QailCmd.del("kb").only();
+    var delete_buf: [512]u8 = undefined;
+    var delete_writer = io.FixedBufferWriter.init(&delete_buf);
+    try encoder.writeAstToSql(delete_writer.writer(), &delete);
+    try std.testing.expectEqualStrings("DELETE FROM ONLY kb", delete_writer.getWritten());
 }
 
 test "ast encoder lock table uses typed mode" {
@@ -2287,12 +2480,72 @@ test "ast encoder insert target expressions fail closed" {
 
     var sql_buf: [512]u8 = undefined;
     var writer = io.FixedBufferWriter.init(&sql_buf);
-    try encoder.writeAstToSql(writer.writer(), &cmd);
+    try std.testing.expectError(error.InvalidInsertColumn, encoder.writeAstToSql(writer.writer(), &cmd));
+}
 
-    try std.testing.expectEqualStrings(
-        "INSERT INTO users (/* ERROR: Invalid insert column */, email) VALUES (1, 'alice@example.com')",
-        writer.getWritten(),
-    );
+test "ast encoder insert shape validation fails closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const cols = [_]Expr{ Expr.col("id"), Expr.col("email") };
+    const values = [_]Value{.{ .int = 1 }};
+    var mismatch = QailCmd.add("users").select(&cols);
+    mismatch.insert_values = &values;
+
+    var mismatch_buf: [512]u8 = undefined;
+    var mismatch_writer = io.FixedBufferWriter.init(&mismatch_buf);
+    try std.testing.expectError(error.InvalidInsertShape, encoder.writeAstToSql(mismatch_writer.writer(), &mismatch));
+
+    var empty = QailCmd.add("users");
+    var empty_buf: [512]u8 = undefined;
+    var empty_writer = io.FixedBufferWriter.init(&empty_buf);
+    try std.testing.expectError(error.MissingInsertValues, encoder.writeAstToSql(empty_writer.writer(), &empty));
+
+    const defaults_cols = [_]Expr{Expr.col("id")};
+    var defaults = QailCmd.add("users").defaultValues().select(&defaults_cols);
+    var defaults_buf: [512]u8 = undefined;
+    var defaults_writer = io.FixedBufferWriter.init(&defaults_buf);
+    try std.testing.expectError(error.InvalidInsertShape, encoder.writeAstToSql(defaults_writer.writer(), &defaults));
+
+    const source_cols = [_]Expr{Expr.col("id")};
+    const source = QailCmd.get("users_archive").select(&source_cols);
+    var ambiguous = QailCmd.add("users").withSourceQuery(&source);
+    ambiguous.insert_values = &values;
+    var ambiguous_buf: [512]u8 = undefined;
+    var ambiguous_writer = io.FixedBufferWriter.init(&ambiguous_buf);
+    try std.testing.expectError(error.InvalidInsertShape, encoder.writeAstToSql(ambiguous_writer.writer(), &ambiguous));
+}
+
+test "ast encoder conflict update shape validation fails closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const assignments = [_]ast.cmd.Assignment{.{ .column = "email", .value = .{ .string = "a@example.com" } }};
+    const no_target_conflict = ast.cmd.OnConflict{
+        .columns = &.{},
+        .action = .do_update,
+        .update_columns = &assignments,
+    };
+    var no_target = QailCmd.add("users").onConflictDo(no_target_conflict);
+    no_target.assignments = &assignments;
+
+    var no_target_buf: [512]u8 = undefined;
+    var no_target_writer = io.FixedBufferWriter.init(&no_target_buf);
+    try std.testing.expectError(error.InvalidOnConflictShape, encoder.writeAstToSql(no_target_writer.writer(), &no_target));
+
+    const target_cols = [_][]const u8{"id"};
+    const no_assign_conflict = ast.cmd.OnConflict{
+        .columns = &target_cols,
+        .action = .do_update,
+        .update_columns = &.{},
+    };
+    var no_assign = QailCmd.add("users").onConflictDo(no_assign_conflict);
+    const values = [_]Value{.{ .int = 1 }};
+    no_assign.insert_values = &values;
+
+    var no_assign_buf: [512]u8 = undefined;
+    var no_assign_writer = io.FixedBufferWriter.init(&no_assign_buf);
+    try std.testing.expectError(error.InvalidOnConflictShape, encoder.writeAstToSql(no_assign_writer.writer(), &no_assign));
 }
 
 test "ast encoder create view uses typed source query" {
