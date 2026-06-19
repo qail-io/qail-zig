@@ -15,6 +15,7 @@ pub fn buildFetch(
     cursor_name: []const u8,
     batch_size: usize,
 ) ![]u8 {
+    if (batch_size == 0) return error.InvalidCursorBatchSize;
     const quoted_cursor = try quoteIdentifierAlloc(allocator, cursor_name);
     defer allocator.free(quoted_cursor);
     return std.fmt.allocPrint(allocator, "FETCH {d} FROM {s}", .{ batch_size, quoted_cursor });
@@ -69,4 +70,8 @@ test "cursor sql builders quote unsafe cursor names" {
 
     try std.testing.expectError(error.InvalidCursorName, buildClose(std.testing.allocator, ""));
     try std.testing.expectError(error.InvalidCursorName, buildClose(std.testing.allocator, "bad\x00name"));
+}
+
+test "cursor sql builders reject zero batch size" {
+    try std.testing.expectError(error.InvalidCursorBatchSize, buildFetch(std.testing.allocator, "c1", 0));
 }
