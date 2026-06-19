@@ -69,12 +69,16 @@ pub fn buildSnapshotTableInsertSql(
 }
 
 fn quoteSqlStringLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidStringLiteral;
+    if (std.mem.indexOfScalar(u8, value, '\\') != null) {
+        return try quoteDollarStringLiteralAlloc(allocator, value, "qail_lit");
+    }
+
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     try out.append(allocator, '\'');
     for (value) |ch| {
-        if (ch == 0) return error.InvalidStringLiteral;
         if (ch == '\'') {
             try out.appendSlice(allocator, "''");
         } else {
@@ -83,6 +87,29 @@ fn quoteSqlStringLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) !
     }
     try out.append(allocator, '\'');
     return try out.toOwnedSlice(allocator);
+}
+
+fn quoteDollarStringLiteralAlloc(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+    base_tag: []const u8,
+) ![]u8 {
+    var idx: usize = 0;
+    while (idx <= value.len) : (idx += 1) {
+        const tag = if (idx == 0)
+            try allocator.dupe(u8, base_tag)
+        else
+            try std.fmt.allocPrint(allocator, "{s}_{d}", .{ base_tag, idx });
+        defer allocator.free(tag);
+
+        const delimiter = try std.fmt.allocPrint(allocator, "${s}$", .{tag});
+        defer allocator.free(delimiter);
+
+        if (std.mem.indexOf(u8, value, delimiter) != null) continue;
+        return try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ delimiter, value, delimiter });
+    }
+
+    return error.InvalidStringLiteral;
 }
 
 test "build snapshot column insert sql" {
@@ -123,4 +150,18 @@ test "snapshot sql quotes values and rejects unsafe identifiers" {
         error.InvalidStringLiteral,
         buildSnapshotTableInsertSql(std.testing.allocator, "v\x001", "users"),
     );
+}
+
+test "snapshot sql dollar quotes values containing backslashes" {
+    const sql = try buildSnapshotTableInsertSql(std.testing.allocator, "v\\1", "users");
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "$qail_lit$v\\1$qail_lit$") != null);
+}
+
+test "snapshot sql avoids dollar quote delimiter collisions" {
+    const sql = try buildSnapshotTableInsertSql(std.testing.allocator, "v $qail_lit$ \\ 1", "users");
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "$qail_lit_1$v $qail_lit$ \\ 1$qail_lit_1$") != null);
 }

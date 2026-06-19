@@ -171,12 +171,11 @@ pub fn buildStartLogicalReplicationSql(
 
             if (i > 0) try sql.appendSlice(allocator, ", ");
             try sql.appendSlice(allocator, opt.key);
-            try sql.appendSlice(allocator, " '");
+            try sql.append(allocator, ' ');
 
-            const escaped = try quoteSingleLiteralAlloc(allocator, opt.value);
-            defer allocator.free(escaped);
-            try sql.appendSlice(allocator, escaped);
-            try sql.append(allocator, '\'');
+            const literal = try quoteReplicationOptionLiteralAlloc(allocator, opt.value);
+            defer allocator.free(literal);
+            try sql.appendSlice(allocator, literal);
         }
         try sql.append(allocator, ')');
     }
@@ -330,12 +329,17 @@ fn validateIdent(kind: []const u8, ident: []const u8) !void {
     _ = kind;
 }
 
-fn quoteSingleLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+fn quoteReplicationOptionLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     if (std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidReplicationOption;
+
+    if (std.mem.indexOfScalar(u8, value, '\\') != null) {
+        return try quoteDollarLiteralAlloc(allocator, value, "qail_repl");
+    }
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
+    try out.append(allocator, '\'');
     for (value) |ch| {
         if (ch == '\'') {
             try out.appendSlice(allocator, "''");
@@ -343,8 +347,32 @@ fn quoteSingleLiteralAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u
             try out.append(allocator, ch);
         }
     }
+    try out.append(allocator, '\'');
 
     return try out.toOwnedSlice(allocator);
+}
+
+fn quoteDollarLiteralAlloc(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+    base_tag: []const u8,
+) ![]u8 {
+    var idx: usize = 0;
+    while (idx <= value.len) : (idx += 1) {
+        const tag = if (idx == 0)
+            try allocator.dupe(u8, base_tag)
+        else
+            try std.fmt.allocPrint(allocator, "{s}_{d}", .{ base_tag, idx });
+        defer allocator.free(tag);
+
+        const delimiter = try std.fmt.allocPrint(allocator, "${s}$", .{tag});
+        defer allocator.free(delimiter);
+
+        if (std.mem.indexOf(u8, value, delimiter) != null) continue;
+        return try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ delimiter, value, delimiter });
+    }
+
+    return error.InvalidReplicationOption;
 }
 
 fn postgresEpochMicrosNow() i64 {
@@ -372,6 +400,40 @@ test "build start logical replication sql" {
 
     try std.testing.expectEqualStrings(
         "START_REPLICATION SLOT slot_main LOGICAL 0/16B6C50 (proto_version '1', publication_names 'pub1,pub2')",
+        sql,
+    );
+}
+
+test "build start logical replication sql dollar quotes backslash option values" {
+    const sql = try buildStartLogicalReplicationSql(
+        std.testing.allocator,
+        "slot_main",
+        "0/16B6C50",
+        &.{
+            .{ .key = "publication_names", .value = "pub\\one" },
+        },
+    );
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "START_REPLICATION SLOT slot_main LOGICAL 0/16B6C50 (publication_names $qail_repl$pub\\one$qail_repl$)",
+        sql,
+    );
+}
+
+test "build start logical replication sql avoids dollar quote delimiter collisions" {
+    const sql = try buildStartLogicalReplicationSql(
+        std.testing.allocator,
+        "slot_main",
+        "0/16B6C50",
+        &.{
+            .{ .key = "publication_names", .value = "pub $qail_repl$ \\ one" },
+        },
+    );
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "START_REPLICATION SLOT slot_main LOGICAL 0/16B6C50 (publication_names $qail_repl_1$pub $qail_repl$ \\ one$qail_repl_1$)",
         sql,
     );
 }
