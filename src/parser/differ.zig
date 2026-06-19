@@ -216,7 +216,7 @@ fn validateNewExistingTableColumn(column: *const ColumnDef) !void {
 fn checkExpressionsEquivalent(left: []const u8, right: []const u8) bool {
     const normalized_left = stripRedundantOuterParens(std.mem.trim(u8, left, " \t\r\n"));
     const normalized_right = stripRedundantOuterParens(std.mem.trim(u8, right, " \t\r\n"));
-    return eqlIgnoreAsciiWhitespace(normalized_left, normalized_right);
+    return eqlCheckExpressionUnits(normalized_left, normalized_right);
 }
 
 fn stripRedundantOuterParens(input: []const u8) []const u8 {
@@ -300,6 +300,127 @@ fn eqlIgnoreAsciiWhitespace(left: []const u8, right: []const u8) bool {
         left_i += 1;
         right_i += 1;
     }
+}
+
+const CheckComparableUnit = union(enum) {
+    byte: u8,
+    identifier: []const u8,
+};
+
+const CheckExpressionScanner = struct {
+    input: []const u8,
+    index: usize = 0,
+    in_single: bool = false,
+
+    fn next(self: *CheckExpressionScanner) ?CheckComparableUnit {
+        if (!self.in_single) {
+            while (self.index < self.input.len and std.ascii.isWhitespace(self.input[self.index])) {
+                self.index += 1;
+            }
+        }
+        if (self.index >= self.input.len) return null;
+
+        const ch = self.input[self.index];
+        if (self.in_single) {
+            self.index += 1;
+            if (ch == '\'') {
+                if (self.index < self.input.len and self.input[self.index] == '\'') {
+                    self.index += 1;
+                } else {
+                    self.in_single = false;
+                }
+            }
+            return .{ .byte = ch };
+        }
+
+        if (ch == '\'') {
+            self.in_single = true;
+            self.index += 1;
+            return .{ .byte = ch };
+        }
+
+        if (ch == '"') {
+            if (self.quotedSimpleLowercaseIdentifier()) |identifier| {
+                return .{ .identifier = identifier };
+            }
+            self.index += 1;
+            return .{ .byte = ch };
+        }
+
+        if (isUnquotedCheckIdentifierStart(ch)) {
+            const start = self.index;
+            self.index += 1;
+            while (self.index < self.input.len and isUnquotedCheckIdentifierContinue(self.input[self.index])) {
+                self.index += 1;
+            }
+            return .{ .identifier = self.input[start..self.index] };
+        }
+
+        self.index += 1;
+        return .{ .byte = std.ascii.toLower(ch) };
+    }
+
+    fn quotedSimpleLowercaseIdentifier(self: *CheckExpressionScanner) ?[]const u8 {
+        const content_start = self.index + 1;
+        var idx = content_start;
+        while (idx < self.input.len) : (idx += 1) {
+            const ch = self.input[idx];
+            if (ch == '"') {
+                if (idx + 1 < self.input.len and self.input[idx + 1] == '"') return null;
+                const content = self.input[content_start..idx];
+                if (!isSimpleLowercaseIdentifier(content)) return null;
+                self.index = idx + 1;
+                return content;
+            }
+        }
+        return null;
+    }
+};
+
+fn eqlCheckExpressionUnits(left: []const u8, right: []const u8) bool {
+    var left_scanner = CheckExpressionScanner{ .input = left };
+    var right_scanner = CheckExpressionScanner{ .input = right };
+
+    while (true) {
+        const left_unit = left_scanner.next();
+        const right_unit = right_scanner.next();
+        if (left_unit == null or right_unit == null) return left_unit == null and right_unit == null;
+        if (!checkComparableUnitsEqual(left_unit.?, right_unit.?)) return false;
+    }
+}
+
+fn checkComparableUnitsEqual(left: CheckComparableUnit, right: CheckComparableUnit) bool {
+    return switch (left) {
+        .byte => |left_byte| switch (right) {
+            .byte => |right_byte| left_byte == right_byte,
+            .identifier => false,
+        },
+        .identifier => |left_identifier| switch (right) {
+            .byte => false,
+            .identifier => |right_identifier| std.ascii.eqlIgnoreCase(left_identifier, right_identifier),
+        },
+    };
+}
+
+fn isUnquotedCheckIdentifierStart(ch: u8) bool {
+    return std.ascii.isAlphabetic(ch) or ch == '_';
+}
+
+fn isUnquotedCheckIdentifierContinue(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.';
+}
+
+fn isSimpleLowercaseIdentifier(value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (!(isAsciiLower(value[0]) or value[0] == '_')) return false;
+    for (value[1..]) |ch| {
+        if (!(isAsciiLower(ch) or std.ascii.isDigit(ch) or ch == '_')) return false;
+    }
+    return true;
+}
+
+fn isAsciiLower(ch: u8) bool {
+    return ch >= 'a' and ch <= 'z';
 }
 
 /// Compute the difference between two schemas.
@@ -818,6 +939,56 @@ test "diff existing column multiple checks stay equivalent" {
     defer cmds.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
+test "diff existing column check ignores lowercase identifier quotes" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table schedule_patterns (
+        \\    interval integer check ("interval" > 0)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table schedule_patterns (
+        \\    interval integer check (interval > 0)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
+test "diff existing column check keeps non-simple identifier quotes distinct" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table schedule_patterns (
+        \\    interval integer check ("Interval" > 0)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table schedule_patterns (
+        \\    interval integer check (interval > 0)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedCheckConstraintDrift,
+        diffSchemas(allocator, &old, &new),
+    );
 }
 
 test "diff existing column extra check drift fails closed" {
