@@ -28,6 +28,8 @@ pub const GrantDef = struct {
 pub const TableDef = struct {
     name: []const u8,
     columns: std.ArrayList(ColumnDef),
+    enable_rls: bool = false,
+    force_rls: bool = false,
 
     pub fn init(allocator: Allocator, name: []const u8) TableDef {
         return .{

@@ -20,6 +20,11 @@ pub const RenderedSchemaSnapshot = struct {
     column_count: usize,
 };
 
+const LiveTableRls = struct {
+    enable: bool = false,
+    force: bool = false,
+};
+
 fn deinitFetchedRows(allocator: Allocator, rows: []@import("../driver/row.zig").PgRow) void {
     for (rows) |*row| {
         var owned = row.*;
@@ -66,6 +71,14 @@ fn deinitStringMap(allocator: Allocator, map: *std.StringHashMap([]u8)) void {
     while (it.next()) |entry| {
         allocator.free(entry.key_ptr.*);
         allocator.free(entry.value_ptr.*);
+    }
+    map.deinit();
+}
+
+fn deinitTableRlsMap(allocator: Allocator, map: *std.StringHashMap(LiveTableRls)) void {
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
     }
     map.deinit();
 }
@@ -195,6 +208,75 @@ fn collectBaseTables(
         const table_name = row.getByName("table_name") orelse continue;
         if (std.mem.startsWith(u8, table_name, "_qail_")) continue;
         try putStringSetKey(allocator, base_tables, table_name);
+    }
+}
+
+fn livePgBool(value: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "t") or
+        std.ascii.eqlIgnoreCase(trimmed, "true") or
+        std.mem.eql(u8, trimmed, "1"))
+    {
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "f") or
+        std.ascii.eqlIgnoreCase(trimmed, "false") or
+        std.mem.eql(u8, trimmed, "0"))
+    {
+        return false;
+    }
+    return error.InvalidLiveBoolean;
+}
+
+fn collectTableRls(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    base_tables: *const std.StringHashMap(void),
+    table_rls: *std.StringHashMap(LiveTableRls),
+) !void {
+    const joins = [_]Join{
+        .{
+            .kind = .inner,
+            .table = "pg_catalog.pg_namespace",
+            .alias = "ns",
+            .on_left = "ns.oid",
+            .on_right = "cls.relnamespace",
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_class")
+        .alias("cls")
+        .join(&joins)
+        .select(&.{
+            Expr.colAs("cls.relname", "table_name"),
+            Expr.colAs("cls.relrowsecurity", "enable_rls"),
+            Expr.colAs("cls.relforcerowsecurity", "force_rls"),
+        }).where(&.{
+            .{ .condition = .{ .column = "ns.nspname", .op = .eq, .value = .{ .string = "public" } } },
+            .{ .condition = .{ .column = "cls.relkind", .op = .eq, .value = .{ .string = "r" } } },
+        }).orderBy(&.{
+        .{ .column = "cls.relname", .order = .asc },
+    });
+    const rows = try pg.fetchAll(&cmd);
+    defer deinitFetchedRows(allocator, rows);
+
+    for (rows) |row| {
+        const table_name = row.getByName("table_name") orelse continue;
+        if (!base_tables.contains(table_name)) continue;
+
+        const enable = try livePgBool(row.getByName("enable_rls") orelse "false");
+        const force = try livePgBool(row.getByName("force_rls") orelse "false");
+        if (!enable and !force) continue;
+
+        const owned_name = try allocator.dupe(u8, table_name);
+        errdefer allocator.free(owned_name);
+        const gop = try table_rls.getOrPut(owned_name);
+        if (gop.found_existing) {
+            allocator.free(owned_name);
+        }
+        gop.value_ptr.* = .{
+            .enable = enable,
+            .force = force,
+        };
     }
 }
 
@@ -709,6 +791,16 @@ fn writeLiveColumnReference(
     }
 }
 
+fn writeLiveTableRls(
+    writer: anytype,
+    table_rls: *const std.StringHashMap(LiveTableRls),
+    table_name: []const u8,
+) !void {
+    const rls = table_rls.get(table_name) orelse return;
+    if (rls.enable) try writer.writeAll("    enable_rls\n");
+    if (rls.force) try writer.writeAll("    force_rls\n");
+}
+
 fn writeLivePolicies(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
@@ -920,6 +1012,10 @@ pub fn renderLiveSchemaSnapshot(
     defer deinitStringMap(allocator, &foreign_keys);
     try collectForeignKeyReferences(allocator, pg, &foreign_keys);
 
+    var table_rls = std.StringHashMap(LiveTableRls).init(allocator);
+    defer deinitTableRlsMap(allocator, &table_rls);
+    try collectTableRls(allocator, pg, &base_tables, &table_rls);
+
     const columns_cmd = QailCmd.get("information_schema.columns")
         .select(&.{
             Expr.col("table_name"),
@@ -954,6 +1050,7 @@ pub fn renderLiveSchemaSnapshot(
 
         if (current_table == null or !std.mem.eql(u8, current_table.?, table_name)) {
             if (current_table != null) {
+                try writeLiveTableRls(writer, &table_rls, current_table.?);
                 try writer.writeAll(")\n\n");
             }
             current_table = table_name;
@@ -1019,6 +1116,7 @@ pub fn renderLiveSchemaSnapshot(
     }
 
     if (current_table != null) {
+        try writeLiveTableRls(writer, &table_rls, current_table.?);
         try writer.writeAll(")\n");
     }
     try writeLivePolicies(allocator, pg, &base_tables, writer, current_table != null);
@@ -1100,6 +1198,36 @@ test "live snapshot renders multiple column checks" {
         " check (quantity >= 0) check (quantity <= 100)",
         rendered,
     );
+}
+
+test "live snapshot renders table row level security directives" {
+    const allocator = std.testing.allocator;
+
+    var table_rls = std.StringHashMap(LiveTableRls).init(allocator);
+    defer deinitTableRlsMap(allocator, &table_rls);
+    const owned_name = try allocator.dupe(u8, "orders");
+    const gop = try table_rls.getOrPut(owned_name);
+    if (gop.found_existing) allocator.free(owned_name);
+    gop.value_ptr.* = .{ .enable = true, .force = true };
+
+    var out = io_compat.AllocatingWriter.init(allocator);
+    defer out.deinit();
+    try writeLiveTableRls(out.writer(), &table_rls, "orders");
+    const rendered = try out.toOwnedSlice();
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "    enable_rls\n    force_rls\n",
+        rendered,
+    );
+}
+
+test "live postgres boolean parser accepts catalog boolean encodings" {
+    try std.testing.expect(try livePgBool("t"));
+    try std.testing.expect(try livePgBool("true"));
+    try std.testing.expect(!try livePgBool("f"));
+    try std.testing.expect(!try livePgBool("false"));
+    try std.testing.expectError(error.InvalidLiveBoolean, livePgBool("maybe"));
 }
 
 test "live foreign key helpers render default references and reject actions" {

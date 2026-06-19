@@ -682,8 +682,14 @@ const Parser = struct {
             if (c == '#') break;
             if (c == '-' and self.pos + 1 < self.input.len and self.input[self.pos + 1] == '-') break;
 
-            if (self.matchKeyword("primary_key") or self.matchKeyword("primary")) {
-                _ = self.matchKeyword("key"); // optional "key" part
+            if (self.matchKeyword("primary_key")) {
+                if (seen_primary_key) return error.DuplicateColumnConstraint;
+                if (seen_nullable) return error.InvalidColumnConstraint;
+                seen_primary_key = true;
+                result.primary_key = true;
+                result.nullable = false;
+            } else if (self.matchKeyword("primary")) {
+                if (!self.matchKeyword("key")) return error.InvalidColumnConstraint;
                 if (seen_primary_key) return error.DuplicateColumnConstraint;
                 if (seen_nullable) return error.InvalidColumnConstraint;
                 seen_primary_key = true;
@@ -898,6 +904,20 @@ const Parser = struct {
         };
     }
 
+    fn parseTableRlsDirective(self: *Parser, table: *TableDef) !bool {
+        if (self.matchKeyword("enable_rls")) {
+            if (table.enable_rls) return error.DuplicateTableDirective;
+            table.enable_rls = true;
+            return true;
+        }
+        if (self.matchKeyword("force_rls")) {
+            if (table.force_rls) return error.DuplicateTableDirective;
+            table.force_rls = true;
+            return true;
+        }
+        return false;
+    }
+
     fn parseTable(self: *Parser) !TableDef {
         if (!self.matchKeyword("table")) {
             return error.ExpectedTable;
@@ -918,6 +938,14 @@ const Parser = struct {
             if (self.current() == close_char) break;
             if (self.current() == null) break;
 
+            if (try self.parseTableRlsDirective(&table)) {
+                self.skipWhitespace();
+                if (self.current() == ',') {
+                    self.advance();
+                }
+                continue;
+            }
+
             const col = try self.parseColumn();
             for (table.columns.items) |existing| {
                 if (std.ascii.eqlIgnoreCase(existing.name, col.name)) {
@@ -936,6 +964,7 @@ const Parser = struct {
         }
 
         try self.expectChar(close_char);
+        while (try self.parseTableRlsDirective(&table)) {}
         if (table.columns.items.len == 0) return error.EmptyTable;
         try validateTableKeyTypes(&table);
         try validateTableCheckReferences(&table);
@@ -1977,6 +2006,57 @@ test "parse simple table" {
     try std.testing.expectEqualStrings("uuid", id.typ);
     try std.testing.expect(id.primary_key);
     try std.testing.expect(!id.nullable);
+}
+
+test "parse table row level security directives" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table orders {
+        \\    id uuid primary_key
+        \\    enable_rls
+        \\    force_rls
+        \\}
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const orders = schema.tables.items[0];
+    try std.testing.expectEqualStrings("orders", orders.name);
+    try std.testing.expect(orders.enable_rls);
+    try std.testing.expect(orders.force_rls);
+}
+
+test "parse trailing table row level security directives" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\) enable_rls force_rls
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const orders = schema.tables.items[0];
+    try std.testing.expect(orders.enable_rls);
+    try std.testing.expect(orders.force_rls);
+}
+
+test "parse duplicate table directives fails closed" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\    enable_rls
+        \\    enable_rls
+        \\)
+    ;
+
+    try std.testing.expectError(error.DuplicateTableDirective, Schema.parse(allocator, input));
 }
 
 test "parse multiple tables" {

@@ -245,6 +245,8 @@ fn renderTable(writer: anytype, table: *const parser.TableDef) !void {
         }
         try writer.writeAll("\n");
     }
+    if (table.enable_rls) try writer.writeAll("  enable_rls\n");
+    if (table.force_rls) try writer.writeAll("  force_rls\n");
     try writer.writeAll(")\n\n");
 }
 
@@ -308,6 +310,26 @@ fn renderSchemaText(allocator: Allocator, schema: *const parser.Schema) ![]u8 {
     }
 
     return try buf.toOwnedSlice();
+}
+
+test "schema renderer preserves table row level security directives" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\table orders (
+        \\  id uuid primary_key
+        \\  enable_rls
+        \\  force_rls
+        \\)
+    ;
+
+    var schema = try parser.Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const rendered = try renderSchemaText(allocator, &schema);
+    defer allocator.free(rendered);
+
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "  enable_rls\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "  force_rls\n") != null);
 }
 
 fn parseSchemaFile(allocator: Allocator, path: []const u8) !parser.Schema {

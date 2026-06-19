@@ -480,6 +480,18 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
                 .table = new_table.name,
                 .table_columns = cols,
             });
+            if (new_table.enable_rls) {
+                try cmds.append(allocator, MigrationCmd{
+                    .action = .enable_rls,
+                    .table = new_table.name,
+                });
+            }
+            if (new_table.force_rls) {
+                try cmds.append(allocator, MigrationCmd{
+                    .action = .force_rls,
+                    .table = new_table.name,
+                });
+            }
         }
     }
 
@@ -538,6 +550,28 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
 
             if (!try tableChecksEquivalent(allocator, old_table, &new_table)) {
                 return error.UnsupportedCheckConstraintDrift;
+            }
+
+            if (old_table.enable_rls != new_table.enable_rls) {
+                if (!old_table.enable_rls and new_table.enable_rls) {
+                    try cmds.append(allocator, MigrationCmd{
+                        .action = .enable_rls,
+                        .table = new_table.name,
+                    });
+                } else {
+                    return error.UnsupportedRlsDisable;
+                }
+            }
+
+            if (old_table.force_rls != new_table.force_rls) {
+                if (!old_table.force_rls and new_table.force_rls) {
+                    try cmds.append(allocator, MigrationCmd{
+                        .action = .force_rls,
+                        .table = new_table.name,
+                    });
+                } else {
+                    return error.UnsupportedRlsForceDisable;
+                }
             }
         }
     }
@@ -684,6 +718,105 @@ test "diff new table" {
     // New design: 1 create_table with full DDL (no separate add_column)
     try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
     try std.testing.expect(cmds.items[0].action == .create_table);
+}
+
+test "diff new table preserves row level security directives" {
+    const allocator = std.testing.allocator;
+
+    var old = try Schema.parse(allocator, "");
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\    enable_rls
+        \\    force_rls
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) allocator.free(cmd.table_columns);
+        }
+        cmds.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.create_table, cmds.items[0].action);
+    try std.testing.expectEqual(MigrationCmd.Action.enable_rls, cmds.items[1].action);
+    try std.testing.expectEqual(MigrationCmd.Action.force_rls, cmds.items[2].action);
+
+    const enable_sql = try cmds.items[1].toSql(allocator);
+    defer allocator.free(enable_sql);
+    try std.testing.expectEqualStrings("ALTER TABLE orders ENABLE ROW LEVEL SECURITY", enable_sql);
+
+    const force_cmd = try cmds.items[2].toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &force_cmd);
+    try std.testing.expectEqual(@import("../ast/cmd.zig").CmdKind.alter_force_rls, force_cmd.kind);
+    try std.testing.expectEqualStrings("orders", force_cmd.table);
+}
+
+test "diff existing table enables row level security only upward" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\    enable_rls
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.enable_rls, cmds.items[0].action);
+
+    try std.testing.expectError(error.UnsupportedRlsDisable, diffSchemas(allocator, &new, &old));
+}
+
+test "diff existing table forces row level security only upward" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\    enable_rls
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\    enable_rls
+        \\    force_rls
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.force_rls, cmds.items[0].action);
+
+    try std.testing.expectError(error.UnsupportedRlsForceDisable, diffSchemas(allocator, &new, &old));
 }
 
 test "diff new table preserves column check constraint" {

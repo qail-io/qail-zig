@@ -33,6 +33,10 @@ pub const MigrationCmd = struct {
         drop_policy,
         grant,
         revoke,
+        enable_rls,
+        disable_rls,
+        force_rls,
+        no_force_rls,
     };
 
     fn writeColumnType(writer: anytype, col: ColumnDef) !void {
@@ -246,6 +250,10 @@ pub const MigrationCmd = struct {
                 }
                 return error.MissingGrantDefinition;
             },
+            .enable_rls => .{ .kind = .alter_enable_rls, .table = self.table },
+            .disable_rls => .{ .kind = .alter_disable_rls, .table = self.table },
+            .force_rls => .{ .kind = .alter_force_rls, .table = self.table },
+            .no_force_rls => .{ .kind = .alter_no_force_rls, .table = self.table },
         };
     }
 
@@ -386,6 +394,18 @@ pub const MigrationCmd = struct {
                 }
                 try w.print(" ON {s} FROM {s}", .{ grant_cmd.on_object, grant_cmd.role });
             },
+            .enable_rls => {
+                try w.print("ALTER TABLE {s} ENABLE ROW LEVEL SECURITY", .{self.table});
+            },
+            .disable_rls => {
+                try w.print("ALTER TABLE {s} DISABLE ROW LEVEL SECURITY", .{self.table});
+            },
+            .force_rls => {
+                try w.print("ALTER TABLE {s} FORCE ROW LEVEL SECURITY", .{self.table});
+            },
+            .no_force_rls => {
+                try w.print("ALTER TABLE {s} NO FORCE ROW LEVEL SECURITY", .{self.table});
+            },
         }
 
         return writer.toOwnedSlice();
@@ -479,6 +499,18 @@ pub const MigrationCmd = struct {
                 } else {
                     try w.print("-- Cannot auto-rollback REVOKE (definition missing)", .{});
                 }
+            },
+            .enable_rls => {
+                try w.print("ALTER TABLE {s} DISABLE ROW LEVEL SECURITY", .{self.table});
+            },
+            .disable_rls => {
+                try w.print("ALTER TABLE {s} ENABLE ROW LEVEL SECURITY", .{self.table});
+            },
+            .force_rls => {
+                try w.print("ALTER TABLE {s} NO FORCE ROW LEVEL SECURITY", .{self.table});
+            },
+            .no_force_rls => {
+                try w.print("ALTER TABLE {s} FORCE ROW LEVEL SECURITY", .{self.table});
             },
         }
 
