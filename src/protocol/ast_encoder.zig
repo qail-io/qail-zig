@@ -392,11 +392,11 @@ pub const AstEncoder = struct {
             },
             .listen => {
                 try writer.writeAll("LISTEN ");
-                if (cmd.channel) |ch| try writer.writeAll(ch);
+                if (cmd.channel) |ch| try writeSingleIdentifierOrError(writer, ch);
             },
             .notify => {
                 try writer.writeAll("NOTIFY ");
-                if (cmd.channel) |ch| try writer.writeAll(ch);
+                if (cmd.channel) |ch| try writeSingleIdentifierOrError(writer, ch);
                 if (cmd.payload) |p| {
                     try writer.writeAll(", '");
                     try writeEscapedSqlString(writer, p);
@@ -406,7 +406,7 @@ pub const AstEncoder = struct {
             .unlisten => {
                 try writer.writeAll("UNLISTEN ");
                 if (cmd.channel) |ch| {
-                    try writer.writeAll(ch);
+                    try writeSingleIdentifierOrError(writer, ch);
                 } else {
                     try writer.writeByte('*');
                 }
@@ -416,20 +416,20 @@ pub const AstEncoder = struct {
             .rollback => try writer.writeAll("ROLLBACK"),
             .savepoint => {
                 try writer.writeAll("SAVEPOINT ");
-                if (cmd.savepoint_name) |name| try writer.writeAll(name);
+                if (cmd.savepoint_name) |name| try writeSingleIdentifierOrError(writer, name);
             },
             .release => {
                 try writer.writeAll("RELEASE SAVEPOINT ");
-                if (cmd.savepoint_name) |name| try writer.writeAll(name);
+                if (cmd.savepoint_name) |name| try writeSingleIdentifierOrError(writer, name);
             },
             .rollback_to => {
                 try writer.writeAll("ROLLBACK TO SAVEPOINT ");
-                if (cmd.savepoint_name) |name| try writer.writeAll(name);
+                if (cmd.savepoint_name) |name| try writeSingleIdentifierOrError(writer, name);
             },
             // DDL Commands
             .make => {
                 try writer.writeAll("CREATE TABLE IF NOT EXISTS ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 if (cmd.columns.len > 0) {
                     try writer.writeAll(" (");
                     for (cmd.columns, 0..) |col, i| {
@@ -512,7 +512,7 @@ pub const AstEncoder = struct {
                     try writer.writeAll(" (");
                     for (idx.columns, 0..) |col, i| {
                         if (i > 0) try writer.writeAll(", ");
-                        try writer.writeAll(col);
+                        try writeIdentifierOrError(writer, col);
                     }
                     try writer.writeAll(")");
                 }
@@ -627,7 +627,8 @@ pub const AstEncoder = struct {
                         try writeValue(writer, &val);
                     }
                 } else if (cmd.payload) |values_sql| {
-                    try writer.writeAll(values_sql);
+                    const values_fragment = checkedEnumValuesFragment(values_sql) orelse return error.UnsafeSqlFragment;
+                    try writer.writeAll(values_fragment);
                 } else {
                     return error.MissingEnumValues;
                 }
@@ -679,7 +680,8 @@ pub const AstEncoder = struct {
                     try writer.writeAll(mode.toSql());
                 } else if (cmd.payload) |mode| {
                     try writer.writeByte(' ');
-                    try writer.writeAll(mode);
+                    const canonical = checkedTableLockMode(mode) orelse return error.UnsafeSqlFragment;
+                    try writer.writeAll(canonical);
                 }
             },
             .explain => {
@@ -879,9 +881,9 @@ pub const AstEncoder = struct {
                 if (policy.table.len == 0) return error.MissingPolicyTable;
 
                 try writer.writeAll("CREATE POLICY ");
-                try writer.writeAll(policy.name);
+                try writeSingleIdentifierOrError(writer, policy.name);
                 try writer.writeAll(" ON ");
-                try writer.writeAll(policy.table);
+                try writeIdentifierOrError(writer, policy.table);
 
                 if (policy.permissiveness == .restrictive) {
                     try writer.writeAll(" AS RESTRICTIVE");
@@ -892,7 +894,7 @@ pub const AstEncoder = struct {
 
                 if (policy.role) |role| {
                     try writer.writeAll(" TO ");
-                    try writer.writeAll(role);
+                    try writeSingleIdentifierOrError(writer, role);
                 }
 
                 if (policy.using_expr) |using_expr| {
@@ -925,9 +927,9 @@ pub const AstEncoder = struct {
                 if (policy_table.len == 0) return error.MissingPolicyTable;
 
                 try writer.writeAll("DROP POLICY IF EXISTS ");
-                try writer.writeAll(policy_name);
+                try writeSingleIdentifierOrError(writer, policy_name);
                 try writer.writeAll(" ON ");
-                try writer.writeAll(policy_table);
+                try writeIdentifierOrError(writer, policy_table);
             },
             // Raw SQL (for backwards compat - should be avoided!)
             .raw => {
@@ -1207,13 +1209,13 @@ fn writeCtePrefix(writer: anytype, cmd: *const QailCmd) !void {
 
     for (cmd.ctes, 0..) |cte, i| {
         if (i > 0) try writer.writeAll(", ");
-        try writer.writeAll(cte.name);
+        try writeSingleIdentifierOrError(writer, cte.name);
 
         if (cte.columns.len > 0) {
             try writer.writeAll("(");
             for (cte.columns, 0..) |col, j| {
                 if (j > 0) try writer.writeAll(", ");
-                try writer.writeAll(col);
+                try writeSingleIdentifierOrError(writer, col);
             }
             try writer.writeAll(")");
         }
@@ -1830,6 +1832,70 @@ fn checkedSqlTypeFragment(fragment: []const u8) ?[]const u8 {
     return trimmed;
 }
 
+fn checkedEnumValuesFragment(fragment: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, fragment, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.indexOfScalar(u8, trimmed, 0) != null) return null;
+
+    var i: usize = 0;
+    var saw_value = false;
+    while (i < trimmed.len) {
+        while (i < trimmed.len and std.ascii.isWhitespace(trimmed[i])) : (i += 1) {}
+        if (i >= trimmed.len or trimmed[i] != '\'') return null;
+        i += 1;
+
+        while (i < trimmed.len) {
+            const c = trimmed[i];
+            if (c == 0) return null;
+            if (c == '\'') {
+                if (i + 1 < trimmed.len and trimmed[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                break;
+            }
+            i += 1;
+        } else return null;
+
+        saw_value = true;
+        while (i < trimmed.len and std.ascii.isWhitespace(trimmed[i])) : (i += 1) {}
+        if (i == trimmed.len) break;
+        if (trimmed[i] != ',') return null;
+        i += 1;
+    }
+
+    return if (saw_value) trimmed else null;
+}
+
+fn checkedTableLockMode(mode: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, mode, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "ACCESS SHARE") or
+        std.ascii.eqlIgnoreCase(trimmed, "ACCESS SHARE MODE"))
+        return ast.operators.TableLockMode.access_share.toSql();
+    if (std.ascii.eqlIgnoreCase(trimmed, "ROW SHARE") or
+        std.ascii.eqlIgnoreCase(trimmed, "ROW SHARE MODE"))
+        return ast.operators.TableLockMode.row_share.toSql();
+    if (std.ascii.eqlIgnoreCase(trimmed, "ROW EXCLUSIVE") or
+        std.ascii.eqlIgnoreCase(trimmed, "ROW EXCLUSIVE MODE"))
+        return ast.operators.TableLockMode.row_exclusive.toSql();
+    if (std.ascii.eqlIgnoreCase(trimmed, "SHARE UPDATE EXCLUSIVE") or
+        std.ascii.eqlIgnoreCase(trimmed, "SHARE UPDATE EXCLUSIVE MODE"))
+        return ast.operators.TableLockMode.share_update_exclusive.toSql();
+    if (std.ascii.eqlIgnoreCase(trimmed, "SHARE") or
+        std.ascii.eqlIgnoreCase(trimmed, "SHARE MODE"))
+        return ast.operators.TableLockMode.share.toSql();
+    if (std.ascii.eqlIgnoreCase(trimmed, "SHARE ROW EXCLUSIVE") or
+        std.ascii.eqlIgnoreCase(trimmed, "SHARE ROW EXCLUSIVE MODE"))
+        return ast.operators.TableLockMode.share_row_exclusive.toSql();
+    if (std.ascii.eqlIgnoreCase(trimmed, "EXCLUSIVE") or
+        std.ascii.eqlIgnoreCase(trimmed, "EXCLUSIVE MODE"))
+        return ast.operators.TableLockMode.exclusive.toSql();
+    if (std.ascii.eqlIgnoreCase(trimmed, "ACCESS EXCLUSIVE") or
+        std.ascii.eqlIgnoreCase(trimmed, "ACCESS EXCLUSIVE MODE"))
+        return ast.operators.TableLockMode.access_exclusive.toSql();
+    return null;
+}
+
 fn checkedPrivilege(privilege: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, privilege, " \t\r\n");
     if (std.ascii.eqlIgnoreCase(trimmed, "SELECT")) return "SELECT";
@@ -2095,6 +2161,14 @@ fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
         first = false;
         try writeIdentifierMaybeQuoted(writer, part);
     }
+}
+
+fn writeSingleIdentifierOrError(writer: anytype, value: []const u8) !void {
+    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) {
+        try writer.writeAll(INVALID_IDENTIFIER);
+        return;
+    }
+    try writeIdentifierMaybeQuoted(writer, value);
 }
 
 fn writeInsertTargetColumn(writer: anytype, expr: *const Expr) !void {
@@ -3438,6 +3512,87 @@ test "ast encoder escapes notify payload" {
     );
 }
 
+test "ast encoder quotes pubsub channels and savepoints defensively" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const notify_cmd = QailCmd.notifyChannel("events; DROP TABLE users; --", "ok");
+    var notify_buf: [256]u8 = undefined;
+    var notify_writer = io.FixedBufferWriter.init(&notify_buf);
+    try encoder.writeAstToSql(notify_writer.writer(), &notify_cmd);
+    try std.testing.expectEqualStrings(
+        "NOTIFY \"events; DROP TABLE users; --\", 'ok'",
+        notify_writer.getWritten(),
+    );
+
+    const savepoint_cmd = QailCmd.savepoint("sp; DROP TABLE users; --");
+    var savepoint_buf: [256]u8 = undefined;
+    var savepoint_writer = io.FixedBufferWriter.init(&savepoint_buf);
+    try encoder.writeAstToSql(savepoint_writer.writer(), &savepoint_cmd);
+    try std.testing.expectEqualStrings(
+        "SAVEPOINT \"sp; DROP TABLE users; --\"",
+        savepoint_writer.getWritten(),
+    );
+}
+
+test "ast encoder hardens ddl identifier lists and constrained fragments" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const make_cmd = QailCmd.make("users; DROP TABLE users; --");
+    var make_buf: [256]u8 = undefined;
+    var make_writer = io.FixedBufferWriter.init(&make_buf);
+    try encoder.writeAstToSql(make_writer.writer(), &make_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS \"users; DROP TABLE users; --\"",
+        make_writer.getWritten(),
+    );
+
+    const idx = ast.cmd.IndexDef{
+        .name = "idx_users_name",
+        .table = "users",
+        .columns = &.{"name; DROP TABLE users; --"},
+    };
+    const index_cmd = QailCmd.createIndex("users").withIndex(idx);
+    var index_buf: [256]u8 = undefined;
+    var index_writer = io.FixedBufferWriter.init(&index_buf);
+    try encoder.writeAstToSql(index_writer.writer(), &index_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE INDEX idx_users_name ON users (\"name; DROP TABLE users; --\")",
+        index_writer.getWritten(),
+    );
+
+    var enum_cmd = QailCmd{ .kind = .create_enum, .table = "mood", .payload = "'semi;inside', 'sad'" };
+    var enum_buf: [256]u8 = undefined;
+    var enum_writer = io.FixedBufferWriter.init(&enum_buf);
+    try encoder.writeAstToSql(enum_writer.writer(), &enum_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE TYPE mood AS ENUM ('semi;inside', 'sad')",
+        enum_writer.getWritten(),
+    );
+
+    var unsafe_enum = QailCmd{ .kind = .create_enum, .table = "mood", .payload = "'ok'); DROP TABLE users; --" };
+    var unsafe_enum_buf: [256]u8 = undefined;
+    var unsafe_enum_writer = io.FixedBufferWriter.init(&unsafe_enum_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(unsafe_enum_writer.writer(), &unsafe_enum));
+
+    var lock_cmd = QailCmd.lockTable("users");
+    lock_cmd.payload = "ACCESS EXCLUSIVE";
+    var lock_buf: [256]u8 = undefined;
+    var lock_writer = io.FixedBufferWriter.init(&lock_buf);
+    try encoder.writeAstToSql(lock_writer.writer(), &lock_cmd);
+    try std.testing.expectEqualStrings(
+        "LOCK TABLE users ACCESS EXCLUSIVE MODE",
+        lock_writer.getWritten(),
+    );
+
+    var unsafe_lock = QailCmd.lockTable("users");
+    unsafe_lock.payload = "ACCESS EXCLUSIVE; DROP TABLE users; --";
+    var unsafe_lock_buf: [256]u8 = undefined;
+    var unsafe_lock_writer = io.FixedBufferWriter.init(&unsafe_lock_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(unsafe_lock_writer.writer(), &unsafe_lock));
+}
+
 test "ast encoder create and drop database quote hyphenated names" {
     var encoder = AstEncoder.init(std.testing.allocator);
     defer encoder.deinit();
@@ -3510,6 +3665,61 @@ test "ast encoder create policy with typed predicates" {
         encoder.getWritten(),
         "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = 42) WITH CHECK (tenant_id = 42)",
     ) != null);
+}
+
+test "ast encoder quotes cte and policy identifiers defensively" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const source_cols = [_]Expr{Expr.col("id")};
+    const source = QailCmd.get("users").select(&source_cols);
+    const cte_columns = [_][]const u8{"id; DROP TABLE users; --"};
+    const ctes = [_]ast.cmd.CTEDef{ast.cmd.CTEDef.fromQueryColumns(
+        "active; DROP TABLE users; --",
+        &cte_columns,
+        &source,
+    )};
+    const cmd = QailCmd.get("active; DROP TABLE users; --").withCtes(&ctes);
+    var cte_buf: [512]u8 = undefined;
+    var cte_writer = io.FixedBufferWriter.init(&cte_buf);
+    try encoder.writeAstToSql(cte_writer.writer(), &cmd);
+    try std.testing.expectEqualStrings(
+        "WITH \"active; DROP TABLE users; --\"(\"id; DROP TABLE users; --\") AS (SELECT id FROM users) SELECT * FROM \"active; DROP TABLE users; --\"",
+        cte_writer.getWritten(),
+    );
+
+    const left = Expr.col("tenant_id");
+    const right = Expr.int(42);
+    const predicate: Expr = .{
+        .binary = .{
+            .left = &left,
+            .op = .eq,
+            .right = &right,
+        },
+    };
+    const policy = ast.cmd.PolicyDef.create(
+        "tenant; DROP TABLE users; --",
+        "orders; DROP TABLE orders; --",
+    )
+        .toRole("app; DROP ROLE app; --")
+        .usingExpr(predicate);
+    const policy_cmd = QailCmd.createPolicy(policy);
+    var policy_buf: [512]u8 = undefined;
+    var policy_writer = io.FixedBufferWriter.init(&policy_buf);
+    try encoder.writeAstToSql(policy_writer.writer(), &policy_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE POLICY \"tenant; DROP TABLE users; --\" ON \"orders; DROP TABLE orders; --\" FOR ALL TO \"app; DROP ROLE app; --\" USING (tenant_id = 42)",
+        policy_writer.getWritten(),
+    );
+
+    const drop_cmd = QailCmd.dropPolicy("tenant; DROP TABLE users; --", "orders; DROP TABLE orders; --");
+    var drop_buf: [256]u8 = undefined;
+    var drop_writer = io.FixedBufferWriter.init(&drop_buf);
+    try encoder.writeAstToSql(drop_writer.writer(), &drop_cmd);
+    try std.testing.expectEqualStrings(
+        "DROP POLICY IF EXISTS \"tenant; DROP TABLE users; --\" ON \"orders; DROP TABLE orders; --\"",
+        drop_writer.getWritten(),
+    );
 }
 
 test "ast encoder merge renders update and insert clauses" {
