@@ -94,8 +94,11 @@ pub const IoBuffer = struct {
         if (self.freeSpace() < n) {
             self.compact();
             if (self.freeSpace() < n) {
-                // Need to grow
-                const new_capacity = self.capacity * 2;
+                const required = std.math.add(usize, self.write_pos, n) catch return error.BufferTooLarge;
+                var new_capacity = if (self.capacity == 0) 1 else self.capacity;
+                while (new_capacity < required) {
+                    new_capacity = std.math.mul(usize, new_capacity, 2) catch return error.BufferTooLarge;
+                }
                 const new_data = try self.allocator.realloc(self.data, new_capacity);
                 self.data = new_data;
                 self.capacity = new_capacity;
@@ -283,6 +286,27 @@ test "IoBuffer basic operations" {
 
     try std.testing.expectEqual(@as(usize, 0), buf.len());
     try std.testing.expectEqual(@as(usize, 1024), buf.freeSpace());
+}
+
+test "IoBuffer ensureSpace grows to requested reservation" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 8);
+    defer buf.deinit();
+
+    try buf.ensureSpace(128);
+
+    try std.testing.expect(buf.freeSpace() >= 128);
+}
+
+test "IoBuffer ensureSpace handles zero capacity and overflow" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 0);
+    defer buf.deinit();
+
+    try buf.ensureSpace(1);
+    try std.testing.expect(buf.freeSpace() >= 1);
+
+    try std.testing.expectError(error.BufferTooLarge, buf.ensureSpace(std.math.maxInt(usize)));
 }
 
 test "IoBuffer message peek" {
