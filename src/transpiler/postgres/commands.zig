@@ -10,7 +10,7 @@ const QailCmd = ast.QailCmd;
 const render = @import("render.zig");
 
 pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
-    if (cmd.skip_locked and cmd.lock_mode == null) return error.SkipLockedRequiresLockMode;
+    try validateSelectShape(cmd);
 
     try writer.writeAll("SELECT ");
 
@@ -115,6 +115,8 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
 }
 
 pub fn writeUpdate(writer: anytype, cmd: *const QailCmd) !void {
+    try validateUpdateShape(cmd);
+
     if (cmd.only_table) {
         try writer.writeAll("UPDATE ONLY ");
     } else {
@@ -160,11 +162,20 @@ pub fn writeDelete(writer: anytype, cmd: *const QailCmd) !void {
     }
 }
 
-pub fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
+pub fn writeInsert(writer: anytype, cmd: *const QailCmd, include_conflict: bool) !void {
+    try validateInsertShape(cmd);
+
     try writer.writeAll("INSERT INTO ");
     try render.writeIdentifierOrError(writer, cmd.table);
 
-    if (!cmd.default_values and cmd.assignments.len > 0) {
+    if (!cmd.default_values and cmd.columns.len > 0) {
+        try writer.writeAll(" (");
+        for (cmd.columns, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeInsertTargetColumn(writer, &col);
+        }
+        try writer.writeAll(")");
+    } else if (!cmd.default_values and cmd.columns.len == 0 and cmd.assignments.len > 0) {
         try writer.writeAll(" (");
         for (cmd.assignments, 0..) |assign, i| {
             if (i > 0) try writer.writeAll(", ");
@@ -179,6 +190,20 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
 
     if (cmd.default_values) {
         try writer.writeAll(" DEFAULT VALUES");
+    } else if (cmd.source_query) |source_query| {
+        try writer.writeByte(' ');
+        try writeNestedQueryableCmd(writer, source_query);
+    } else if (cmd.raw_sql) |source_sql| {
+        try writer.writeByte(' ');
+        const checked_source = render.checkedReadOnlySubquerySql(source_sql) orelse "SELECT NULL WHERE FALSE";
+        try writer.writeAll(checked_source);
+    } else if (cmd.insert_values.len > 0) {
+        try writer.writeAll(" VALUES (");
+        for (cmd.insert_values, 0..) |value, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try render.writeValue(writer, &value);
+        }
+        try writer.writeAll(")");
     } else if (cmd.assignments.len > 0) {
         try writer.writeAll(" VALUES (");
         for (cmd.assignments, 0..) |assign, i| {
@@ -186,6 +211,43 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
             try render.writeValue(writer, &assign.value);
         }
         try writer.writeAll(")");
+    } else {
+        return error.MissingInsertValues;
+    }
+
+    if (include_conflict or cmd.on_conflict != null) {
+        if (cmd.on_conflict) |conflict| {
+            try writer.writeAll(" ON CONFLICT");
+            if (conflict.columns.len > 0) {
+                try writer.writeAll(" (");
+                for (conflict.columns, 0..) |col, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try render.writeIdentifierOrError(writer, col);
+                }
+                try writer.writeAll(")");
+            }
+
+            switch (conflict.action) {
+                .do_nothing => try writer.writeAll(" DO NOTHING"),
+                .do_update => {
+                    const updates = if (conflict.update_columns.len != 0) conflict.update_columns else cmd.assignments;
+                    try writer.writeAll(" DO UPDATE SET ");
+                    for (updates, 0..) |assign, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try render.writeIdentifierOrError(writer, assign.column);
+                        try writer.writeAll(" = ");
+                        if (conflict.update_columns.len != 0) {
+                            try render.writeValue(writer, &assign.value);
+                        } else {
+                            try writer.writeAll("EXCLUDED.");
+                            try render.writeIdentifierOrError(writer, assign.column);
+                        }
+                    }
+                },
+            }
+        } else {
+            try writer.writeAll(" ON CONFLICT DO NOTHING");
+        }
     }
 
     if (cmd.returning.len > 0) {
@@ -193,6 +255,119 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
         for (cmd.returning, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
             try render.writeExpr(writer, &col);
+        }
+    }
+}
+
+fn writeNestedQueryableCmd(writer: anytype, cmd: *const QailCmd) anyerror!void {
+    return switch (cmd.kind) {
+        .get, .with, .search, .over => writeSelect(writer, cmd),
+        else => error.UnsupportedNestedQueryCommand,
+    };
+}
+
+fn writeInsertTargetColumn(writer: anytype, column: *const ast.expr.Expr) !void {
+    switch (column.*) {
+        .named => |name| try render.writeIdentifierOrError(writer, name),
+        else => return error.InvalidInsertColumn,
+    }
+}
+
+fn validateSelectShape(cmd: *const QailCmd) !void {
+    if (cmd.assignments.len != 0) return error.InvalidSelectShape;
+    if (cmd.fetch_with_ties and cmd.order_by.len == 0) return error.FetchWithTiesRequiresOrderBy;
+    if (cmd.skip_locked and cmd.lock_mode == null) return error.SkipLockedRequiresLockMode;
+
+    if (cmd.sample_method != null and cmd.sample_percent == null) return error.MissingTableSamplePercent;
+    if (cmd.sample_percent) |pct| {
+        if (!std.math.isFinite(pct) or pct < 0 or pct > 100) return error.InvalidTableSamplePercent;
+        if (cmd.sample_method == null) return error.MissingTableSampleMethod;
+    }
+}
+
+fn validateInsertShape(cmd: *const QailCmd) !void {
+    const has_values = cmd.insert_values.len != 0;
+    const has_assignments = cmd.assignments.len != 0;
+    const has_source = cmd.source_query != null;
+    const has_raw_source = cmd.raw_sql != null;
+
+    if (cmd.default_values) {
+        if (cmd.columns.len != 0 or has_values or has_assignments or has_source or has_raw_source) {
+            return error.InvalidInsertShape;
+        }
+        try validateOnConflictShape(cmd);
+        return;
+    }
+
+    if (has_source and (has_raw_source or has_values or has_assignments)) return error.InvalidInsertShape;
+    if (has_raw_source and (has_values or has_assignments)) return error.InvalidInsertShape;
+    if (has_values and has_assignments) return error.InvalidInsertShape;
+    if (!has_source and !has_raw_source and !has_values and !has_assignments) return error.MissingInsertValues;
+
+    if (cmd.columns.len != 0) {
+        try validateInsertTargetColumns(cmd.columns);
+        const value_count = if (has_values) cmd.insert_values.len else if (has_assignments) cmd.assignments.len else 0;
+        if (value_count != 0 and cmd.columns.len != value_count) return error.InvalidInsertShape;
+    } else if (has_assignments) {
+        try validateAssignmentTargets(cmd.assignments);
+    }
+
+    try validateOnConflictShape(cmd);
+}
+
+fn validateUpdateShape(cmd: *const QailCmd) !void {
+    if (cmd.assignments.len == 0) return error.MissingUpdateAssignments;
+    if (cmd.columns.len != 0) return error.InvalidUpdateShape;
+    try validateAssignmentTargets(cmd.assignments);
+}
+
+fn validateOnConflictShape(cmd: *const QailCmd) !void {
+    const conflict = cmd.on_conflict orelse return;
+
+    try validateWriteTargetNames(conflict.columns);
+    switch (conflict.action) {
+        .do_nothing => {},
+        .do_update => {
+            if (conflict.columns.len == 0) return error.InvalidOnConflictShape;
+            const updates = if (conflict.update_columns.len != 0) conflict.update_columns else cmd.assignments;
+            if (updates.len == 0) return error.InvalidOnConflictShape;
+            try validateAssignmentTargets(updates);
+        },
+    }
+}
+
+fn validateInsertTargetColumns(columns: []const ast.expr.Expr) !void {
+    for (columns, 0..) |column, i| {
+        const name = switch (column) {
+            .named => |name| name,
+            else => return error.InvalidInsertColumn,
+        };
+        if (!isBareIdentifier(name)) return error.InvalidInsertColumn;
+
+        for (columns[0..i]) |prev| {
+            const prev_name = switch (prev) {
+                .named => |p| p,
+                else => continue,
+            };
+            if (std.ascii.eqlIgnoreCase(prev_name, name)) return error.DuplicateWriteTarget;
+        }
+    }
+}
+
+fn validateAssignmentTargets(assignments: []const ast.cmd.Assignment) !void {
+    for (assignments, 0..) |assignment, i| {
+        if (!isBareIdentifier(assignment.column)) return error.InvalidWriteTarget;
+        for (assignments[0..i]) |prev| {
+            if (std.ascii.eqlIgnoreCase(prev.column, assignment.column)) return error.DuplicateWriteTarget;
+        }
+    }
+}
+
+fn validateWriteTargetNames(columns: []const []const u8) !void {
+    for (columns, 0..) |column, i| {
+        if (!isBareIdentifier(column)) return error.InvalidWriteTarget;
+        for (columns[0..i]) |prev| {
+            if (std.ascii.eqlIgnoreCase(prev, column)) return error.DuplicateWriteTarget;
         }
     }
 }

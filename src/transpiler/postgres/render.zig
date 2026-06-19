@@ -471,7 +471,7 @@ fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
     return trimmed;
 }
 
-fn checkedReadOnlySubquerySql(value: []const u8) ?[]const u8 {
+pub fn checkedReadOnlySubquerySql(value: []const u8) ?[]const u8 {
     const checked = checkedSqlExprFragment(value) orelse return null;
     if (!startsWithReadOnlySubqueryKeyword(checked)) return null;
     return checked;

@@ -49,7 +49,8 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
         .get => try commands.writeSelect(writer, cmd),
         .set => try commands.writeUpdate(writer, cmd),
         .del => try commands.writeDelete(writer, cmd),
-        .add => try commands.writeInsert(writer, cmd),
+        .add => try commands.writeInsert(writer, cmd, false),
+        .put, .upsert => try commands.writeInsert(writer, cmd, true),
         .merge => try commands.writeMerge(writer, cmd),
         .truncate => try commands.writeTruncate(writer, cmd),
         .alter_add_constraint => {
@@ -412,6 +413,130 @@ test "transpile insert with returning" {
         "INSERT INTO users (name) VALUES ('Bob') RETURNING id",
         sql,
     );
+}
+
+test "transpile insert with target columns and values" {
+    const cols = [_]Expr{ Expr.col("id"), Expr.col("email") };
+    const values = [_]Value{ .{ .int = 1 }, .{ .string = "alice@example.com" } };
+    var cmd = QailCmd.add("users").select(&cols);
+    cmd.insert_values = &values;
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (id, email) VALUES (1, 'alice@example.com')",
+        sql,
+    );
+}
+
+test "transpile insert with conflict update" {
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "email", .value = .{ .string = "alice@example.com" } },
+        .{ .column = "name", .value = .{ .string = "Alice" } },
+    };
+    const target_cols = [_][]const u8{"email"};
+    const conflict = ast.cmd.OnConflict{
+        .columns = &target_cols,
+        .action = .do_update,
+    };
+    const cmd = QailCmd.add("users").values(&assigns).onConflictDo(conflict);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (email, name) VALUES ('alice@example.com', 'Alice') ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name",
+        sql,
+    );
+}
+
+test "transpile put defaults to conflict do nothing" {
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "email", .value = .{ .string = "alice@example.com" } },
+    };
+    const cmd = QailCmd.put("users").values(&assigns);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (email) VALUES ('alice@example.com') ON CONFLICT DO NOTHING",
+        sql,
+    );
+}
+
+test "transpile select shape validation fails closed" {
+    const fetch_ties = QailCmd.get("events").fetchWithTies(5);
+    try std.testing.expectError(error.FetchWithTiesRequiresOrderBy, toSql(std.testing.allocator, &fetch_ties));
+
+    const sample = QailCmd.get("events").tablesampleSystem(std.math.nan(f64));
+    try std.testing.expectError(error.InvalidTableSamplePercent, toSql(std.testing.allocator, &sample));
+
+    var missing_method = QailCmd.get("events");
+    missing_method.sample_percent = 12.5;
+    try std.testing.expectError(error.MissingTableSampleMethod, toSql(std.testing.allocator, &missing_method));
+}
+
+test "transpile update shape validation fails closed" {
+    const empty = QailCmd.set("kb");
+    try std.testing.expectError(error.MissingUpdateAssignments, toSql(std.testing.allocator, &empty));
+
+    const cols = [_]Expr{Expr.col("archived")};
+    const assigns = [_]ast.cmd.Assignment{.{ .column = "archived", .value = .{ .bool = true } }};
+    const ambiguous = QailCmd.set("kb").select(&cols).values(&assigns);
+    try std.testing.expectError(error.InvalidUpdateShape, toSql(std.testing.allocator, &ambiguous));
+
+    const dup_assigns = [_]ast.cmd.Assignment{
+        .{ .column = "status", .value = .{ .string = "ready" } },
+        .{ .column = "STATUS", .value = .{ .string = "closed" } },
+    };
+    const duplicate = QailCmd.set("kb").values(&dup_assigns);
+    try std.testing.expectError(error.DuplicateWriteTarget, toSql(std.testing.allocator, &duplicate));
+}
+
+test "transpile insert shape validation fails closed" {
+    const cols = [_]Expr{ Expr.col("id"), Expr.col("email") };
+    const values = [_]Value{.{ .int = 1 }};
+    var mismatch = QailCmd.add("users").select(&cols);
+    mismatch.insert_values = &values;
+    try std.testing.expectError(error.InvalidInsertShape, toSql(std.testing.allocator, &mismatch));
+
+    const empty = QailCmd.add("users");
+    try std.testing.expectError(error.MissingInsertValues, toSql(std.testing.allocator, &empty));
+
+    const defaults_cols = [_]Expr{Expr.col("id")};
+    const defaults = QailCmd.add("users").defaultValues().select(&defaults_cols);
+    try std.testing.expectError(error.InvalidInsertShape, toSql(std.testing.allocator, &defaults));
+
+    const source_cols = [_]Expr{Expr.col("id")};
+    const source = QailCmd.get("users_archive").select(&source_cols);
+    var ambiguous = QailCmd.add("users").withSourceQuery(&source);
+    ambiguous.insert_values = &values;
+    try std.testing.expectError(error.InvalidInsertShape, toSql(std.testing.allocator, &ambiguous));
+}
+
+test "transpile conflict update shape validation fails closed" {
+    const assignments = [_]ast.cmd.Assignment{.{ .column = "email", .value = .{ .string = "a@example.com" } }};
+    const no_target_conflict = ast.cmd.OnConflict{
+        .columns = &.{},
+        .action = .do_update,
+        .update_columns = &assignments,
+    };
+    var no_target = QailCmd.add("users").onConflictDo(no_target_conflict);
+    no_target.assignments = &assignments;
+    try std.testing.expectError(error.InvalidOnConflictShape, toSql(std.testing.allocator, &no_target));
+
+    const target_cols = [_][]const u8{"id"};
+    const no_assign_conflict = ast.cmd.OnConflict{
+        .columns = &target_cols,
+        .action = .do_update,
+        .update_columns = &.{},
+    };
+    var no_assign = QailCmd.add("users").onConflictDo(no_assign_conflict);
+    const values = [_]Value{.{ .int = 1 }};
+    no_assign.insert_values = &values;
+    try std.testing.expectError(error.InvalidOnConflictShape, toSql(std.testing.allocator, &no_assign));
 }
 
 test "transpile update with where" {
@@ -777,27 +902,17 @@ test "trusted transpiler expression fragments fail closed" {
     );
 }
 
-test "trusted transpiler hardens mutation target identifiers" {
+test "trusted transpiler rejects mutation target identifiers" {
     const assignments = [_]ast.cmd.Assignment{.{
         .column = "name; DROP TABLE users; --",
         .value = .{ .string = "Alice" },
     }};
 
     const update_cmd = QailCmd.set("users").values(&assignments);
-    const update_sql = try toSqlTrusted(std.testing.allocator, &update_cmd);
-    defer std.testing.allocator.free(update_sql);
-    try std.testing.expectEqualStrings(
-        "UPDATE users SET \"name; DROP TABLE users; --\" = 'Alice'",
-        update_sql,
-    );
+    try std.testing.expectError(error.InvalidWriteTarget, toSqlTrusted(std.testing.allocator, &update_cmd));
 
     const insert_cmd = QailCmd.add("users").values(&assignments);
-    const insert_sql = try toSqlTrusted(std.testing.allocator, &insert_cmd);
-    defer std.testing.allocator.free(insert_sql);
-    try std.testing.expectEqualStrings(
-        "INSERT INTO users (\"name; DROP TABLE users; --\") VALUES ('Alice')",
-        insert_sql,
-    );
+    try std.testing.expectError(error.InvalidWriteTarget, toSqlTrusted(std.testing.allocator, &insert_cmd));
 }
 
 test "trusted transpiler quotes condition column identifiers" {
