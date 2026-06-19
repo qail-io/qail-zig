@@ -111,9 +111,26 @@ pub fn textToFloat64(text: []const u8) !f64 {
     return std.fmt.parseFloat(f64, text);
 }
 
-/// Parse text representation to bool
-pub fn textToBool(text: []const u8) bool {
-    return text.len > 0 and (text[0] == 't' or text[0] == 'T' or text[0] == '1');
+/// Parse PostgreSQL text bool representation.
+pub fn textToBool(text: []const u8) ?bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (std.mem.eql(u8, trimmed, "t") or
+        std.mem.eql(u8, trimmed, "T") or
+        std.mem.eql(u8, trimmed, "true") or
+        std.mem.eql(u8, trimmed, "TRUE") or
+        std.mem.eql(u8, trimmed, "1"))
+    {
+        return true;
+    }
+    if (std.mem.eql(u8, trimmed, "f") or
+        std.mem.eql(u8, trimmed, "F") or
+        std.mem.eql(u8, trimmed, "false") or
+        std.mem.eql(u8, trimmed, "FALSE") or
+        std.mem.eql(u8, trimmed, "0"))
+    {
+        return false;
+    }
+    return null;
 }
 
 // Tests
@@ -134,8 +151,11 @@ test "text to int32" {
 }
 
 test "text to bool" {
-    try std.testing.expect(textToBool("t"));
-    try std.testing.expect(textToBool("true"));
-    try std.testing.expect(!textToBool("f"));
-    try std.testing.expect(!textToBool("false"));
+    try std.testing.expectEqual(@as(?bool, true), textToBool("t"));
+    try std.testing.expectEqual(@as(?bool, true), textToBool("TRUE"));
+    try std.testing.expectEqual(@as(?bool, true), textToBool(" 1 "));
+    try std.testing.expectEqual(@as(?bool, false), textToBool("f"));
+    try std.testing.expectEqual(@as(?bool, false), textToBool("FALSE"));
+    try std.testing.expectEqual(@as(?bool, false), textToBool("0"));
+    try std.testing.expectEqual(@as(?bool, null), textToBool("truthy"));
 }

@@ -19,14 +19,16 @@ pub const Uuid = struct {
 
         var result: [16]u8 = undefined;
         var byte_idx: usize = 0;
-        var i: usize = 0;
 
-        while (i < 36 and byte_idx < 16) {
-            if (hex[i] == '-') {
+        var i: usize = 0;
+        while (i < hex.len) {
+            if (i == 8 or i == 13 or i == 18 or i == 23) {
+                if (hex[i] != '-') return error.InvalidUuidFormat;
                 i += 1;
                 continue;
             }
 
+            if (i + 1 >= hex.len) return error.InvalidUuidFormat;
             const high = try hexDigit(hex[i]);
             const low = try hexDigit(hex[i + 1]);
             result[byte_idx] = (high << 4) | low;
@@ -34,6 +36,7 @@ pub const Uuid = struct {
             i += 2;
         }
 
+        if (byte_idx != 16) return error.InvalidUuidFormat;
         return .{ .bytes = result };
     }
 
@@ -92,4 +95,11 @@ test "Uuid fromHex" {
     const uuid = try Uuid.fromHex("12345678-9abc-def0-1234-56789abcdef0");
     const expected = [_]u8{ 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 };
     try std.testing.expectEqual(expected, uuid.bytes);
+}
+
+test "Uuid fromHex rejects malformed shape" {
+    try std.testing.expectError(error.InvalidUuidFormat, Uuid.fromHex("123456789abc-def0-1234-56789abcdef0"));
+    try std.testing.expectError(error.InvalidUuidFormat, Uuid.fromHex("12345678_9abc-def0-1234-56789abcdef0"));
+    try std.testing.expectError(error.InvalidHexDigit, Uuid.fromHex("12345678-9abc-def0-1234-56789abcdefg"));
+    try std.testing.expectError(error.InvalidUuidLength, Uuid.fromHex("1234"));
 }

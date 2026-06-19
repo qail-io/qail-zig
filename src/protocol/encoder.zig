@@ -117,6 +117,18 @@ pub const Encoder = struct {
         return if (result_format == FORMAT_TEXT) 2 else 4;
     }
 
+    fn validateFormatCode(format: i16) !void {
+        switch (format) {
+            FORMAT_TEXT, FORMAT_BINARY => {},
+            else => return error.InvalidFormatCode,
+        }
+    }
+
+    fn validateFormatCodes(param_format: i16, result_format: i16) !void {
+        try validateFormatCode(param_format);
+        try validateFormatCode(result_format);
+    }
+
     fn writeParamFormats(self: *Encoder, param_format: i16) !void {
         if (param_format == FORMAT_TEXT) {
             try self.writeI16(0);
@@ -342,6 +354,7 @@ pub const Encoder = struct {
         param_format: i16,
         result_format: i16,
     ) !void {
+        try validateFormatCodes(param_format, result_format);
         if (params.len > std.math.maxInt(i16)) return error.TooManyParameters;
 
         var params_size: usize = 0;
@@ -617,6 +630,23 @@ test "encode bind with text param and binary result format" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, bytes[7..9]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, bytes[9..11]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0, 1 }, bytes[11..15]);
+}
+
+test "encode bind rejects invalid format codes" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try std.testing.expectError(
+        error.InvalidFormatCode,
+        encoder.encodeBindWithFormats("", "", &.{}, 2, Encoder.FORMAT_TEXT),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoder.getWritten().len);
+
+    try std.testing.expectError(
+        error.InvalidFormatCode,
+        encoder.encodeBindWithResultFormat("", "", &.{}, -1),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoder.getWritten().len);
 }
 
 test "encode parse rejects embedded nul in sql cstring" {

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const pg_types = @import("types/mod.zig");
+const protocol_types = @import("../protocol/types.zig");
 
 /// Borrowed row view for zero-copy streaming paths.
 ///
@@ -127,8 +128,7 @@ pub const PgRow = struct {
         } else if (T == f64) {
             return std.fmt.parseFloat(f64, raw) catch null;
         } else if (T == bool) {
-            if (raw.len == 0) return null;
-            return raw[0] == 't' or raw[0] == 'T' or raw[0] == '1';
+            return protocol_types.textToBool(raw);
         } else if (T == pg_types.Uuid) {
             if (raw.len == 16) {
                 return pg_types.Uuid.fromBytes(raw[0..16].*);
@@ -263,6 +263,27 @@ test "pgrow getInt32" {
     };
 
     try std.testing.expectEqual(@as(i32, 42), row.getInt32(0).?);
+}
+
+test "pgrow getBool parses strict PostgreSQL bool text" {
+    const columns = [_]?[]const u8{ "t", "f", "true", "false", "1", "0", "T", "FALSE", " 1 ", "truthy" };
+    const names = [_][]const u8{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j" };
+    const row = PgRow{
+        .columns = @constCast(&columns),
+        .field_names = &names,
+        .allocator = std.testing.allocator,
+    };
+
+    try std.testing.expectEqual(@as(?bool, true), row.getBool(0));
+    try std.testing.expectEqual(@as(?bool, false), row.getBool(1));
+    try std.testing.expectEqual(@as(?bool, true), row.getBool(2));
+    try std.testing.expectEqual(@as(?bool, false), row.getBool(3));
+    try std.testing.expectEqual(@as(?bool, true), row.getBool(4));
+    try std.testing.expectEqual(@as(?bool, false), row.getBool(5));
+    try std.testing.expectEqual(@as(?bool, true), row.getBool(6));
+    try std.testing.expectEqual(@as(?bool, false), row.getBool(7));
+    try std.testing.expectEqual(@as(?bool, true), row.getBool(8));
+    try std.testing.expectEqual(@as(?bool, null), row.getBool(9));
 }
 
 test "pgrow to struct" {
