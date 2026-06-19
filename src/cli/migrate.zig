@@ -1,5 +1,48 @@
 const std = @import("std");
 
+const MigrationFileNameParts = struct {
+    stem: []const u8,
+    name: []const u8,
+};
+
+fn isMigrationFileStemByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.';
+}
+
+fn parseMigrationUpFileName(file_name: []const u8) !MigrationFileNameParts {
+    if (!std.mem.endsWith(u8, file_name, ".up.qail")) return error.NotUpMigrationFile;
+
+    const stem = file_name[0 .. file_name.len - ".up.qail".len];
+    if (stem.len == 0) return error.InvalidMigrationFileName;
+
+    for (stem) |c| {
+        if (!isMigrationFileStemByte(c)) return error.InvalidMigrationFileName;
+    }
+
+    const split_idx = std.mem.indexOfScalar(u8, stem, '_');
+    const name = if (split_idx) |idx| blk: {
+        if (idx == 0 or idx + 1 >= stem.len) return error.InvalidMigrationFileName;
+        break :blk stem[idx + 1 ..];
+    } else stem;
+
+    if (name.len == 0) return error.InvalidMigrationFileName;
+    return .{ .stem = stem, .name = name };
+}
+
+fn pathContainsMigrationPhaseToken(path: []const u8, token: []const u8) bool {
+    var token_start: usize = 0;
+    var i: usize = 0;
+    while (i <= path.len) : (i += 1) {
+        if (i < path.len and std.ascii.isAlphanumeric(path[i])) continue;
+
+        if (i > token_start and std.mem.eql(u8, path[token_start..i], token)) {
+            return true;
+        }
+        token_start = i + 1;
+    }
+    return false;
+}
+
 pub fn make(comptime Cli: type) type {
     const Allocator = std.mem.Allocator;
     const QailCmd = @import("../ast/cmd.zig").QailCmd;
@@ -784,13 +827,7 @@ pub fn make(comptime Cli: type) type {
                 return phase_tag == phase;
             }
 
-            const token = applyPhaseToken(phase);
-            const dot_pat = try std.fmt.allocPrint(allocator, ".{s}.", .{token});
-            defer allocator.free(dot_pat);
-            const underscore_pat = try std.fmt.allocPrint(allocator, "_{s}_", .{token});
-            defer allocator.free(underscore_pat);
-
-            return std.mem.indexOf(u8, path, dot_pat) != null or std.mem.indexOf(u8, path, underscore_pat) != null;
+            return pathContainsMigrationPhaseToken(path, applyPhaseToken(phase));
         }
 
         fn collectUpMigrationFiles(allocator: Allocator) !std.ArrayList(MigrationFileEntry) {
@@ -807,20 +844,34 @@ pub fn make(comptime Cli: type) type {
             var iter = dir.iterate();
             while (try iter.next(io_iface)) |entry| {
                 if (entry.kind != .file) continue;
-                if (!std.mem.endsWith(u8, entry.name, ".up.qail")) continue;
+                const parts = parseMigrationUpFileName(entry.name) catch |err| switch (err) {
+                    error.NotUpMigrationFile => continue,
+                    else => return err,
+                };
 
-                const stem = entry.name[0 .. entry.name.len - ".up.qail".len];
-                const split_idx = std.mem.indexOfScalar(u8, stem, '_');
-                const name_slice = if (split_idx) |idx|
-                    stem[idx + 1 ..]
-                else
-                    stem;
+                for (entries.items) |existing| {
+                    if (std.mem.eql(u8, existing.version, parts.stem)) {
+                        return error.DuplicateMigrationVersion;
+                    }
+                    if (std.mem.eql(u8, existing.name, parts.name)) {
+                        return error.DuplicateMigrationName;
+                    }
+                }
 
-                try entries.append(allocator, .{
-                    .version = try allocator.dupe(u8, stem),
-                    .name = try allocator.dupe(u8, name_slice),
-                    .path = try std.fmt.allocPrint(allocator, "migrations/{s}", .{entry.name}),
-                });
+                {
+                    const version_copy = try allocator.dupe(u8, parts.stem);
+                    errdefer allocator.free(version_copy);
+                    const name_copy = try allocator.dupe(u8, parts.name);
+                    errdefer allocator.free(name_copy);
+                    const path_copy = try std.fmt.allocPrint(allocator, "migrations/{s}", .{entry.name});
+                    errdefer allocator.free(path_copy);
+
+                    try entries.append(allocator, .{
+                        .version = version_copy,
+                        .name = name_copy,
+                        .path = path_copy,
+                    });
+                }
             }
 
             std.mem.sort(MigrationFileEntry, entries.items, {}, lessThanMigrationFileEntry);
@@ -1850,4 +1901,43 @@ pub fn make(comptime Cli: type) type {
             return .{ .old = null, .new = null };
         }
     };
+}
+
+test "migration phase fallback matches exact filename tokens" {
+    try std.testing.expect(pathContainsMigrationPhaseToken(
+        "migrations/20260101010101_contract_cleanup.up.qail",
+        "contract",
+    ));
+    try std.testing.expect(pathContainsMigrationPhaseToken(
+        "migrations/20260101010101-contract-cleanup.up.qail",
+        "contract",
+    ));
+    try std.testing.expect(pathContainsMigrationPhaseToken(
+        "migrations/20260101010101.backfill.products.up.qail",
+        "backfill",
+    ));
+
+    try std.testing.expect(!pathContainsMigrationPhaseToken(
+        "migrations/20260101010101_add_tenant_contracts.up.qail",
+        "contract",
+    ));
+    try std.testing.expect(!pathContainsMigrationPhaseToken(
+        "migrations/20260101010101_backfilled_status.up.qail",
+        "backfill",
+    ));
+}
+
+test "migration up filenames reject malformed logical names" {
+    const valid = try parseMigrationUpFileName("20260101010101_create_users.up.qail");
+    try std.testing.expectEqualStrings("20260101010101_create_users", valid.stem);
+    try std.testing.expectEqualStrings("create_users", valid.name);
+
+    const dotted = try parseMigrationUpFileName("20260101010101.contract.users.up.qail");
+    try std.testing.expectEqualStrings("20260101010101.contract.users", dotted.name);
+
+    try std.testing.expectError(error.NotUpMigrationFile, parseMigrationUpFileName("notes.txt"));
+    try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName(".up.qail"));
+    try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("_init.up.qail"));
+    try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("001_.up.qail"));
+    try std.testing.expectError(error.InvalidMigrationFileName, parseMigrationUpFileName("001 add users.up.qail"));
 }
