@@ -697,11 +697,11 @@ pub const AstEncoder = struct {
             },
             .comment_on => {
                 try writer.writeAll("COMMENT ON ");
-                try writer.writeAll(cmd.table);
+                try writeCommentTarget(writer, cmd.table);
                 try writer.writeAll(" IS ");
                 if (cmd.payload) |comment| {
                     try writer.writeByte('\'');
-                    try writeEscapedSqlString(writer, comment);
+                    try writeEscapedSqlStringNoNul(writer, comment);
                     try writer.writeByte('\'');
                 } else {
                     try writer.writeAll("NULL");
@@ -1671,6 +1671,17 @@ fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
     }
 }
 
+fn writeEscapedSqlStringNoNul(writer: anytype, value: []const u8) !void {
+    for (value) |c| {
+        if (c == 0) continue;
+        if (c == '\'') {
+            try writer.writeAll("''");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+}
+
 fn containsUnquotedStatementDelimiter(value: []const u8) bool {
     var i: usize = 0;
     var in_single = false;
@@ -1819,6 +1830,60 @@ fn checkedPrivilege(privilege: []const u8) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(trimmed, "ALL") or
         std.ascii.eqlIgnoreCase(trimmed, "ALL PRIVILEGES")) return "ALL PRIVILEGES";
     return null;
+}
+
+fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
+    return value.len >= prefix.len and std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix);
+}
+
+fn isExplicitCommentTarget(trimmed: []const u8) bool {
+    return startsWithIgnoreCase(trimmed, "TABLE ") or
+        startsWithIgnoreCase(trimmed, "COLUMN ") or
+        startsWithIgnoreCase(trimmed, "FUNCTION ") or
+        startsWithIgnoreCase(trimmed, "TYPE ") or
+        startsWithIgnoreCase(trimmed, "POLICY ") or
+        startsWithIgnoreCase(trimmed, "CONSTRAINT ") or
+        startsWithIgnoreCase(trimmed, "INDEX ") or
+        startsWithIgnoreCase(trimmed, "SEQUENCE ") or
+        startsWithIgnoreCase(trimmed, "VIEW ") or
+        startsWithIgnoreCase(trimmed, "MATERIALIZED VIEW ") or
+        startsWithIgnoreCase(trimmed, "SCHEMA ");
+}
+
+fn writeQuotedIdentifierSkippingNul(writer: anytype, ident: []const u8) !void {
+    try writer.writeByte('"');
+    for (ident) |c| {
+        if (c == 0) continue;
+        if (c == '"') {
+            try writer.writeAll("\"\"");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeByte('"');
+}
+
+fn writeCommentTarget(writer: anytype, target: []const u8) !void {
+    const trimmed = std.mem.trim(u8, target, " \t\r\n");
+    if (isExplicitCommentTarget(trimmed)) {
+        if (containsUnquotedStatementDelimiter(trimmed)) {
+            try writer.writeAll("TABLE ");
+            try writeQuotedIdentifierSkippingNul(writer, trimmed);
+        } else {
+            try writer.writeAll(trimmed);
+        }
+        return;
+    }
+
+    if (std.mem.indexOfScalar(u8, trimmed, '.')) |dot| {
+        try writer.writeAll("COLUMN ");
+        try writeIdentifierOrError(writer, trimmed[0..dot]);
+        try writer.writeByte('.');
+        try writeIdentifierOrError(writer, trimmed[dot + 1 ..]);
+    } else {
+        try writer.writeAll("TABLE ");
+        try writeIdentifierOrError(writer, trimmed);
+    }
 }
 
 fn isValidQualifiedIdentifier(value: []const u8) bool {
@@ -2760,6 +2825,45 @@ test "ast encoder create enum from insert values" {
     try encoder.encodeQuery(&cmd);
     const bytes = encoder.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, bytes, "CREATE TYPE task_status AS ENUM") != null);
+}
+
+test "ast encoder comment targets are sanitized" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var table_comment = QailCmd.commentOn("users");
+    table_comment.payload = "owner's note";
+    var table_buf: [256]u8 = undefined;
+    var table_writer = io.FixedBufferWriter.init(&table_buf);
+    try encoder.writeAstToSql(table_writer.writer(), &table_comment);
+    try std.testing.expectEqualStrings("COMMENT ON TABLE users IS 'owner''s note'", table_writer.getWritten());
+
+    var column_comment = QailCmd.commentOn("users.email");
+    column_comment.payload = "email column";
+    var column_buf: [256]u8 = undefined;
+    var column_writer = io.FixedBufferWriter.init(&column_buf);
+    try encoder.writeAstToSql(column_writer.writer(), &column_comment);
+    try std.testing.expectEqualStrings("COMMENT ON COLUMN users.email IS 'email column'", column_writer.getWritten());
+
+    var function_comment = QailCmd.commentOn("FUNCTION public.cleanup(numeric(10,2), text)");
+    function_comment.payload = "cleanup helper";
+    var function_buf: [256]u8 = undefined;
+    var function_writer = io.FixedBufferWriter.init(&function_buf);
+    try encoder.writeAstToSql(function_writer.writer(), &function_comment);
+    try std.testing.expectEqualStrings(
+        "COMMENT ON FUNCTION public.cleanup(numeric(10,2), text) IS 'cleanup helper'",
+        function_writer.getWritten(),
+    );
+
+    var unsafe_comment = QailCmd.commentOn("TABLE users; DROP TABLE users; --");
+    unsafe_comment.payload = "owner's note\x00";
+    var unsafe_buf: [256]u8 = undefined;
+    var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
+    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_comment);
+    try std.testing.expectEqualStrings(
+        "COMMENT ON TABLE \"TABLE users; DROP TABLE users; --\" IS 'owner''s note'",
+        unsafe_writer.getWritten(),
+    );
 }
 
 test "ast encoder explain analyze" {

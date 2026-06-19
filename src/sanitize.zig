@@ -295,6 +295,45 @@ fn checkCommentFragment(field: []const u8, value: []const u8) ?SanitizeError {
     return null;
 }
 
+fn startsWithIgnoreCase(value: []const u8, prefix: []const u8) bool {
+    return value.len >= prefix.len and std.ascii.eqlIgnoreCase(value[0..prefix.len], prefix);
+}
+
+fn isExplicitCommentTarget(trimmed: []const u8) bool {
+    return startsWithIgnoreCase(trimmed, "TABLE ") or
+        startsWithIgnoreCase(trimmed, "COLUMN ") or
+        startsWithIgnoreCase(trimmed, "FUNCTION ") or
+        startsWithIgnoreCase(trimmed, "TYPE ") or
+        startsWithIgnoreCase(trimmed, "POLICY ") or
+        startsWithIgnoreCase(trimmed, "CONSTRAINT ") or
+        startsWithIgnoreCase(trimmed, "INDEX ") or
+        startsWithIgnoreCase(trimmed, "SEQUENCE ") or
+        startsWithIgnoreCase(trimmed, "VIEW ") or
+        startsWithIgnoreCase(trimmed, "MATERIALIZED VIEW ") or
+        startsWithIgnoreCase(trimmed, "SCHEMA ");
+}
+
+fn checkCommentTarget(field: []const u8, value: []const u8) ?SanitizeError {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return identError(field, value);
+
+    if (isExplicitCommentTarget(trimmed)) {
+        if (containsUnquotedStatementDelimiter(trimmed)) return rawError(field);
+        return null;
+    }
+
+    return checkIdent(field, trimmed);
+}
+
+fn checkCommentText(field: []const u8, value: []const u8) ?SanitizeError {
+    if (std.mem.indexOfScalar(u8, value, 0) == null) return null;
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "comment text cannot contain NUL",
+    };
+}
+
 fn checkValue(field: []const u8, value: *const Value) ?SanitizeError {
     return switch (value.*) {
         .column => |c| checkIdent("value.column", c),
@@ -669,7 +708,9 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     }
 
     if (cmd.table.len != 0) {
-        if (actionAllowsTableAlias(cmd.kind)) {
+        if (cmd.kind == .comment_on) {
+            if (checkCommentTarget("comment.target", cmd.table)) |err| return err;
+        } else if (actionAllowsTableAlias(cmd.kind)) {
             if (checkTableRef("table", cmd.table)) |err| return err;
         } else {
             if (checkIdent("table", cmd.table)) |err| return err;
@@ -814,7 +855,8 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
 
     if (cmd.payload) |payload| {
         switch (cmd.kind) {
-            .notify, .comment_on, .alter_enum_add_value => {},
+            .notify, .alter_enum_add_value => {},
+            .comment_on => if (checkCommentText("comment.text", payload)) |err| return err,
             .alter_add_constraint => {
                 if (cmd.channel == null) {
                     return .{

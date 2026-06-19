@@ -211,6 +211,30 @@ test "sanitize: grant privileges are allowlisted" {
     try std.testing.expectEqualStrings("privilege", injected_err.field);
 }
 
+test "sanitize: comment targets are guarded" {
+    var table_comment = QailCmd.commentOn("users");
+    table_comment.payload = "owner's note";
+    try std.testing.expect(validateCmd(&table_comment) == null);
+
+    var column_comment = QailCmd.commentOn("users.email");
+    column_comment.payload = "email column";
+    try std.testing.expect(validateCmd(&column_comment) == null);
+
+    var function_comment = QailCmd.commentOn("FUNCTION public.cleanup(numeric(10,2), text)");
+    function_comment.payload = "cleanup helper";
+    try std.testing.expect(validateCmd(&function_comment) == null);
+
+    var injected_target = QailCmd.commentOn("TABLE users; DROP TABLE users; --");
+    injected_target.payload = "bad";
+    const target_err = validateCmd(&injected_target).?;
+    try std.testing.expectEqualStrings("comment.target", target_err.field);
+
+    var nul_text = QailCmd.commentOn("users");
+    nul_text.payload = "owner\x00note";
+    const text_err = validateCmd(&nul_text).?;
+    try std.testing.expectEqualStrings("comment.text", text_err.field);
+}
+
 test "sanitize: raw default payload rejected" {
     var cmd = QailCmd{
         .kind = .alter_set_default,
