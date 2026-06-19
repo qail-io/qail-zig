@@ -75,7 +75,6 @@ pub const Connection = struct {
     pub fn readMessage(self: *Connection) !struct { msg_type: BackendMessage, payload: []const u8 } {
         const raw = try self.readMessageRawFast();
         const msg_type: BackendMessage = @enumFromInt(raw.msg_type);
-        try Decoder.validateBackendMessagePayload(msg_type, raw.payload);
         return .{
             .msg_type = msg_type,
             .payload = raw.payload,
@@ -106,7 +105,9 @@ pub const Connection = struct {
                 if (self.read_len - pos < total_len) break;
 
                 const msg_type = self.read_buffer[pos];
+                const payload = self.read_buffer[pos + 5 .. pos + total_len];
                 self.read_pos = pos + total_len;
+                try Decoder.validateBackendMessagePayloadByte(msg_type, payload);
 
                 switch (msg_type) {
                     'C', 'n' => {
@@ -140,7 +141,9 @@ pub const Connection = struct {
 
                 const total_len = len_field + 1;
                 if (available >= total_len) {
+                    const payload = self.read_buffer[pos + 5 .. pos + total_len];
                     self.read_pos = pos + total_len;
+                    try Decoder.validateBackendMessagePayloadByte(msg_type, payload);
                     return msg_type;
                 }
             }
@@ -168,6 +171,7 @@ pub const Connection = struct {
                 if (available >= total_len) {
                     const payload = self.read_buffer[pos + 5 .. pos + total_len];
                     self.read_pos = pos + total_len;
+                    try Decoder.validateBackendMessagePayloadByte(msg_type, payload);
                     return .{ .msg_type = msg_type, .payload = payload };
                 }
             }

@@ -42,12 +42,17 @@ pub const Decoder = struct {
             .close_complete,
             .portal_suspended,
             => if (payload.len != 0) return error.InvalidBackendMessagePayload,
+            .data_row => try decoder.validateDataRowPayload(),
             .error_response, .notice => _ = try decoder.parseErrorResponse(),
             .notification => _ = try decoder.parseNotificationResponse(),
             .parameter_status => _ = try decoder.parseParameterStatus(),
             .ready_for_query => _ = try decoder.parseReadyForQuery(),
             else => {},
         }
+    }
+
+    pub fn validateBackendMessagePayloadByte(msg_type: u8, payload: []const u8) !void {
+        try validateBackendMessagePayload(@enumFromInt(msg_type), payload);
     }
 
     // ==================== Reading Helpers ====================
@@ -386,6 +391,21 @@ pub const Decoder = struct {
         return columns;
     }
 
+    /// Validate a DataRow payload without allocating column storage.
+    pub fn validateDataRowPayload(self: *Decoder) !void {
+        const raw_count = self.readU16() catch return error.InvalidDataRowPayload;
+        const col_count: usize = @intCast(raw_count);
+
+        for (0..col_count) |_| {
+            const len = self.readI32() catch return error.InvalidDataRowPayload;
+            if (len == -1) continue;
+            if (len < -1) return error.InvalidDataRowPayload;
+            _ = self.readBytes(@intCast(len)) catch return error.InvalidDataRowPayload;
+        }
+
+        if (self.remaining() != 0) return error.InvalidDataRowPayload;
+    }
+
     /// Parse DataRow payload into caller-provided column slice.
     ///
     /// Returned slice aliases the provided `columns` storage and each non-null
@@ -470,7 +490,7 @@ pub const Decoder = struct {
 
     /// Parse CommandComplete message
     pub fn parseCommandComplete(self: *Decoder) ![]const u8 {
-        const tag = try self.readCString();
+        const tag = self.readCString() catch return error.InvalidCommandCompletePayload;
         if (tag.len == 0) return error.InvalidCommandCompletePayload;
         if (self.remaining() != 0) return error.InvalidCommandCompletePayload;
         return tag;
@@ -872,6 +892,16 @@ test "decode data row first column rejects trailing bytes" {
     try std.testing.expectError(error.InvalidDataRowPayload, decoder.parseDataRowFirstColumn());
 }
 
+test "validate backend payload rejects malformed data row" {
+    const missing_column_len = [_]u8{
+        0, 1, // one column, but no column length
+    };
+    try std.testing.expectError(
+        error.InvalidDataRowPayload,
+        Decoder.validateBackendMessagePayloadByte('D', &missing_column_len),
+    );
+}
+
 test "decode data row into caller buffer rejects undersized storage" {
     const payload = [_]u8{
         0, 2, // column count
@@ -933,6 +963,18 @@ test "decode command complete rejects trailing bytes" {
     var decoder = Decoder.init(&data);
 
     try std.testing.expectError(error.InvalidCommandCompletePayload, decoder.parseCommandComplete());
+}
+
+test "validate backend payload rejects malformed fast control frames" {
+    try std.testing.expectError(
+        error.InvalidCommandCompletePayload,
+        Decoder.validateBackendMessagePayloadByte('C', "SELECT 1"),
+    );
+
+    try std.testing.expectError(
+        error.InvalidReadyForQueryPayload,
+        Decoder.validateBackendMessagePayloadByte('Z', "II"),
+    );
 }
 
 test "decode command complete rejects empty tag" {
