@@ -818,6 +818,25 @@ test "trusted transpiler quotes condition column identifiers" {
     );
 }
 
+test "trusted transpiler quotes column value identifiers" {
+    const column_values = [_]Value{
+        Value.fromColumn("accounts.2nd_owner"),
+        Value.fromColumn("accounts..broken"),
+    };
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("owner_id", .eq, Value.fromColumn("accounts.1st_owner")),
+        ast.cmd.filter("backup_owner_id", .in, .{ .array = &column_values }),
+    };
+    const cmd = QailCmd.get("orders").where(&wheres);
+    const sql = try toSqlTrusted(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM orders WHERE owner_id = accounts.\"1st_owner\" AND backup_owner_id IN (accounts.\"2nd_owner\", /* ERROR: Invalid identifier */)",
+        sql,
+    );
+}
+
 test "trusted transpiler quotes expression identifiers and escapes json paths" {
     const name = Expr.col("name");
     const profile = Expr.col("profile");

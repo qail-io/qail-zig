@@ -683,5 +683,17 @@ fn writeFrameBound(writer: anytype, bound: ast.expr.FrameBound) !void {
 }
 
 pub fn writeValue(writer: anytype, val: *const Value) !void {
-    try val.format(writer);
+    try val.validateFinite();
+    switch (val.*) {
+        .column => |column| try writeIdentifierOrError(writer, column),
+        .array => |values| {
+            try writer.writeAll("ARRAY[");
+            for (values, 0..) |value, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeValue(writer, &value);
+            }
+            try writer.writeByte(']');
+        },
+        else => try val.format(writer),
+    }
 }
