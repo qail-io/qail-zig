@@ -367,6 +367,136 @@ fn collectCheckConstraints(
     }
 }
 
+fn collectForeignKeyReferences(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    refs: *std.StringHashMap([]u8),
+) !void {
+    const fk_constraints_cmd = QailCmd.get("information_schema.table_constraints")
+        .select(&.{
+            Expr.col("constraint_schema"),
+            Expr.col("constraint_name"),
+            Expr.col("table_name"),
+        }).where(&.{
+            .{ .condition = .{ .column = "table_schema", .op = .eq, .value = .{ .string = "public" } } },
+            .{ .condition = .{ .column = "constraint_type", .op = .eq, .value = .{ .string = "FOREIGN KEY" } } },
+        }).orderBy(&.{
+        .{ .column = "table_name", .order = .asc },
+        .{ .column = "constraint_name", .order = .asc },
+    });
+    const fk_constraints = try pg.fetchAll(&fk_constraints_cmd);
+    defer deinitFetchedRows(allocator, fk_constraints);
+
+    for (fk_constraints) |fk_constraint| {
+        const constraint_schema = fk_constraint.getByName("constraint_schema") orelse continue;
+        const constraint_name = fk_constraint.getByName("constraint_name") orelse continue;
+        const table_name = fk_constraint.getByName("table_name") orelse continue;
+        if (std.mem.startsWith(u8, table_name, "_qail_")) continue;
+
+        const rc_cmd = QailCmd.get("information_schema.referential_constraints")
+            .select(&.{
+                Expr.col("unique_constraint_schema"),
+                Expr.col("unique_constraint_name"),
+                Expr.col("match_option"),
+                Expr.col("update_rule"),
+                Expr.col("delete_rule"),
+            }).where(&.{
+                .{ .condition = .{ .column = "constraint_schema", .op = .eq, .value = .{ .string = constraint_schema } } },
+                .{ .condition = .{ .column = "constraint_name", .op = .eq, .value = .{ .string = constraint_name } } },
+            }).limit(2);
+        const refs_rows = try pg.fetchAll(&rc_cmd);
+        defer deinitFetchedRows(allocator, refs_rows);
+        if (refs_rows.len != 1) return error.InvalidLiveForeignKeyMetadata;
+
+        const unique_constraint_schema = refs_rows[0].getByName("unique_constraint_schema") orelse continue;
+        const unique_constraint_name = refs_rows[0].getByName("unique_constraint_name") orelse continue;
+        const match_option = refs_rows[0].getByName("match_option") orelse "";
+        const update_rule = refs_rows[0].getByName("update_rule") orelse "";
+        const delete_rule = refs_rows[0].getByName("delete_rule") orelse "";
+        if (!isSupportedLiveForeignKeyAction(match_option, update_rule, delete_rule)) {
+            return error.UnsupportedLiveForeignKeyAction;
+        }
+
+        const source_cols = try collectForeignKeyColumns(
+            pg,
+            constraint_schema,
+            constraint_name,
+            table_name,
+        );
+        defer deinitFetchedRows(allocator, source_cols);
+        if (source_cols.len != 1) return error.UnsupportedCompositeForeignKey;
+
+        const target_cols = try collectForeignKeyColumns(
+            pg,
+            unique_constraint_schema,
+            unique_constraint_name,
+            null,
+        );
+        defer deinitFetchedRows(allocator, target_cols);
+        if (target_cols.len != 1) return error.UnsupportedCompositeForeignKey;
+
+        const source_column = source_cols[0].getByName("column_name") orelse continue;
+        const target_schema = target_cols[0].getByName("table_schema") orelse continue;
+        const target_table = target_cols[0].getByName("table_name") orelse continue;
+        const target_column = target_cols[0].getByName("column_name") orelse continue;
+        if (!std.mem.eql(u8, target_schema, "public")) return error.UnsupportedCrossSchemaForeignKey;
+
+        const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, source_column });
+        const value = try std.fmt.allocPrint(allocator, "{s}({s})", .{ target_table, target_column });
+        try putOwnedStringMapValue(allocator, refs, key, value);
+    }
+}
+
+fn collectForeignKeyColumns(
+    pg: *@import("../driver/driver.zig").PgDriver,
+    constraint_schema: []const u8,
+    constraint_name: []const u8,
+    table_name: ?[]const u8,
+) ![]@import("../driver/row.zig").PgRow {
+    if (table_name) |source_table| {
+        const cmd = QailCmd.get("information_schema.key_column_usage")
+            .select(&.{
+                Expr.col("table_schema"),
+                Expr.col("table_name"),
+                Expr.col("column_name"),
+                Expr.col("ordinal_position"),
+                Expr.col("position_in_unique_constraint"),
+            }).where(&.{
+                .{ .condition = .{ .column = "constraint_schema", .op = .eq, .value = .{ .string = constraint_schema } } },
+                .{ .condition = .{ .column = "constraint_name", .op = .eq, .value = .{ .string = constraint_name } } },
+                .{ .condition = .{ .column = "table_name", .op = .eq, .value = .{ .string = source_table } } },
+            }).orderBy(&.{
+            .{ .column = "ordinal_position", .order = .asc },
+        });
+        return try pg.fetchAll(&cmd);
+    }
+
+    const cmd = QailCmd.get("information_schema.key_column_usage")
+        .select(&.{
+            Expr.col("table_schema"),
+            Expr.col("table_name"),
+            Expr.col("column_name"),
+            Expr.col("ordinal_position"),
+            Expr.col("position_in_unique_constraint"),
+        }).where(&.{
+            .{ .condition = .{ .column = "constraint_schema", .op = .eq, .value = .{ .string = constraint_schema } } },
+            .{ .condition = .{ .column = "constraint_name", .op = .eq, .value = .{ .string = constraint_name } } },
+        }).orderBy(&.{
+        .{ .column = "ordinal_position", .order = .asc },
+    });
+    return try pg.fetchAll(&cmd);
+}
+
+fn isSupportedLiveForeignKeyAction(
+    match_option: []const u8,
+    update_rule: []const u8,
+    delete_rule: []const u8,
+) bool {
+    return std.ascii.eqlIgnoreCase(match_option, "NONE") and
+        std.ascii.eqlIgnoreCase(update_rule, "NO ACTION") and
+        std.ascii.eqlIgnoreCase(delete_rule, "NO ACTION");
+}
+
 fn checkConstraintAnchorColumn(
     allocator: Allocator,
     table_name: []const u8,
@@ -569,6 +699,16 @@ fn writeLiveColumnChecks(
     }
 }
 
+fn writeLiveColumnReference(
+    writer: anytype,
+    refs: *const std.StringHashMap([]u8),
+    composite: []const u8,
+) !void {
+    if (refs.get(composite)) |reference| {
+        try writer.print(" references {s}", .{reference});
+    }
+}
+
 pub fn normalizePostgresType(
     udt_name: []const u8,
     data_type: []const u8,
@@ -667,6 +807,10 @@ pub fn renderLiveSchemaSnapshot(
     defer deinitCheckMap(allocator, &column_checks);
     try collectCheckConstraints(allocator, pg, &attnum_columns, &column_checks);
 
+    var foreign_keys = std.StringHashMap([]u8).init(allocator);
+    defer deinitStringMap(allocator, &foreign_keys);
+    try collectForeignKeyReferences(allocator, pg, &foreign_keys);
+
     const columns_cmd = QailCmd.get("information_schema.columns")
         .select(&.{
             Expr.col("table_name"),
@@ -759,6 +903,7 @@ pub fn renderLiveSchemaSnapshot(
                 try writer.print(" default {s}", .{default_sql});
             }
         }
+        try writeLiveColumnReference(writer, &foreign_keys, composite);
         try writeLiveColumnChecks(writer, &column_checks, composite);
         try writer.writeAll(",\n");
         column_count += 1;
@@ -845,6 +990,30 @@ test "live snapshot renders multiple column checks" {
         " check (quantity >= 0) check (quantity <= 100)",
         rendered,
     );
+}
+
+test "live foreign key helpers render default references and reject actions" {
+    try std.testing.expect(isSupportedLiveForeignKeyAction("NONE", "NO ACTION", "NO ACTION"));
+    try std.testing.expect(!isSupportedLiveForeignKeyAction("NONE", "CASCADE", "NO ACTION"));
+    try std.testing.expect(!isSupportedLiveForeignKeyAction("FULL", "NO ACTION", "NO ACTION"));
+
+    const allocator = std.testing.allocator;
+    var refs = std.StringHashMap([]u8).init(allocator);
+    defer deinitStringMap(allocator, &refs);
+    try putOwnedStringMapValue(
+        allocator,
+        &refs,
+        try allocator.dupe(u8, "orders.user_id"),
+        try allocator.dupe(u8, "users(id)"),
+    );
+
+    var out = io_compat.AllocatingWriter.init(allocator);
+    defer out.deinit();
+    try writeLiveColumnReference(out.writer(), &refs, "orders.user_id");
+    const rendered = try out.toOwnedSlice();
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(" references users(id)", rendered);
 }
 
 pub fn pullSchema(allocator: Allocator, url: []const u8) !void {
