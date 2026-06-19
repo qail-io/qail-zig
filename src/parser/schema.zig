@@ -26,6 +26,7 @@ pub const PolicyPermissiveness = schema_types.PolicyPermissiveness;
 pub const PolicyDef = schema_types.PolicyDef;
 pub const GrantAction = schema_types.GrantAction;
 pub const GrantDef = schema_types.GrantDef;
+pub const IndexDef = schema_types.IndexDef;
 pub const TableDef = schema_types.TableDef;
 pub const ColumnDef = schema_types.ColumnDef;
 
@@ -44,6 +45,7 @@ fn deinitPolicyDef(allocator: Allocator, policy: *const PolicyDef) void {
 /// Schema containing all table definitions
 pub const Schema = struct {
     tables: std.ArrayList(TableDef),
+    indexes: std.ArrayList(IndexDef),
     policies: std.ArrayList(PolicyDef),
     grants: std.ArrayList(GrantDef),
     allocator: Allocator,
@@ -51,6 +53,7 @@ pub const Schema = struct {
     pub fn init(allocator: Allocator) Schema {
         return .{
             .tables = std.ArrayList(TableDef).initCapacity(allocator, 0) catch unreachable,
+            .indexes = std.ArrayList(IndexDef).initCapacity(allocator, 0) catch unreachable,
             .policies = std.ArrayList(PolicyDef).initCapacity(allocator, 0) catch unreachable,
             .grants = std.ArrayList(GrantDef).initCapacity(allocator, 0) catch unreachable,
             .allocator = allocator,
@@ -61,6 +64,9 @@ pub const Schema = struct {
         for (self.tables.items) |*table| {
             table.deinit(self.allocator);
         }
+        for (self.indexes.items) |index| {
+            index.deinit(self.allocator);
+        }
         for (self.policies.items) |policy| {
             deinitPolicyDef(self.allocator, &policy);
         }
@@ -68,6 +74,7 @@ pub const Schema = struct {
             grant.deinit(self.allocator);
         }
         self.tables.deinit(self.allocator);
+        self.indexes.deinit(self.allocator);
         self.policies.deinit(self.allocator);
         self.grants.deinit(self.allocator);
     }
@@ -92,6 +99,15 @@ pub const Schema = struct {
         for (self.policies.items) |*policy| {
             if (std.ascii.eqlIgnoreCase(policy.name, name) and std.ascii.eqlIgnoreCase(policy.table, table)) {
                 return policy;
+            }
+        }
+        return null;
+    }
+
+    pub fn findIndex(self: *const Schema, name: []const u8) ?*const IndexDef {
+        for (self.indexes.items) |*index| {
+            if (std.ascii.eqlIgnoreCase(index.name, name)) {
+                return index;
             }
         }
         return null;
@@ -971,6 +987,85 @@ const Parser = struct {
         return table;
     }
 
+    fn parseIndexListFragment(self: *Parser, include_list: bool) ![]const u8 {
+        try self.expectChar('(');
+        const start = self.pos;
+        while (self.current()) |ch| {
+            if (ch == '\n' or ch == '\r' or ch == 0) return error.InvalidIndexColumns;
+            if (ch == ')') break;
+            self.advance();
+        }
+        if (self.current() != ')') return error.UnexpectedChar;
+        const fragment = std.mem.trim(u8, self.input[start..self.pos], " \t\r\n");
+        if (fragment.len == 0) return error.InvalidIndexColumns;
+        if (include_list) {
+            if (!isSafeSchemaIndexIdentifierList(fragment)) return error.InvalidIndexColumns;
+        } else {
+            if (!isSafeSchemaIndexElementList(fragment)) return error.InvalidIndexColumns;
+        }
+        self.advance();
+        return try self.allocator.dupe(u8, fragment);
+    }
+
+    fn parseIndexWhereClause(self: *Parser) !?[]const u8 {
+        if (!self.matchKeyword("where")) return null;
+        self.skipInlineWhitespace();
+        const start = self.pos;
+        while (self.current()) |ch| {
+            if (ch == '\n' or ch == '\r') break;
+            if (ch == '#') break;
+            if (ch == '-' and self.pos + 1 < self.input.len and self.input[self.pos + 1] == '-') break;
+            self.advance();
+        }
+        const fragment = std.mem.trim(u8, self.input[start..self.pos], " \t\r\n");
+        if (fragment.len == 0 or containsUnquotedStatementDelimiter(fragment)) return error.UnsafeSqlFragment;
+        return try self.allocator.dupe(u8, fragment);
+    }
+
+    fn parseIndex(self: *Parser) !IndexDef {
+        const unique = self.matchKeyword("unique");
+        if (!self.matchKeyword("index")) return error.ExpectedIndex;
+        const concurrently = self.matchKeyword("concurrently");
+
+        const name = try self.parseBareIdentifier();
+        errdefer self.allocator.free(name);
+        if (!self.matchKeyword("on")) return error.ExpectedIndexOn;
+        const table = try self.parseIdentifier();
+        errdefer self.allocator.free(table);
+
+        var index_type: ?[]const u8 = null;
+        errdefer if (index_type) |value| self.allocator.free(value);
+        if (self.matchKeyword("using")) {
+            const method = try self.parseBareIdentifier();
+            errdefer self.allocator.free(method);
+            if (!isAllowedSchemaIndexMethod(method)) return error.InvalidIndexMethod;
+            index_type = method;
+        }
+
+        const columns = try self.parseIndexListFragment(false);
+        errdefer self.allocator.free(columns);
+
+        var include: ?[]const u8 = null;
+        errdefer if (include) |value| self.allocator.free(value);
+        if (self.matchKeyword("include")) {
+            include = try self.parseIndexListFragment(true);
+        }
+
+        const where_clause = try self.parseIndexWhereClause();
+        errdefer if (where_clause) |value| self.allocator.free(value);
+
+        return .{
+            .name = name,
+            .table = table,
+            .columns = columns,
+            .unique = unique,
+            .index_type = index_type,
+            .include = include,
+            .concurrently = concurrently,
+            .where_clause = where_clause,
+        };
+    }
+
     pub fn parseSchema(self: *Parser) !Schema {
         var schema = Schema.init(self.allocator);
         errdefer schema.deinit();
@@ -987,6 +1082,22 @@ const Parser = struct {
                     return error.DuplicateTable;
                 }
                 try schema.tables.append(self.allocator, table);
+            } else if (self.matchKeyword("unique")) {
+                self.pos -= 6; // rewind "unique"
+                const index = try self.parseIndex();
+                if (schema.findIndex(index.name) != null) {
+                    index.deinit(self.allocator);
+                    return error.DuplicateIndex;
+                }
+                try schema.indexes.append(self.allocator, index);
+            } else if (self.matchKeyword("index")) {
+                self.pos -= 5; // rewind "index"
+                const index = try self.parseIndex();
+                if (schema.findIndex(index.name) != null) {
+                    index.deinit(self.allocator);
+                    return error.DuplicateIndex;
+                }
+                try schema.indexes.append(self.allocator, index);
             } else if (self.matchKeyword("policy")) {
                 self.pos -= 6; // rewind "policy"
                 const policy = try self.parsePolicy();
@@ -1009,14 +1120,182 @@ const Parser = struct {
         }
 
         try validateSchemaForeignKeys(&schema);
+        try validateSchemaIndexes(&schema);
         return schema;
     }
 };
+
+fn containsUnquotedStatementDelimiter(value: []const u8) bool {
+    var i: usize = 0;
+    var in_single = false;
+    var in_double = false;
+
+    while (i < value.len) {
+        const b = value[i];
+        if (b == 0) return true;
+
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < value.len and value[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (in_double) {
+            if (b == '"') {
+                if (i + 1 < value.len and value[i + 1] == '"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        switch (b) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ';' => return true,
+            '-' => if (i + 1 < value.len and value[i + 1] == '-') return true,
+            '/' => if (i + 1 < value.len and value[i + 1] == '*') return true,
+            '*' => if (i + 1 < value.len and value[i + 1] == '/') return true,
+            else => {},
+        }
+        i += 1;
+    }
+
+    return false;
+}
+
+fn isSafeSchemaIndexElementList(fragment: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, fragment, ',');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        count += 1;
+        if (!isSafeSchemaIndexElement(std.mem.trim(u8, part, " \t\r\n"))) return false;
+    }
+    return count > 0;
+}
+
+fn isSafeSchemaIndexIdentifierList(fragment: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, fragment, ',');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        count += 1;
+        if (!isSchemaQualifiedIdentifier(std.mem.trim(u8, part, " \t\r\n"))) return false;
+    }
+    return count > 0;
+}
+
+fn isSafeSchemaIndexElement(element: []const u8) bool {
+    if (element.len == 0 or containsUnquotedStatementDelimiter(element)) return false;
+    if (std.mem.indexOfScalar(u8, element, '(') != null or
+        std.mem.indexOfScalar(u8, element, ')') != null or
+        std.mem.indexOfScalar(u8, element, '\'') != null or
+        std.mem.indexOfScalar(u8, element, '"') != null)
+    {
+        return false;
+    }
+
+    var tokens = std.mem.tokenizeAny(u8, element, " \t\r\n");
+    const column = tokens.next() orelse return false;
+    if (!isSchemaQualifiedIdentifier(column)) return false;
+    while (tokens.next()) |token| {
+        if (!isAllowedSchemaIndexModifier(token)) return false;
+    }
+    return true;
+}
+
+fn isAllowedSchemaIndexModifier(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "asc") or
+        std.ascii.eqlIgnoreCase(token, "desc") or
+        std.ascii.eqlIgnoreCase(token, "nulls") or
+        std.ascii.eqlIgnoreCase(token, "first") or
+        std.ascii.eqlIgnoreCase(token, "last") or
+        isAllowedSchemaIndexOpclass(token);
+}
+
+fn isAllowedSchemaIndexOpclass(token: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, token, '_') == null) return false;
+    if (token.len == 0 or !std.ascii.isAlphabetic(token[0])) return false;
+    for (token[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+    return true;
+}
+
+fn isSchemaQualifiedIdentifier(identifier: []const u8) bool {
+    if (identifier.len == 0 or std.mem.startsWith(u8, identifier, ".") or std.mem.endsWith(u8, identifier, ".")) {
+        return false;
+    }
+    var parts = std.mem.splitScalar(u8, identifier, '.');
+    while (parts.next()) |part| {
+        if (part.len == 0 or !Parser.isIdentifierStart(part[0])) return false;
+        for (part[1..]) |ch| {
+            if (!Parser.isIdentifierPart(ch)) return false;
+        }
+    }
+    return true;
+}
+
+fn isAllowedSchemaIndexMethod(method: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(method, "btree") or
+        std.ascii.eqlIgnoreCase(method, "hash") or
+        std.ascii.eqlIgnoreCase(method, "gin") or
+        std.ascii.eqlIgnoreCase(method, "gist") or
+        std.ascii.eqlIgnoreCase(method, "brin") or
+        std.ascii.eqlIgnoreCase(method, "spgist") or
+        std.ascii.eqlIgnoreCase(method, "hnsw") or
+        std.ascii.eqlIgnoreCase(method, "ivfflat");
+}
 
 const ForeignKeyReference = struct {
     table: []const u8,
     column: []const u8,
 };
+
+fn validateSchemaIndexes(schema: *const Schema) !void {
+    for (schema.indexes.items) |index| {
+        const table = schema.findTable(index.table) orelse return error.InvalidIndexReference;
+        try validateIndexColumnList(table, index.columns);
+        if (index.include) |include| try validateIndexIdentifierList(table, include);
+    }
+}
+
+fn validateIndexColumnList(table: *const TableDef, fragment: []const u8) !void {
+    var parts = std.mem.splitScalar(u8, fragment, ',');
+    while (parts.next()) |part| {
+        const column_name = indexElementColumnName(std.mem.trim(u8, part, " \t\r\n")) orelse return error.InvalidIndexReference;
+        if (table.findColumn(column_name) == null) return error.InvalidIndexReference;
+    }
+}
+
+fn validateIndexIdentifierList(table: *const TableDef, fragment: []const u8) !void {
+    var parts = std.mem.splitScalar(u8, fragment, ',');
+    while (parts.next()) |part| {
+        const column_name = unqualifiedIdentifier(std.mem.trim(u8, part, " \t\r\n"));
+        if (table.findColumn(column_name) == null) return error.InvalidIndexReference;
+    }
+}
+
+fn indexElementColumnName(element: []const u8) ?[]const u8 {
+    var tokens = std.mem.tokenizeAny(u8, element, " \t\r\n");
+    const column = tokens.next() orelse return null;
+    return unqualifiedIdentifier(column);
+}
+
+fn unqualifiedIdentifier(identifier: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, identifier, '.')) |dot| {
+        return identifier[dot + 1 ..];
+    }
+    return identifier;
+}
 
 fn validateSchemaForeignKeys(schema: *const Schema) !void {
     for (schema.tables.items) |table| {
@@ -2081,6 +2360,58 @@ test "parse multiple tables" {
     defer schema.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), schema.tables.items.len);
+}
+
+test "parse rich index declaration" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table users (
+        \\    id uuid primary_key
+        \\    email text
+        \\    created_at timestamp
+        \\    deleted_at timestamp
+        \\)
+        \\
+        \\unique index concurrently idx_users_active_email on users using gin (email, created_at DESC NULLS LAST) include (id) where deleted_at IS NULL
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), schema.indexes.items.len);
+    const index = schema.indexes.items[0];
+    try std.testing.expectEqualStrings("idx_users_active_email", index.name);
+    try std.testing.expectEqualStrings("users", index.table);
+    try std.testing.expect(index.unique);
+    try std.testing.expect(index.concurrently);
+    try std.testing.expectEqualStrings("gin", index.index_type.?);
+    try std.testing.expectEqualStrings("email, created_at DESC NULLS LAST", index.columns);
+    try std.testing.expectEqualStrings("id", index.include.?);
+    try std.testing.expectEqualStrings("deleted_at IS NULL", index.where_clause.?);
+}
+
+test "parse index rejects expressions and missing columns" {
+    const allocator = std.testing.allocator;
+
+    const expression_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\    email text
+        \\)
+        \\
+        \\index idx_users_lower_email on users (lower(email))
+    ;
+    try std.testing.expectError(error.InvalidIndexColumns, Schema.parse(allocator, expression_input));
+
+    const missing_column_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+        \\
+        \\index idx_users_email on users (email)
+    ;
+    try std.testing.expectError(error.InvalidIndexReference, Schema.parse(allocator, missing_column_input));
 }
 
 test "parse array types" {

@@ -25,6 +25,26 @@ pub const GrantDef = struct {
     }
 };
 
+pub const IndexDef = struct {
+    name: []const u8,
+    table: []const u8,
+    columns: []const u8,
+    unique: bool = false,
+    index_type: ?[]const u8 = null,
+    include: ?[]const u8 = null,
+    concurrently: bool = false,
+    where_clause: ?[]const u8 = null,
+
+    pub fn deinit(self: *const IndexDef, allocator: Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.table);
+        allocator.free(self.columns);
+        if (self.index_type) |index_type| allocator.free(index_type);
+        if (self.include) |include| allocator.free(include);
+        if (self.where_clause) |where_clause| allocator.free(where_clause);
+    }
+};
+
 pub const TableDef = struct {
     name: []const u8,
     columns: std.ArrayList(ColumnDef),

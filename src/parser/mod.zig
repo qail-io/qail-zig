@@ -10,6 +10,7 @@ pub const grammar = @import("grammar/mod.zig");
 pub const Schema = schema.Schema;
 pub const TableDef = schema.TableDef;
 pub const ColumnDef = schema.ColumnDef;
+pub const IndexDef = schema.IndexDef;
 pub const PolicyDef = schema.PolicyDef;
 pub const GrantDef = schema.GrantDef;
 pub const GrantAction = schema.GrantAction;

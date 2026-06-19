@@ -340,6 +340,30 @@ fn eqlIgnoreAsciiWhitespace(left: []const u8, right: []const u8) bool {
     }
 }
 
+fn indexesEquivalent(old_index: *const schema.IndexDef, new_index: *const schema.IndexDef) bool {
+    if (!std.ascii.eqlIgnoreCase(old_index.table, new_index.table)) return false;
+    if (old_index.unique != new_index.unique) return false;
+    if (old_index.concurrently != new_index.concurrently) return false;
+    if (!eqlIgnoreAsciiWhitespace(old_index.columns, new_index.columns)) return false;
+    if (!optionalTextEquivalent(old_index.index_type, new_index.index_type)) return false;
+    if (!optionalTextEquivalent(old_index.include, new_index.include)) return false;
+    if (!optionalTextEquivalent(old_index.where_clause, new_index.where_clause)) return false;
+    return true;
+}
+
+fn schemaIndexToMigration(index: *const schema.IndexDef) IndexInfo {
+    return .{
+        .name = index.name,
+        .table = index.table,
+        .columns = index.columns,
+        .unique = index.unique,
+        .index_type = index.index_type,
+        .include = index.include orelse "",
+        .concurrently = index.concurrently,
+        .where_clause = index.where_clause,
+    };
+}
+
 const CheckComparableUnit = union(enum) {
     byte: u8,
     identifier: []const u8,
@@ -576,7 +600,41 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
         }
     }
 
-    // 4. Detect policy changes
+    // 4. Detect index changes
+    for (new.indexes.items) |*new_index| {
+        if (old.findIndex(new_index.name)) |old_index| {
+            if (!indexesEquivalent(old_index, new_index)) {
+                try cmds.append(allocator, MigrationCmd{
+                    .action = .drop_index,
+                    .table = old_index.name,
+                    .index = schemaIndexToMigration(old_index),
+                });
+                try cmds.append(allocator, MigrationCmd{
+                    .action = .create_index,
+                    .table = new_index.table,
+                    .index = schemaIndexToMigration(new_index),
+                });
+            }
+        } else {
+            try cmds.append(allocator, MigrationCmd{
+                .action = .create_index,
+                .table = new_index.table,
+                .index = schemaIndexToMigration(new_index),
+            });
+        }
+    }
+
+    for (old.indexes.items) |*old_index| {
+        if (new.findIndex(old_index.name) == null) {
+            try cmds.append(allocator, MigrationCmd{
+                .action = .drop_index,
+                .table = old_index.name,
+                .index = schemaIndexToMigration(old_index),
+            });
+        }
+    }
+
+    // 5. Detect policy changes
     for (new.policies.items) |*new_policy| {
         if (old.findPolicy(new_policy.name, new_policy.table)) |old_policy| {
             if (!compare.policyEquals(old_policy, new_policy)) {
@@ -610,7 +668,7 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
         }
     }
 
-    // 5. Detect grant/revoke changes
+    // 6. Detect grant/revoke changes
     for (new.grants.items) |*new_grant| {
         var exists = false;
         for (old.grants.items) |*old_grant| {
@@ -817,6 +875,52 @@ test "diff existing table forces row level security only upward" {
     try std.testing.expectEqual(MigrationCmd.Action.force_rls, cmds.items[0].action);
 
     try std.testing.expectError(error.UnsupportedRlsForceDisable, diffSchemas(allocator, &new, &old));
+}
+
+test "diff schema indexes create drop and replace" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\    email text
+        \\    deleted_at timestamp
+        \\)
+        \\
+        \\index idx_users_email on users (email)
+        \\index idx_users_old on users (id)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\    email text
+        \\    deleted_at timestamp
+        \\)
+        \\
+        \\unique index concurrently idx_users_email on users using gin (email) include (id) where deleted_at IS NULL
+        \\index idx_users_new on users (id)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 4), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.drop_index, cmds.items[0].action);
+    try std.testing.expectEqual(MigrationCmd.Action.create_index, cmds.items[1].action);
+    try std.testing.expectEqual(MigrationCmd.Action.create_index, cmds.items[2].action);
+    try std.testing.expectEqual(MigrationCmd.Action.drop_index, cmds.items[3].action);
+
+    const sql = try cmds.items[1].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "CREATE UNIQUE INDEX CONCURRENTLY idx_users_email ON users USING gin (email) INCLUDE (id) WHERE deleted_at IS NULL",
+        sql,
+    );
 }
 
 test "diff new table preserves column check constraint" {

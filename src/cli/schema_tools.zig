@@ -276,6 +276,24 @@ fn renderPolicy(writer: anytype, policy: *const parser.PolicyDef) !void {
     try writer.writeAll("\n");
 }
 
+fn renderIndex(writer: anytype, index: *const parser.IndexDef) !void {
+    if (index.unique) try writer.writeAll("unique ");
+    try writer.writeAll("index ");
+    if (index.concurrently) try writer.writeAll("concurrently ");
+    try writer.print("{s} on {s}", .{ index.name, index.table });
+    if (index.index_type) |index_type| {
+        try writer.print(" using {s}", .{index_type});
+    }
+    try writer.print(" ({s})", .{index.columns});
+    if (index.include) |include| {
+        try writer.print(" include ({s})", .{include});
+    }
+    if (index.where_clause) |where_clause| {
+        try writer.print(" where {s}", .{where_clause});
+    }
+    try writer.writeByte('\n');
+}
+
 fn renderGrant(writer: anytype, grant: *const parser.GrantDef) !void {
     switch (grant.action) {
         .grant => try writer.writeAll("grant "),
@@ -299,6 +317,11 @@ fn renderSchemaText(allocator: Allocator, schema: *const parser.Schema) ![]u8 {
     for (schema.tables.items) |*table| {
         try renderTable(writer, table);
     }
+
+    for (schema.indexes.items) |*index| {
+        try renderIndex(writer, index);
+    }
+    if (schema.indexes.items.len > 0) try writer.writeAll("\n");
 
     for (schema.policies.items) |*policy| {
         try renderPolicy(writer, policy);
@@ -330,6 +353,31 @@ test "schema renderer preserves table row level security directives" {
 
     try std.testing.expect(std.mem.indexOf(u8, rendered, "  enable_rls\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "  force_rls\n") != null);
+}
+
+test "schema renderer preserves index declarations" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\table users (
+        \\  id uuid primary_key
+        \\  email text
+        \\  deleted_at timestamp
+        \\)
+        \\
+        \\unique index concurrently idx_users_email on users using gin (email) include (id) where deleted_at IS NULL
+    ;
+
+    var schema = try parser.Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const rendered = try renderSchemaText(allocator, &schema);
+    defer allocator.free(rendered);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered,
+        "unique index concurrently idx_users_email on users using gin (email) include (id) where deleted_at IS NULL\n",
+    ) != null);
 }
 
 fn parseSchemaFile(allocator: Allocator, path: []const u8) !parser.Schema {
