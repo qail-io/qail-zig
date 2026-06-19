@@ -820,6 +820,7 @@ const Parser = struct {
 
         try self.expectChar(close_char);
         if (table.columns.items.len == 0) return error.EmptyTable;
+        try validateTableKeyTypes(&table);
         try validateTableCheckReferences(&table);
         return table;
     }
@@ -916,6 +917,57 @@ fn isForeignKeyColumnIdentifier(identifier: []const u8) bool {
         if (!Parser.isIdentifierPart(ch)) return false;
     }
     return true;
+}
+
+fn validateTableKeyTypes(table: *const TableDef) !void {
+    for (table.columns.items) |col| {
+        if (col.primary_key and !canBePrimaryKeyColumn(&col)) {
+            return error.InvalidPrimaryKeyColumnType;
+        }
+        if (col.unique and !supportsUniqueConstraint(&col)) {
+            return error.InvalidUniqueColumnType;
+        }
+    }
+}
+
+fn canBePrimaryKeyColumn(col: *const ColumnDef) bool {
+    if (col.is_array) return false;
+    if (isUnsupportedUniqueType(col.typ)) return false;
+    return !isUnsupportedPrimaryKeyType(col.typ);
+}
+
+fn supportsUniqueConstraint(col: *const ColumnDef) bool {
+    return !isUnsupportedUniqueType(col.typ);
+}
+
+fn isUnsupportedUniqueType(typ: []const u8) bool {
+    const names = [_][]const u8{ "json", "jsonb", "bytea", "xml" };
+    for (names) |name| {
+        if (std.ascii.eqlIgnoreCase(typ, name)) return true;
+    }
+    return false;
+}
+
+fn isUnsupportedPrimaryKeyType(typ: []const u8) bool {
+    const names = [_][]const u8{
+        "interval",
+        "int4range",
+        "int8range",
+        "numrange",
+        "tsrange",
+        "tstzrange",
+        "daterange",
+        "int4multirange",
+        "int8multirange",
+        "nummultirange",
+        "tsmultirange",
+        "tstzmultirange",
+        "datemultirange",
+    };
+    for (names) |name| {
+        if (std.ascii.eqlIgnoreCase(typ, name)) return true;
+    }
+    return false;
 }
 
 fn validateTableCheckReferences(table: *const TableDef) !void {
@@ -2041,6 +2093,74 @@ test "schema parser rejects duplicate and contradictory column constraints" {
     for (invalid_inputs) |input| {
         try expectSchemaParseFailure(input);
     }
+}
+
+test "schema parser rejects unsafe key column types" {
+    const allocator = std.testing.allocator;
+
+    const invalid_primary_key_inputs = [_][]const u8{
+        \\table events (
+        \\    data jsonb primary_key
+        \\)
+        ,
+        \\table events (
+        \\    data bytea primary_key
+        \\)
+        ,
+        \\table events (
+        \\    tags text[] primary_key
+        \\)
+        ,
+        \\table events (
+        \\    duration interval primary_key
+        \\)
+        ,
+        \\table events (
+        \\    active_window tstzrange primary_key
+        \\)
+        ,
+    };
+
+    for (invalid_primary_key_inputs) |input| {
+        try std.testing.expectError(error.InvalidPrimaryKeyColumnType, Schema.parse(allocator, input));
+    }
+
+    const invalid_unique_inputs = [_][]const u8{
+        \\table events (
+        \\    data jsonb unique
+        \\)
+        ,
+        \\table events (
+        \\    payload bytea unique
+        \\)
+        ,
+        \\table events (
+        \\    data json unique
+        \\)
+        ,
+        \\table events (
+        \\    document xml unique
+        \\)
+        ,
+    };
+
+    for (invalid_unique_inputs) |input| {
+        try std.testing.expectError(error.InvalidUniqueColumnType, Schema.parse(allocator, input));
+    }
+
+    const valid_input =
+        \\table endpoints (
+        \\    address inet primary_key,
+        \\    tags text[] unique
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, valid_input);
+    defer schema.deinit();
+
+    const endpoints = schema.findTable("endpoints").?;
+    try std.testing.expect(endpoints.findColumn("address").?.primary_key);
+    try std.testing.expect(endpoints.findColumn("tags").?.unique);
 }
 
 test "schema parser keeps constraint keywords inside quoted expressions" {
