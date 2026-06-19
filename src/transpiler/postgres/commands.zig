@@ -10,6 +10,8 @@ const QailCmd = ast.QailCmd;
 const render = @import("render.zig");
 
 pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
+    if (cmd.skip_locked and cmd.lock_mode == null) return error.SkipLockedRequiresLockMode;
+
     try writer.writeAll("SELECT ");
 
     if (cmd.distinct) {
@@ -108,6 +110,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
 
     if (cmd.lock_mode) |lock| {
         try writer.print(" {s}", .{lock.toSql()});
+        if (cmd.skip_locked) try writer.writeAll(" SKIP LOCKED");
     }
 }
 

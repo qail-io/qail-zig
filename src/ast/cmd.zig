@@ -56,6 +56,7 @@ pub const QailCmd = struct {
 
     // Row locking (FOR UPDATE/SHARE variants)
     lock_mode: ?operators.LockMode = null,
+    skip_locked: bool = false,
     table_lock_mode: ?operators.TableLockMode = null,
 
     // Advanced query features
@@ -510,6 +511,13 @@ pub const QailCmd = struct {
     pub fn forKeyShare(self: QailCmd) QailCmd {
         var cmd = self;
         cmd.lock_mode = .key_share;
+        return cmd;
+    }
+
+    /// Add SKIP LOCKED to a row-locking SELECT
+    pub fn skipLocked(self: QailCmd) QailCmd {
+        var cmd = self;
+        cmd.skip_locked = true;
         return cmd;
     }
 

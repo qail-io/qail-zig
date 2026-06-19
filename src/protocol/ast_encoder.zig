@@ -1074,6 +1074,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
 
     if (cmd.lock_mode) |lock| {
         try writer.print(" {s}", .{lock.toSql()});
+        if (cmd.skip_locked) try writer.writeAll(" SKIP LOCKED");
     }
 }
 
@@ -1385,6 +1386,7 @@ fn columnNameAt(cmd: *const QailCmd, idx: usize) ?[]const u8 {
 fn validateSelectShape(cmd: *const QailCmd) !void {
     if (cmd.assignments.len != 0) return error.InvalidSelectShape;
     if (cmd.fetch_with_ties and cmd.order_by.len == 0) return error.FetchWithTiesRequiresOrderBy;
+    if (cmd.skip_locked and cmd.lock_mode == null) return error.SkipLockedRequiresLockMode;
 
     if (cmd.sample_method != null and cmd.sample_percent == null) return error.MissingTableSamplePercent;
     if (cmd.sample_percent) |pct| {
@@ -3151,6 +3153,11 @@ test "ast encoder select shape validation fails closed" {
     var payload_buf: [512]u8 = undefined;
     var payload_writer = io.FixedBufferWriter.init(&payload_buf);
     try std.testing.expectError(error.InvalidSelectShape, encoder.writeAstToSql(payload_writer.writer(), &payload));
+
+    const skip_locked = QailCmd.get("events").skipLocked();
+    var skip_locked_buf: [512]u8 = undefined;
+    var skip_locked_writer = io.FixedBufferWriter.init(&skip_locked_buf);
+    try std.testing.expectError(error.SkipLockedRequiresLockMode, encoder.writeAstToSql(skip_locked_writer.writer(), &skip_locked));
 }
 
 test "ast encoder select renders table modifiers and sort nulls" {
@@ -3165,14 +3172,15 @@ test "ast encoder select renders table modifiers and sort nulls" {
         .repeatable(7)
         .select(&cols)
         .orderBy(&order)
-        .forKeyShare();
+        .forKeyShare()
+        .skipLocked();
 
     var sql_buf: [512]u8 = undefined;
     var writer = io.FixedBufferWriter.init(&sql_buf);
     try encoder.writeAstToSql(writer.writer(), &cmd);
 
     try std.testing.expectEqualStrings(
-        "SELECT id FROM ONLY events TABLESAMPLE SYSTEM(12.5) REPEATABLE(7) ORDER BY created_at ASC NULLS LAST FOR KEY SHARE",
+        "SELECT id FROM ONLY events TABLESAMPLE SYSTEM(12.5) REPEATABLE(7) ORDER BY created_at ASC NULLS LAST FOR KEY SHARE SKIP LOCKED",
         writer.getWritten(),
     );
 }

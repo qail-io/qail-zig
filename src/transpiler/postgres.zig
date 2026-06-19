@@ -339,6 +339,17 @@ test "transpile select distinct" {
     try std.testing.expectEqualStrings("SELECT DISTINCT status FROM orders", sql);
 }
 
+test "transpile select skip locked requires row lock" {
+    const invalid = QailCmd.get("jobs").skipLocked();
+    try std.testing.expectError(error.SkipLockedRequiresLockMode, toSql(std.testing.allocator, &invalid));
+
+    const valid = QailCmd.get("jobs").forUpdate().skipLocked();
+    const sql = try toSql(std.testing.allocator, &valid);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings("SELECT * FROM jobs FOR UPDATE SKIP LOCKED", sql);
+}
+
 test "transpile with aggregates" {
     const cols = [_]Expr{ Expr.count(), Expr.sum("amount") };
     const cmd = QailCmd.get("orders").select(&cols);
