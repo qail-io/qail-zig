@@ -10,6 +10,7 @@ const compare = @import("differ/compare.zig");
 const differ_types = @import("differ/types.zig");
 const Schema = schema.Schema;
 const ColumnDef = schema.ColumnDef;
+const TableDef = schema.TableDef;
 pub const MigrationCmd = differ_types.MigrationCmd;
 pub const IndexInfo = differ_types.IndexInfo;
 
@@ -158,13 +159,51 @@ fn parseDecimalTypeParams(params: []const u8) ?DecimalTypeParams {
     };
 }
 
-fn columnChecksEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
-    const old_count = old_col.checkCount();
-    const new_count = new_col.checkCount();
-    if (old_count != new_count) return false;
-    for (0..old_count) |i| {
-        if (!checkExpressionsEquivalent(old_col.checkAt(i), new_col.checkAt(i))) return false;
+fn collectSharedColumnChecks(
+    allocator: Allocator,
+    table: *const TableDef,
+    other: *const TableDef,
+) ![][]const u8 {
+    var checks = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+    errdefer checks.deinit(allocator);
+
+    for (table.columns.items) |col| {
+        if (other.findColumn(col.name) == null) continue;
+        if (col.check) |expr| try checks.append(allocator, expr);
+        for (col.extra_checks) |expr| try checks.append(allocator, expr);
     }
+
+    return try checks.toOwnedSlice(allocator);
+}
+
+fn tableChecksEquivalent(
+    allocator: Allocator,
+    old_table: *const TableDef,
+    new_table: *const TableDef,
+) !bool {
+    const old_checks = try collectSharedColumnChecks(allocator, old_table, new_table);
+    defer allocator.free(old_checks);
+    const new_checks = try collectSharedColumnChecks(allocator, new_table, old_table);
+    defer allocator.free(new_checks);
+
+    if (old_checks.len != new_checks.len) return false;
+
+    var matched = try allocator.alloc(bool, new_checks.len);
+    defer allocator.free(matched);
+    @memset(matched, false);
+
+    for (old_checks) |old_check| {
+        var found = false;
+        for (new_checks, 0..) |new_check, i| {
+            if (matched[i]) continue;
+            if (!checkExpressionsEquivalent(old_check, new_check)) continue;
+            matched[i] = true;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+
     return true;
 }
 
@@ -200,7 +239,6 @@ fn validateExistingColumnConstraintDrift(old_col: *const ColumnDef, new_col: *co
     }
     if (!columnReferencesEquivalent(old_col, new_col)) return error.UnsupportedReferenceConstraintDrift;
     if (!columnDefaultsEquivalent(old_col, new_col)) return error.UnsupportedDefaultConstraintDrift;
-    if (!columnChecksEquivalent(old_col, new_col)) return error.UnsupportedCheckConstraintDrift;
 }
 
 fn validateNewExistingTableColumn(column: *const ColumnDef) !void {
@@ -496,6 +534,10 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
                     }
                     try validateExistingColumnConstraintDrift(old_col, &new_col);
                 }
+            }
+
+            if (!try tableChecksEquivalent(allocator, old_table, &new_table)) {
+                return error.UnsupportedCheckConstraintDrift;
             }
         }
     }
@@ -932,6 +974,42 @@ test "diff existing column multiple checks stay equivalent" {
         \\    quantity integer check ( quantity>=0 ) check ((quantity <= 100))
         \\)
     ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
+test "diff check comparison is table scoped across shared columns" {
+    const allocator = std.testing.allocator;
+
+    const check_expr = "((segment_id IS NOT NULL) AND (virtual_segment_id IS NULL)) OR ((segment_id IS NULL) AND (virtual_segment_id IS NOT NULL))";
+    const old_input = try std.fmt.allocPrint(
+        allocator,
+        \\table pricing_plans (
+        \\    segment_id uuid check ({s}),
+        \\    virtual_segment_id uuid
+        \\)
+    ,
+        .{check_expr},
+    );
+    defer allocator.free(old_input);
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input = try std.fmt.allocPrint(
+        allocator,
+        \\table pricing_plans (
+        \\    segment_id uuid,
+        \\    virtual_segment_id uuid check ({s})
+        \\)
+    ,
+        .{check_expr},
+    );
+    defer allocator.free(new_input);
     var new = try Schema.parse(allocator, new_input);
     defer new.deinit();
 

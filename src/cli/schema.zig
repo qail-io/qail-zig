@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const QailCmd = @import("../ast/cmd.zig").QailCmd;
 const Expr = @import("../ast/expr.zig").Expr;
+const Join = @import("../ast/cmd.zig").Join;
 const MigrationCmd = @import("../parser/mod.zig").MigrationCmd;
 const io_compat = @import("../runtime/io.zig");
 
@@ -58,6 +59,75 @@ fn deinitStringSet(allocator: Allocator, set: *std.StringHashMap(void)) void {
         allocator.free(entry.key_ptr.*);
     }
     set.deinit();
+}
+
+fn deinitStringMap(allocator: Allocator, map: *std.StringHashMap([]u8)) void {
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        allocator.free(entry.value_ptr.*);
+    }
+    map.deinit();
+}
+
+fn putOwnedStringMapValue(
+    allocator: Allocator,
+    map: *std.StringHashMap([]u8),
+    key: []u8,
+    value: []u8,
+) !void {
+    errdefer allocator.free(key);
+    errdefer allocator.free(value);
+
+    const gop = try map.getOrPut(key);
+    if (gop.found_existing) {
+        allocator.free(key);
+        allocator.free(value);
+        return;
+    }
+
+    gop.value_ptr.* = value;
+}
+
+fn deinitCheckMap(allocator: Allocator, checks: *std.StringHashMap(std.ArrayList([]u8))) void {
+    var it = checks.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        for (entry.value_ptr.items) |check_expr| allocator.free(check_expr);
+        entry.value_ptr.deinit(allocator);
+    }
+    checks.deinit();
+}
+
+fn appendOwnedColumnCheck(
+    allocator: Allocator,
+    checks: *std.StringHashMap(std.ArrayList([]u8)),
+    key: []u8,
+    check_expr: []u8,
+) !void {
+    var owns_key = true;
+    var owns_expr = true;
+    errdefer if (owns_key) allocator.free(key);
+    errdefer if (owns_expr) allocator.free(check_expr);
+
+    var new_list = try std.ArrayList([]u8).initCapacity(allocator, 1);
+    var owns_list = true;
+    defer if (owns_list) new_list.deinit(allocator);
+    try new_list.append(allocator, check_expr);
+
+    const gop = try checks.getOrPut(key);
+    if (gop.found_existing) {
+        allocator.free(key);
+        owns_key = false;
+        try gop.value_ptr.append(allocator, check_expr);
+        owns_expr = false;
+        return;
+    }
+
+    gop.value_ptr.* = new_list;
+    owns_list = false;
+    owns_key = false;
+    owns_expr = false;
 }
 
 fn connectPgUrl(
@@ -171,6 +241,334 @@ fn collectConstrainedColumns(
     }
 }
 
+fn collectColumnAttnums(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    attnum_columns: *std.StringHashMap([]u8),
+) !void {
+    const joins = [_]Join{
+        .{
+            .kind = .inner,
+            .table = "pg_catalog.pg_class",
+            .alias = "src",
+            .on_left = "src.oid",
+            .on_right = "att.attrelid",
+        },
+        .{
+            .kind = .inner,
+            .table = "pg_catalog.pg_namespace",
+            .alias = "ns",
+            .on_left = "ns.oid",
+            .on_right = "src.relnamespace",
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_attribute")
+        .alias("att")
+        .join(&joins)
+        .select(&.{
+            Expr.colAs("src.relname", "table_name"),
+            Expr.colAs("att.attnum", "attnum"),
+            Expr.colAs("att.attname", "column_name"),
+        }).where(&.{
+            .{ .condition = .{ .column = "ns.nspname", .op = .eq, .value = .{ .string = "public" } } },
+            .{ .condition = .{ .column = "att.attnum", .op = .gt, .value = .{ .int = 0 } } },
+            .{ .condition = .{ .column = "att.attisdropped", .op = .eq, .value = .{ .bool = false } } },
+        }).orderBy(&.{
+        .{ .column = "src.relname", .order = .asc },
+        .{ .column = "att.attnum", .order = .asc },
+    });
+    const rows = try pg.fetchAll(&cmd);
+    defer deinitFetchedRows(allocator, rows);
+
+    for (rows) |row| {
+        const table_name = row.getByName("table_name") orelse continue;
+        if (std.mem.startsWith(u8, table_name, "_qail_")) continue;
+        const attnum = row.getByName("attnum") orelse continue;
+        const column_name = row.getByName("column_name") orelse continue;
+
+        const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, attnum });
+        const value = try allocator.dupe(u8, column_name);
+        try putOwnedStringMapValue(allocator, attnum_columns, key, value);
+    }
+}
+
+fn collectCheckConstraints(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    attnum_columns: *const std.StringHashMap([]u8),
+    checks: *std.StringHashMap(std.ArrayList([]u8)),
+) !void {
+    const joins = [_]Join{
+        .{
+            .kind = .inner,
+            .table = "pg_catalog.pg_class",
+            .alias = "src",
+            .on_left = "src.oid",
+            .on_right = "con.conrelid",
+        },
+        .{
+            .kind = .inner,
+            .table = "pg_catalog.pg_namespace",
+            .alias = "ns",
+            .on_left = "ns.oid",
+            .on_right = "con.connamespace",
+        },
+    };
+    const pg_get_expr_args = [_]Expr{
+        Expr.col("con.conbin"),
+        Expr.col("con.conrelid"),
+    };
+    const columns = [_]Expr{
+        Expr.colAs("con.conname", "constraint_name"),
+        Expr.colAs("src.relname", "table_name"),
+        Expr.colAs("con.conkey", "conkey"),
+        .{ .func_call = .{
+            .name = "pg_catalog.pg_get_expr",
+            .args = &pg_get_expr_args,
+            .alias = "check_clause",
+        } },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_constraint")
+        .alias("con")
+        .join(&joins)
+        .select(&columns)
+        .where(&.{
+            .{ .condition = .{ .column = "con.contype", .op = .eq, .value = .{ .string = "c" } } },
+            .{ .condition = .{ .column = "ns.nspname", .op = .eq, .value = .{ .string = "public" } } },
+        }).orderBy(&.{
+        .{ .column = "src.relname", .order = .asc },
+        .{ .column = "con.conname", .order = .asc },
+    });
+    const rows = try pg.fetchAll(&cmd);
+    defer deinitFetchedRows(allocator, rows);
+
+    for (rows) |row| {
+        const table_name = row.getByName("table_name") orelse continue;
+        if (std.mem.startsWith(u8, table_name, "_qail_")) continue;
+
+        const raw_conkey = row.getByName("conkey") orelse continue;
+        if (std.mem.trim(u8, raw_conkey, " \t\r\n").len == 0) continue;
+
+        const check_clause_raw = row.getByName("check_clause") orelse continue;
+        const check_clause = std.mem.trim(u8, check_clause_raw, " \t\r\n");
+        if (check_clause.len == 0 or isTrivialNotNullCheck(check_clause)) continue;
+
+        const column_name = try checkConstraintAnchorColumn(
+            allocator,
+            table_name,
+            raw_conkey,
+            attnum_columns,
+            check_clause,
+        ) orelse continue;
+
+        const composite = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, column_name });
+        const owned_check = try allocator.dupe(u8, check_clause);
+        try appendOwnedColumnCheck(allocator, checks, composite, owned_check);
+    }
+}
+
+fn checkConstraintAnchorColumn(
+    allocator: Allocator,
+    table_name: []const u8,
+    raw_conkey: []const u8,
+    attnum_columns: *const std.StringHashMap([]u8),
+    check_clause: []const u8,
+) !?[]const u8 {
+    const expression_anchor = checkExpressionAnchorColumn(check_clause);
+    var first_participating: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < raw_conkey.len) {
+        while (i < raw_conkey.len and isPgArraySeparator(raw_conkey[i])) : (i += 1) {}
+        if (i >= raw_conkey.len) break;
+
+        const start = i;
+        if (raw_conkey[i] == '-') i += 1;
+        while (i < raw_conkey.len and std.ascii.isDigit(raw_conkey[i])) : (i += 1) {}
+        if (start == i or (raw_conkey[start] == '-' and start + 1 == i)) return error.InvalidCheckConkey;
+
+        const attnum = std.fmt.parseInt(i32, raw_conkey[start..i], 10) catch return error.InvalidCheckConkey;
+        if (attnum <= 0) continue;
+
+        const key = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ table_name, attnum });
+        const column_name = attnum_columns.get(key);
+        allocator.free(key);
+        if (column_name) |name| {
+            if (first_participating == null) first_participating = name;
+            if (expression_anchor) |anchor| {
+                if (std.ascii.eqlIgnoreCase(anchor, name)) return name;
+            }
+        }
+
+        if (i < raw_conkey.len and !isPgArraySeparator(raw_conkey[i])) return error.InvalidCheckConkey;
+    }
+
+    return first_participating;
+}
+
+fn isPgArraySeparator(ch: u8) bool {
+    return ch == '{' or ch == '}' or ch == ',' or std.ascii.isWhitespace(ch);
+}
+
+fn checkExpressionAnchorColumn(check_clause: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    var in_single = false;
+
+    while (i < check_clause.len) {
+        const ch = check_clause[i];
+
+        if (in_single) {
+            if (ch == '\'') {
+                if (i + 1 < check_clause.len and check_clause[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (ch == '\'') {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        if (ch == '"') {
+            const quoted_start = i + 1;
+            i += 1;
+            while (i < check_clause.len) : (i += 1) {
+                if (check_clause[i] == '"') break;
+            }
+            if (i >= check_clause.len) return null;
+            const quoted = check_clause[quoted_start..i];
+            i += 1;
+            if (quoted.len == 0 or nextNonWhitespace(check_clause, i) == '(') continue;
+            return quoted;
+        }
+
+        if (!isCheckIdentifierStart(ch)) {
+            i += 1;
+            continue;
+        }
+
+        const start = i;
+        i += 1;
+        while (i < check_clause.len and isCheckIdentifierContinue(check_clause[i])) : (i += 1) {}
+        const token = unqualifiedCheckIdentifier(check_clause[start..i]);
+
+        if (isCheckKeyword(token)) continue;
+        if (isCastTypeToken(check_clause, start)) continue;
+        if (nextNonWhitespace(check_clause, i) == '(') continue;
+
+        return token;
+    }
+
+    return null;
+}
+
+fn isTrivialNotNullCheck(check_clause: []const u8) bool {
+    var tokens: [4][]const u8 = undefined;
+    var count: usize = 0;
+
+    var i: usize = 0;
+    while (i < check_clause.len) {
+        while (i < check_clause.len and (std.ascii.isWhitespace(check_clause[i]) or check_clause[i] == '(' or check_clause[i] == ')')) : (i += 1) {}
+        if (i >= check_clause.len) break;
+
+        const start = i;
+        while (i < check_clause.len and !std.ascii.isWhitespace(check_clause[i]) and check_clause[i] != '(' and check_clause[i] != ')') : (i += 1) {}
+        const token = check_clause[start..i];
+
+        if (std.ascii.eqlIgnoreCase(token, "and") or std.ascii.eqlIgnoreCase(token, "or")) return false;
+        if (count >= tokens.len) return false;
+        tokens[count] = token;
+        count += 1;
+    }
+
+    return count >= 3 and
+        std.ascii.eqlIgnoreCase(tokens[count - 3], "is") and
+        std.ascii.eqlIgnoreCase(tokens[count - 2], "not") and
+        std.ascii.eqlIgnoreCase(tokens[count - 1], "null");
+}
+
+fn isCheckIdentifierStart(ch: u8) bool {
+    return std.ascii.isAlphabetic(ch) or ch == '_';
+}
+
+fn isCheckIdentifierContinue(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.';
+}
+
+fn unqualifiedCheckIdentifier(token: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, token, '.')) |dot| {
+        return token[dot + 1 ..];
+    }
+    return token;
+}
+
+fn isCastTypeToken(expr: []const u8, token_start: usize) bool {
+    var idx = token_start;
+    while (idx > 0 and std.ascii.isWhitespace(expr[idx - 1])) : (idx -= 1) {}
+    return idx >= 2 and expr[idx - 1] == ':' and expr[idx - 2] == ':';
+}
+
+fn nextNonWhitespace(expr: []const u8, start: usize) ?u8 {
+    var idx = start;
+    while (idx < expr.len) : (idx += 1) {
+        if (!std.ascii.isWhitespace(expr[idx])) return expr[idx];
+    }
+    return null;
+}
+
+fn isCheckKeyword(token: []const u8) bool {
+    const keywords = [_][]const u8{
+        "and",
+        "or",
+        "not",
+        "null",
+        "is",
+        "in",
+        "between",
+        "like",
+        "ilike",
+        "similar",
+        "to",
+        "true",
+        "false",
+        "unknown",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "coalesce",
+        "distinct",
+        "from",
+        "as",
+        "any",
+        "all",
+    };
+
+    for (keywords) |keyword| {
+        if (std.ascii.eqlIgnoreCase(token, keyword)) return true;
+    }
+    return false;
+}
+
+fn writeLiveColumnChecks(
+    writer: anytype,
+    checks: *const std.StringHashMap(std.ArrayList([]u8)),
+    composite: []const u8,
+) !void {
+    if (checks.get(composite)) |column_checks| {
+        for (column_checks.items) |check_expr| {
+            try writer.print(" check ({s})", .{check_expr});
+        }
+    }
+}
+
 pub fn normalizePostgresType(
     udt_name: []const u8,
     data_type: []const u8,
@@ -260,6 +658,14 @@ pub fn renderLiveSchemaSnapshot(
     var unique_columns = std.StringHashMap(void).init(allocator);
     defer deinitStringSet(allocator, &unique_columns);
     try collectConstrainedColumns(allocator, pg, "UNIQUE", &unique_columns);
+
+    var attnum_columns = std.StringHashMap([]u8).init(allocator);
+    defer deinitStringMap(allocator, &attnum_columns);
+    try collectColumnAttnums(allocator, pg, &attnum_columns);
+
+    var column_checks = std.StringHashMap(std.ArrayList([]u8)).init(allocator);
+    defer deinitCheckMap(allocator, &column_checks);
+    try collectCheckConstraints(allocator, pg, &attnum_columns, &column_checks);
 
     const columns_cmd = QailCmd.get("information_schema.columns")
         .select(&.{
@@ -353,6 +759,7 @@ pub fn renderLiveSchemaSnapshot(
                 try writer.print(" default {s}", .{default_sql});
             }
         }
+        try writeLiveColumnChecks(writer, &column_checks, composite);
         try writer.writeAll(",\n");
         column_count += 1;
     }
@@ -366,6 +773,78 @@ pub fn renderLiveSchemaSnapshot(
         .table_count = table_count,
         .column_count = column_count,
     };
+}
+
+test "live check anchor chooses expression column from pg conkey" {
+    const allocator = std.testing.allocator;
+
+    var attnums = std.StringHashMap([]u8).init(allocator);
+    defer deinitStringMap(allocator, &attnums);
+    try putOwnedStringMapValue(
+        allocator,
+        &attnums,
+        try allocator.dupe(u8, "pricing_plans.1"),
+        try allocator.dupe(u8, "segment_id"),
+    );
+    try putOwnedStringMapValue(
+        allocator,
+        &attnums,
+        try allocator.dupe(u8, "pricing_plans.2"),
+        try allocator.dupe(u8, "virtual_segment_id"),
+    );
+
+    const anchor = try checkConstraintAnchorColumn(
+        allocator,
+        "pricing_plans",
+        "{1,2}",
+        &attnums,
+        "((virtual_segment_id IS NOT NULL) AND (segment_id IS NULL))",
+    );
+    try std.testing.expectEqualStrings("virtual_segment_id", anchor.?);
+}
+
+test "live check helpers skip trivial not null and function names" {
+    try std.testing.expect(isTrivialNotNullCheck("(status IS NOT NULL)"));
+    try std.testing.expect(!isTrivialNotNullCheck("(status IS NOT NULL) AND (kind IS NOT NULL)"));
+
+    try std.testing.expectEqualStrings(
+        "name",
+        checkExpressionAnchorColumn("char_length(btrim((name)::text)) > 0").?,
+    );
+    try std.testing.expectEqualStrings(
+        "count",
+        checkExpressionAnchorColumn("COALESCE(count, 1) > 0").?,
+    );
+}
+
+test "live snapshot renders multiple column checks" {
+    const allocator = std.testing.allocator;
+
+    var checks = std.StringHashMap(std.ArrayList([]u8)).init(allocator);
+    defer deinitCheckMap(allocator, &checks);
+    try appendOwnedColumnCheck(
+        allocator,
+        &checks,
+        try allocator.dupe(u8, "inventory.quantity"),
+        try allocator.dupe(u8, "quantity >= 0"),
+    );
+    try appendOwnedColumnCheck(
+        allocator,
+        &checks,
+        try allocator.dupe(u8, "inventory.quantity"),
+        try allocator.dupe(u8, "quantity <= 100"),
+    );
+
+    var out = io_compat.AllocatingWriter.init(allocator);
+    defer out.deinit();
+    try writeLiveColumnChecks(out.writer(), &checks, "inventory.quantity");
+    const rendered = try out.toOwnedSlice();
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        " check (quantity >= 0) check (quantity <= 100)",
+        rendered,
+    );
 }
 
 pub fn pullSchema(allocator: Allocator, url: []const u8) !void {
