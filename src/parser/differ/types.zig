@@ -113,15 +113,23 @@ pub const MigrationCmd = struct {
     }
 
     pub fn deinitQailCmd(allocator: Allocator, cmd: *const @import("../../ast/cmd.zig").QailCmd) void {
-        if (cmd.columns.len == 0) return;
+        if (cmd.columns.len > 0) {
+            for (cmd.columns) |col| {
+                deinitColumnDefExpr(allocator, col);
+            }
 
-        for (cmd.columns) |col| {
-            deinitColumnDefExpr(allocator, col);
+            const cols_ptr: [*]const Expr = cmd.columns.ptr;
+            const cols_many: [*]Expr = @constCast(cols_ptr);
+            allocator.free(cols_many[0..cmd.columns.len]);
         }
 
-        const cols_ptr: [*]const Expr = cmd.columns.ptr;
-        const cols_many: [*]Expr = @constCast(cols_ptr);
-        allocator.free(cols_many[0..cmd.columns.len]);
+        if (cmd.index_def) |idx| {
+            if (idx.columns.len > 0) {
+                const idx_cols_ptr: [*]const []const u8 = idx.columns.ptr;
+                const idx_cols_many: [*][]const u8 = @constCast(idx_cols_ptr);
+                allocator.free(idx_cols_many[0..idx.columns.len]);
+            }
+        }
     }
 
     /// Convert to QailCmd for AST-native execution (preferred method)
@@ -195,11 +203,13 @@ pub const MigrationCmd = struct {
             },
             .create_index => blk: {
                 if (self.index) |idx| {
+                    const index_columns = try allocIndexColumns(allocator, idx.columns);
+                    errdefer allocator.free(index_columns);
                     var cmd = QailCmd.createIndex(idx.table);
                     cmd.index_def = .{
                         .name = idx.name,
                         .table = idx.table,
-                        .columns = &.{},
+                        .columns = index_columns,
                         .unique = idx.unique,
                     };
                     break :blk cmd;
@@ -492,6 +502,30 @@ fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, value, " \t\r\n");
     if (trimmed.len == 0 or containsUnquotedStatementDelimiter(trimmed)) return null;
     return trimmed;
+}
+
+fn allocIndexColumns(allocator: Allocator, columns: []const u8) ![]const []const u8 {
+    var out = std.ArrayList([]const u8).empty;
+    errdefer out.deinit(allocator);
+
+    var parts = std.mem.splitScalar(u8, columns, ',');
+    while (parts.next()) |part| {
+        const column = std.mem.trim(u8, part, " \t\r\n");
+        if (!isSimpleIndexColumn(column)) return error.InvalidIndexColumns;
+        try out.append(allocator, column);
+    }
+
+    if (out.items.len == 0) return error.InvalidIndexColumns;
+    return try out.toOwnedSlice(allocator);
+}
+
+fn isSimpleIndexColumn(column: []const u8) bool {
+    if (column.len == 0) return false;
+    if (!(std.ascii.isAlphabetic(column[0]) or column[0] == '_')) return false;
+    for (column[1..]) |ch| {
+        if (!(std.ascii.isAlphanumeric(ch) or ch == '_')) return false;
+    }
+    return true;
 }
 
 fn containsUnquotedStatementDelimiter(value: []const u8) bool {

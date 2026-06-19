@@ -1678,6 +1678,46 @@ test "generate sql" {
     try std.testing.expect(std.mem.indexOf(u8, sql, "id uuid") != null);
 }
 
+test "migration create index qail command preserves index columns" {
+    const allocator = std.testing.allocator;
+
+    const cmd = MigrationCmd{
+        .action = .create_index,
+        .table = "users",
+        .index = .{
+            .name = "idx_users_email_status",
+            .table = "users",
+            .columns = "email, status",
+            .unique = true,
+        },
+    };
+
+    const qail_cmd = try cmd.toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+
+    try std.testing.expect(qail_cmd.index_def != null);
+    try std.testing.expect(qail_cmd.index_def.?.unique);
+    try std.testing.expectEqual(@as(usize, 2), qail_cmd.index_def.?.columns.len);
+    try std.testing.expectEqualStrings("email", qail_cmd.index_def.?.columns[0]);
+    try std.testing.expectEqualStrings("status", qail_cmd.index_def.?.columns[1]);
+}
+
+test "migration create index qail command rejects unsupported index expressions" {
+    const allocator = std.testing.allocator;
+
+    const cmd = MigrationCmd{
+        .action = .create_index,
+        .table = "users",
+        .index = .{
+            .name = "idx_users_lower_email",
+            .table = "users",
+            .columns = "lower(email)",
+        },
+    };
+
+    try std.testing.expectError(error.InvalidIndexColumns, cmd.toQailCmd(allocator));
+}
+
 test "diff policy create and drop" {
     const allocator = std.testing.allocator;
 
