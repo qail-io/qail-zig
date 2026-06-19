@@ -709,6 +709,115 @@ fn writeLiveColumnReference(
     }
 }
 
+fn writeLivePolicies(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    base_tables: *const std.StringHashMap(void),
+    writer: anytype,
+    prefix_blank: bool,
+) !void {
+    const policy_cmd = QailCmd.get("pg_policies")
+        .select(&.{
+            Expr.col("policyname"),
+            Expr.col("tablename"),
+            Expr.col("cmd"),
+            Expr.col("permissive"),
+            Expr.col("roles"),
+            Expr.col("qual"),
+            Expr.col("with_check"),
+        }).where(&.{
+            .{ .condition = .{ .column = "schemaname", .op = .eq, .value = .{ .string = "public" } } },
+        }).orderBy(&.{
+        .{ .column = "tablename", .order = .asc },
+        .{ .column = "policyname", .order = .asc },
+    });
+    const rows = try pg.fetchAll(&policy_cmd);
+    defer deinitFetchedRows(allocator, rows);
+
+    var wrote_any = false;
+    for (rows) |row| {
+        const policy_name = row.getByName("policyname") orelse continue;
+        const table_name = row.getByName("tablename") orelse continue;
+        if (!base_tables.contains(table_name)) continue;
+        if (!isLiveSchemaIdentifier(policy_name) or !isLiveSchemaIdentifier(table_name)) {
+            return error.UnsupportedLivePolicyIdentifier;
+        }
+
+        const target = livePolicyTarget(row.getByName("cmd") orelse "") orelse return error.UnsupportedLivePolicyCommand;
+        const permissive = row.getByName("permissive") orelse "PERMISSIVE";
+        const is_restrictive = if (std.ascii.eqlIgnoreCase(permissive, "RESTRICTIVE"))
+            true
+        else if (std.ascii.eqlIgnoreCase(permissive, "PERMISSIVE"))
+            false
+        else
+            return error.UnsupportedLivePolicyPermissiveness;
+        const role = try livePolicyRole(row.getByName("roles") orelse "{public}");
+
+        const using_expr = row.getByName("qual");
+        const with_check_expr = row.getByName("with_check");
+        if (using_expr) |expr| {
+            if (!isSafeLivePolicyPredicate(expr)) return error.UnsupportedLivePolicyPredicate;
+        }
+        if (with_check_expr) |expr| {
+            if (!isSafeLivePolicyPredicate(expr)) return error.UnsupportedLivePolicyPredicate;
+        }
+
+        if (!wrote_any and prefix_blank) try writer.writeByte('\n');
+        wrote_any = true;
+
+        try writer.print("policy {s} on {s}", .{ policy_name, table_name });
+        if (is_restrictive) try writer.writeAll(" restrictive");
+        try writer.print(" for {s}", .{target});
+        if (role) |role_name| try writer.print(" to {s}", .{role_name});
+        if (using_expr) |expr| {
+            const trimmed = std.mem.trim(u8, expr, " \t\r\n");
+            if (trimmed.len > 0) try writer.print(" using ({s})", .{trimmed});
+        }
+        if (with_check_expr) |expr| {
+            const trimmed = std.mem.trim(u8, expr, " \t\r\n");
+            if (trimmed.len > 0) try writer.print(" with_check ({s})", .{trimmed});
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+fn livePolicyTarget(cmd: []const u8) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(cmd, "ALL")) return "all";
+    if (std.ascii.eqlIgnoreCase(cmd, "SELECT")) return "select";
+    if (std.ascii.eqlIgnoreCase(cmd, "INSERT")) return "insert";
+    if (std.ascii.eqlIgnoreCase(cmd, "UPDATE")) return "update";
+    if (std.ascii.eqlIgnoreCase(cmd, "DELETE")) return "delete";
+    return null;
+}
+
+fn livePolicyRole(raw_roles: []const u8) !?[]const u8 {
+    const trimmed = std.mem.trim(u8, raw_roles, " \t\r\n{}");
+    if (trimmed.len == 0 or std.ascii.eqlIgnoreCase(trimmed, "public")) return null;
+    if (std.mem.indexOfScalar(u8, trimmed, ',') != null) return error.UnsupportedLivePolicyRoles;
+    if (!isLiveSchemaIdentifier(trimmed)) return error.UnsupportedLivePolicyRoles;
+    return trimmed;
+}
+
+fn isLiveSchemaIdentifier(identifier: []const u8) bool {
+    if (identifier.len == 0) return false;
+    if (!std.ascii.isAlphabetic(identifier[0]) and identifier[0] != '_') return false;
+    for (identifier[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+    return true;
+}
+
+fn isSafeLivePolicyPredicate(expr: []const u8) bool {
+    const trimmed = std.mem.trim(u8, expr, " \t\r\n");
+    if (trimmed.len == 0) return true;
+    if (std.mem.indexOfScalar(u8, trimmed, 0) != null) return false;
+    if (std.mem.indexOfScalar(u8, trimmed, ';') != null) return false;
+    if (std.mem.indexOf(u8, trimmed, "--") != null) return false;
+    if (std.mem.indexOf(u8, trimmed, "/*") != null) return false;
+    if (std.mem.indexOf(u8, trimmed, "*/") != null) return false;
+    return true;
+}
+
 pub fn normalizePostgresType(
     udt_name: []const u8,
     data_type: []const u8,
@@ -912,6 +1021,7 @@ pub fn renderLiveSchemaSnapshot(
     if (current_table != null) {
         try writer.writeAll(")\n");
     }
+    try writeLivePolicies(allocator, pg, &base_tables, writer, current_table != null);
 
     return .{
         .schema = try out.toOwnedSlice(),
@@ -1014,6 +1124,20 @@ test "live foreign key helpers render default references and reject actions" {
     defer allocator.free(rendered);
 
     try std.testing.expectEqualStrings(" references users(id)", rendered);
+}
+
+test "live policy helpers map targets roles and predicate safety" {
+    try std.testing.expectEqualStrings("select", livePolicyTarget("SELECT").?);
+    try std.testing.expect(livePolicyTarget("MERGE") == null);
+
+    try std.testing.expect((try livePolicyRole("{public}")) == null);
+    try std.testing.expectEqualStrings("app_user", (try livePolicyRole("{app_user}")).?);
+    try std.testing.expectError(error.UnsupportedLivePolicyRoles, livePolicyRole("{app_user,app_admin}"));
+
+    try std.testing.expect(isLiveSchemaIdentifier("orders_policy"));
+    try std.testing.expect(!isLiveSchemaIdentifier("orders-policy"));
+    try std.testing.expect(isSafeLivePolicyPredicate("tenant_id = current_setting('app.tenant_id')::uuid"));
+    try std.testing.expect(!isSafeLivePolicyPredicate("tenant_id = 1; drop table orders"));
 }
 
 pub fn pullSchema(allocator: Allocator, url: []const u8) !void {
