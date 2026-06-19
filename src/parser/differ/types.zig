@@ -3,10 +3,13 @@ const Allocator = std.mem.Allocator;
 const io = @import("../../runtime/io.zig");
 const render = @import("../../transpiler/postgres/render.zig");
 const schema = @import("../schema.zig");
+const ast_expr = @import("../../ast/expr.zig");
 
 const ColumnDef = schema.ColumnDef;
 const PolicyDef = schema.PolicyDef;
 const GrantDef = schema.GrantDef;
+const Expr = ast_expr.Expr;
+const Constraint = ast_expr.Constraint;
 
 pub const MigrationCmd = struct {
     action: Action,
@@ -54,17 +57,67 @@ pub const MigrationCmd = struct {
         return writer.toOwnedSlice();
     }
 
+    fn allocColumnConstraints(allocator: Allocator, col: ColumnDef) ![]const Constraint {
+        if (col.check == null) return &.{};
+
+        const check_values = try allocator.alloc([]const u8, 1);
+        errdefer allocator.free(check_values);
+        check_values[0] = col.check.?;
+
+        const constraints = try allocator.alloc(Constraint, 1);
+        constraints[0] = .{ .check = check_values };
+        return constraints;
+    }
+
+    fn freeColumnConstraints(allocator: Allocator, constraints: []const Constraint) void {
+        for (constraints) |constraint| {
+            switch (constraint) {
+                .check => |values| allocator.free(values),
+                else => {},
+            }
+        }
+        if (constraints.len > 0) allocator.free(constraints);
+    }
+
+    fn deinitColumnDefExpr(allocator: Allocator, expr: Expr) void {
+        if (expr != .column_def) return;
+        allocator.free(expr.column_def.data_type);
+        freeColumnConstraints(allocator, expr.column_def.constraints);
+    }
+
+    fn allocColumnDefExpr(allocator: Allocator, col: ColumnDef, include_constraints: bool) !Expr {
+        const type_buf = try allocColumnType(allocator, col);
+        errdefer allocator.free(type_buf);
+
+        const constraints = if (include_constraints)
+            try allocColumnConstraints(allocator, col)
+        else
+            &.{};
+        errdefer freeColumnConstraints(allocator, constraints);
+
+        return .{
+            .column_def = .{
+                .name = col.name,
+                .data_type = type_buf,
+                .constraints = constraints,
+                .is_primary_key = col.primary_key,
+                .is_unique = col.unique,
+                .is_not_null = !col.nullable,
+                .default_value = col.default_value,
+                .references = col.references,
+            },
+        };
+    }
+
     pub fn deinitQailCmd(allocator: Allocator, cmd: *const @import("../../ast/cmd.zig").QailCmd) void {
         if (cmd.columns.len == 0) return;
 
         for (cmd.columns) |col| {
-            if (col == .column_def) {
-                allocator.free(col.column_def.data_type);
-            }
+            deinitColumnDefExpr(allocator, col);
         }
 
-        const cols_ptr: [*]const @import("../../ast/expr.zig").Expr = cmd.columns.ptr;
-        const cols_many: [*]@import("../../ast/expr.zig").Expr = @constCast(cols_ptr);
+        const cols_ptr: [*]const Expr = cmd.columns.ptr;
+        const cols_many: [*]Expr = @constCast(cols_ptr);
         allocator.free(cols_many[0..cmd.columns.len]);
     }
 
@@ -72,7 +125,6 @@ pub const MigrationCmd = struct {
     /// NOTE: caller must invoke `deinitQailCmd` on returned commands.
     pub fn toQailCmd(self: *const MigrationCmd, allocator: Allocator) !@import("../../ast/cmd.zig").QailCmd {
         const QailCmd = @import("../../ast/cmd.zig").QailCmd;
-        const Expr = @import("../../ast/expr.zig").Expr;
 
         return switch (self.action) {
             .create_table => blk: {
@@ -82,25 +134,13 @@ pub const MigrationCmd = struct {
                     var initialized: usize = 0;
                     errdefer {
                         for (cols[0..initialized]) |expr| {
-                            if (expr == .column_def) allocator.free(expr.column_def.data_type);
+                            deinitColumnDefExpr(allocator, expr);
                         }
                         allocator.free(cols);
                     }
 
                     for (self.table_columns, 0..) |col_def, i| {
-                        const type_buf = try allocColumnType(allocator, col_def);
-
-                        cols[i] = .{
-                            .column_def = .{
-                                .name = col_def.name,
-                                .data_type = type_buf,
-                                .is_primary_key = col_def.primary_key,
-                                .is_unique = col_def.unique,
-                                .is_not_null = !col_def.nullable,
-                                .default_value = col_def.default_value,
-                                .references = col_def.references,
-                            },
-                        };
+                        cols[i] = try allocColumnDefExpr(allocator, col_def, true);
                         initialized += 1;
                     }
                     cmd.columns = cols;
@@ -112,10 +152,13 @@ pub const MigrationCmd = struct {
                 if (self.column) |col| {
                     var cmd = QailCmd.alter(self.table);
                     const cols = try allocator.alloc(Expr, 1);
-                    errdefer allocator.free(cols);
-                    const type_buf = try allocColumnType(allocator, col);
-                    errdefer allocator.free(type_buf);
-                    cols[0] = Expr.def(col.name, type_buf);
+                    var initialized = false;
+                    errdefer {
+                        if (initialized) deinitColumnDefExpr(allocator, cols[0]);
+                        allocator.free(cols);
+                    }
+                    cols[0] = try allocColumnDefExpr(allocator, col, true);
+                    initialized = true;
                     cmd.columns = cols;
                     break :blk cmd;
                 }
@@ -135,10 +178,13 @@ pub const MigrationCmd = struct {
                 if (self.column) |col| {
                     var cmd = QailCmd.modify(self.table);
                     const cols = try allocator.alloc(Expr, 1);
-                    errdefer allocator.free(cols);
-                    const type_buf = try allocColumnType(allocator, col);
-                    errdefer allocator.free(type_buf);
-                    cols[0] = Expr.def(col.name, type_buf);
+                    var initialized = false;
+                    errdefer {
+                        if (initialized) deinitColumnDefExpr(allocator, cols[0]);
+                        allocator.free(cols);
+                    }
+                    cols[0] = try allocColumnDefExpr(allocator, col, false);
+                    initialized = true;
                     cmd.columns = cols;
                     break :blk cmd;
                 }
@@ -213,6 +259,9 @@ pub const MigrationCmd = struct {
                         if (col.references) |ref| {
                             try w.print(" REFERENCES {s}", .{ref});
                         }
+                        if (col.check) |check| {
+                            try writeCheckConstraint(w, check);
+                        }
                     }
                     try w.writeAll("\n)");
                 }
@@ -232,6 +281,9 @@ pub const MigrationCmd = struct {
                     }
                     if (col.default_value) |def| {
                         try w.print(" DEFAULT {s}", .{def});
+                    }
+                    if (col.check) |check| {
+                        try writeCheckConstraint(w, check);
                     }
                 }
             },
@@ -418,6 +470,65 @@ pub const MigrationCmd = struct {
         return writer.toOwnedSlice();
     }
 };
+
+fn writeCheckConstraint(writer: anytype, expr: []const u8) !void {
+    const trimmed = checkedSqlExprFragment(expr) orelse return error.UnsafeSqlFragment;
+    try writer.print(" CHECK ({s})", .{trimmed});
+}
+
+fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0 or containsUnquotedStatementDelimiter(trimmed)) return null;
+    return trimmed;
+}
+
+fn containsUnquotedStatementDelimiter(value: []const u8) bool {
+    var i: usize = 0;
+    var in_single = false;
+    var in_double = false;
+
+    while (i < value.len) {
+        const b = value[i];
+        if (b == 0) return true;
+
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < value.len and value[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (in_double) {
+            if (b == '"') {
+                if (i + 1 < value.len and value[i + 1] == '"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        switch (b) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ';' => return true,
+            '-' => if (i + 1 < value.len and value[i + 1] == '-') return true,
+            '/' => if (i + 1 < value.len and value[i + 1] == '*') return true,
+            '*' => if (i + 1 < value.len and value[i + 1] == '/') return true,
+            else => {},
+        }
+        i += 1;
+    }
+
+    return false;
+}
 
 pub const IndexInfo = struct {
     name: []const u8,

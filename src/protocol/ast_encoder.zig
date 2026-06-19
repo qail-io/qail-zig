@@ -3013,6 +3013,16 @@ fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
             }
         }
     }
+
+    for (def.constraints) |c| {
+        if (c == .check) {
+            for (c.check) |fragment| {
+                try writer.writeAll(" CHECK (");
+                try writeSqlExprFragmentOrError(writer, fragment);
+                try writer.writeByte(')');
+            }
+        }
+    }
 }
 
 fn writeSqlExprFragmentOrError(writer: anytype, fragment: []const u8) !void {
@@ -3480,7 +3490,8 @@ test "ast encoder column definition fragments fail closed" {
     var encoder = AstEncoder.init(std.testing.allocator);
     defer encoder.deinit();
 
-    const safe_constraints = [_]ast.expr.Constraint{.{ .default = "'semi;inside'" }};
+    const safe_check_values = [_][]const u8{"note <> 'semi;inside'"};
+    const safe_constraints = [_]ast.expr.Constraint{ .{ .default = "'semi;inside'" }, .{ .check = &safe_check_values } };
     const safe_defs = [_]Expr{Expr.defWithConstraints("note", "text", &safe_constraints)};
     const safe_cmd = QailCmd.make("events").select(&safe_defs);
 
@@ -3488,11 +3499,12 @@ test "ast encoder column definition fragments fail closed" {
     var safe_writer = io.FixedBufferWriter.init(&safe_buf);
     try encoder.writeAstToSql(safe_writer.writer(), &safe_cmd);
     try std.testing.expectEqualStrings(
-        "CREATE TABLE IF NOT EXISTS events (note text DEFAULT 'semi;inside')",
+        "CREATE TABLE IF NOT EXISTS events (note text DEFAULT 'semi;inside' CHECK (note <> 'semi;inside'))",
         safe_writer.getWritten(),
     );
 
-    const bad_constraints = [_]ast.expr.Constraint{.{ .default = "0; DROP TABLE users; --" }};
+    const bad_check_values = [_][]const u8{"score > 0; DROP TABLE users; --"};
+    const bad_constraints = [_]ast.expr.Constraint{ .{ .default = "0; DROP TABLE users; --" }, .{ .check = &bad_check_values } };
     const bad_defs = [_]Expr{Expr.defWithConstraints("score", "integer", &bad_constraints)};
     const bad_cmd = QailCmd.make("events").select(&bad_defs);
 
@@ -3500,7 +3512,7 @@ test "ast encoder column definition fragments fail closed" {
     var bad_writer = io.FixedBufferWriter.init(&bad_buf);
     try encoder.writeAstToSql(bad_writer.writer(), &bad_cmd);
     try std.testing.expectEqualStrings(
-        "CREATE TABLE IF NOT EXISTS events (score integer DEFAULT /* ERROR: Invalid column definition fragment */)",
+        "CREATE TABLE IF NOT EXISTS events (score integer DEFAULT /* ERROR: Invalid column definition fragment */ CHECK (/* ERROR: Invalid column definition fragment */))",
         bad_writer.getWritten(),
     );
 

@@ -24,6 +24,74 @@ fn columnTypesEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) b
     return typeParamsEquivalent(old_col.type_params, new_col.type_params);
 }
 
+fn columnChecksEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
+    if (old_col.check == null and new_col.check == null) return true;
+    if (old_col.check == null or new_col.check == null) return false;
+    return checkExpressionsEquivalent(old_col.check.?, new_col.check.?);
+}
+
+fn checkExpressionsEquivalent(left: []const u8, right: []const u8) bool {
+    const normalized_left = stripRedundantOuterParens(std.mem.trim(u8, left, " \t\r\n"));
+    const normalized_right = stripRedundantOuterParens(std.mem.trim(u8, right, " \t\r\n"));
+    return eqlIgnoreAsciiWhitespace(normalized_left, normalized_right);
+}
+
+fn stripRedundantOuterParens(input: []const u8) []const u8 {
+    var current = input;
+    while (hasRedundantOuterParens(current)) {
+        current = std.mem.trim(u8, current[1 .. current.len - 1], " \t\r\n");
+    }
+    return current;
+}
+
+fn hasRedundantOuterParens(input: []const u8) bool {
+    if (input.len < 2 or input[0] != '(' or input[input.len - 1] != ')') return false;
+
+    var depth: usize = 0;
+    var in_single = false;
+    var in_double = false;
+
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        const b = input[i];
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < input.len and input[i + 1] == '\'') {
+                    i += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+
+        if (in_double) {
+            if (b == '"') {
+                if (i + 1 < input.len and input[i + 1] == '"') {
+                    i += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+
+        switch (b) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => {
+                if (depth == 0) return false;
+                depth -= 1;
+                if (depth == 0 and i != input.len - 1) return false;
+            },
+            else => {},
+        }
+    }
+
+    return depth == 0;
+}
+
 fn typeParamsEquivalent(old_params: ?[]const u8, new_params: ?[]const u8) bool {
     if (old_params == null and new_params == null) return true;
     if (old_params == null or new_params == null) return false;
@@ -55,6 +123,7 @@ fn eqlIgnoreAsciiWhitespace(left: []const u8, right: []const u8) bool {
 /// Returns a list of migration commands needed to go from `old` to `new`.
 pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema) !std.ArrayList(MigrationCmd) {
     var cmds = std.ArrayList(MigrationCmd).initCapacity(allocator, 0) catch unreachable;
+    errdefer deinitDiffCommands(allocator, &cmds);
 
     // 1. Detect new tables - CREATE TABLE with all columns (AST-native)
     for (new.tables.items) |new_table| {
@@ -116,6 +185,9 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
                             .table = new_table.name,
                             .column = new_col,
                         });
+                    }
+                    if (!columnChecksEquivalent(old_col, &new_col)) {
+                        return error.UnsupportedCheckConstraintDrift;
                     }
                 }
             }
@@ -209,6 +281,13 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
     return cmds;
 }
 
+fn deinitDiffCommands(allocator: Allocator, cmds: *std.ArrayList(MigrationCmd)) void {
+    for (cmds.items) |cmd| {
+        if (cmd.table_columns.len > 0) allocator.free(cmd.table_columns);
+    }
+    cmds.deinit(allocator);
+}
+
 /// Generate SQL statements from migration commands
 pub fn toSqlStatements(allocator: Allocator, cmds: *const std.ArrayList(MigrationCmd)) ![]const u8 {
     var writer = io.AllocatingWriter.init(allocator);
@@ -257,6 +336,53 @@ test "diff new table" {
     // New design: 1 create_table with full DDL (no separate add_column)
     try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
     try std.testing.expect(cmds.items[0].action == .create_table);
+}
+
+test "diff new table preserves column check constraint" {
+    const allocator = std.testing.allocator;
+
+    const old_input = "";
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check (quantity >= 0)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) {
+                allocator.free(cmd.table_columns);
+            }
+        }
+        cmds.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.create_table, cmds.items[0].action);
+
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "CHECK (quantity >= 0)") != null);
+
+    const qail_cmd = try cmds.items[0].toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+    try std.testing.expectEqualStrings("quantity >= 0", qail_cmd.columns[0].column_def.constraints[0].check[0]);
+
+    const AstEncoder = @import("../protocol/ast_encoder.zig").AstEncoder;
+    var encoder = AstEncoder.init(allocator);
+    defer encoder.deinit();
+    const encoded_sql = try encoder.toSqlOwned(allocator, &qail_cmd);
+    defer allocator.free(encoded_sql);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS inventory (quantity integer CHECK (quantity >= 0))",
+        encoded_sql,
+    );
 }
 
 test "diff dropped table" {
@@ -314,6 +440,101 @@ test "diff new column" {
     try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
     try std.testing.expect(cmds.items[0].action == .add_column);
     try std.testing.expectEqualStrings("email", cmds.items[0].column.?.name);
+}
+
+test "diff new column preserves column check constraint" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table players (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table players (
+        \\    id uuid primary_key,
+        \\    score integer check (score >= 0)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.add_column, cmds.items[0].action);
+
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE players ADD COLUMN score integer CHECK (score >= 0)",
+        sql,
+    );
+
+    const qail_cmd = try cmds.items[0].toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+    try std.testing.expectEqualStrings("score >= 0", qail_cmd.columns[0].column_def.constraints[0].check[0]);
+
+    const AstEncoder = @import("../protocol/ast_encoder.zig").AstEncoder;
+    var encoder = AstEncoder.init(allocator);
+    defer encoder.deinit();
+    const encoded_sql = try encoder.toSqlOwned(allocator, &qail_cmd);
+    defer allocator.free(encoded_sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE players ADD COLUMN score integer CHECK (score >= 0)",
+        encoded_sql,
+    );
+}
+
+test "diff existing column check drift fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table inventory (
+        \\    quantity integer check (quantity >= 0)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check (quantity > 0)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedCheckConstraintDrift, diffSchemas(allocator, &old, &new));
+}
+
+test "diff existing column check ignores redundant parentheses and whitespace" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table inventory (
+        \\    quantity integer check (((quantity >= 0)))
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check ( quantity>=0 )
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
 }
 
 test "diff new column preserves full type in SQL and AST" {
