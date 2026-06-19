@@ -702,6 +702,34 @@ test "trusted transpiler quotes expression identifiers and escapes json paths" {
     try std.testing.expect(std.mem.indexOf(u8, sql, ").field; DROP") == null);
 }
 
+test "trusted transpiler hardens window expressions" {
+    const bad_window_cols = [_]Expr{.{ .window = .{
+        .name = "rn",
+        .func = "row_number); DROP TABLE users; --",
+    } }};
+    const bad_window_cmd = QailCmd.get("users").select(&bad_window_cols);
+    const bad_window_sql = try toSqlTrusted(std.testing.allocator, &bad_window_cmd);
+    defer std.testing.allocator.free(bad_window_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT /* ERROR: Invalid window function name */ FROM users",
+        bad_window_sql,
+    );
+
+    const window_cols = [_]Expr{.{ .window = .{
+        .name = "rn",
+        .func = "row_number",
+        .partition = &.{"tenant.id"},
+        .order = &[_]ast.expr.OrderByExpr{.{ .column = "name\"; DROP TABLE users; --" }},
+    } }};
+    const window_cmd = QailCmd.get("users").select(&window_cols);
+    const window_sql = try toSqlTrusted(std.testing.allocator, &window_cmd);
+    defer std.testing.allocator.free(window_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT row_number() OVER (PARTITION BY tenant.id ORDER BY \"name\"\"; DROP TABLE users; --\" ASC) AS rn FROM users",
+        window_sql,
+    );
+}
+
 test "public transpiler rejects unsafe ast" {
     const unsafe_table = QailCmd.get("users; DROP TABLE users");
     try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &unsafe_table));

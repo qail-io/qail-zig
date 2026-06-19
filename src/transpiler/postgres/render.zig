@@ -8,6 +8,7 @@ const ast = struct {
 
 const Expr = ast.expr.Expr;
 const Value = ast.values.Value;
+const WindowExpr = @TypeOf(@as(Expr, undefined).window);
 
 const INVALID_EXISTS_CONDITION =
     "FALSE /* ERROR: EXISTS condition requires subquery value */";
@@ -16,6 +17,7 @@ const INVALID_IN_CONDITION =
 const INVALID_BETWEEN_CONDITION =
     "FALSE /* ERROR: BETWEEN condition requires exactly two array values */";
 const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
+const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */";
 const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
 const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
 
@@ -310,6 +312,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
                 try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
+        .window => |w| try writeWindowExpr(writer, w),
         .exists_subquery => |sq| {
             if (sq.negated) {
                 try writer.writeAll("NOT EXISTS (");
@@ -385,7 +388,14 @@ fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
         try writer.writeAll(INVALID_IDENTIFIER);
         return;
     }
-    try writeIdentifierMaybeQuoted(writer, value);
+
+    var parts = std.mem.splitScalar(u8, value, '.');
+    var first = true;
+    while (parts.next()) |part| {
+        if (!first) try writer.writeByte('.');
+        first = false;
+        try writeIdentifierMaybeQuoted(writer, part);
+    }
 }
 
 fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
@@ -422,6 +432,58 @@ fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
         } else {
             try writer.writeByte(c);
         }
+    }
+}
+
+fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
+    if (!isSafeFunctionName(w.func)) {
+        try writer.writeAll(INVALID_WINDOW_FUNCTION_NAME);
+        return;
+    }
+
+    try writer.writeAll(w.func);
+    try writer.writeAll("() OVER (");
+    if (w.partition.len > 0) {
+        try writer.writeAll("PARTITION BY ");
+        for (w.partition, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeIdentifierOrError(writer, col);
+        }
+    }
+    if (w.order.len > 0) {
+        if (w.partition.len > 0) try writer.writeByte(' ');
+        try writer.writeAll("ORDER BY ");
+        for (w.order, 0..) |o, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeIdentifierOrError(writer, o.column);
+            try writer.writeAll(if (o.direction == .asc) " ASC" else " DESC");
+        }
+    }
+    if (w.frame) |frame| {
+        if (w.partition.len > 0 or w.order.len > 0) try writer.writeByte(' ');
+        try writer.writeAll(if (frame.kind == .rows) "ROWS" else "RANGE");
+        try writer.writeAll(" BETWEEN ");
+        try writeFrameBound(writer, frame.start_bound);
+        if (frame.end_bound) |end| {
+            try writer.writeAll(" AND ");
+            try writeFrameBound(writer, end);
+        }
+    }
+    try writer.writeByte(')');
+    const alias_opt: ?[]const u8 = if (w.alias) |alias| alias else if (w.name.len > 0) w.name else null;
+    if (alias_opt) |alias| {
+        try writer.writeAll(" AS ");
+        try writeIdentifierMaybeQuoted(writer, alias);
+    }
+}
+
+fn writeFrameBound(writer: anytype, bound: ast.expr.FrameBound) !void {
+    switch (bound) {
+        .unbounded_preceding => try writer.writeAll("UNBOUNDED PRECEDING"),
+        .unbounded_following => try writer.writeAll("UNBOUNDED FOLLOWING"),
+        .current_row => try writer.writeAll("CURRENT ROW"),
+        .preceding => |n| try writer.print("{d} PRECEDING", .{n}),
+        .following => |n| try writer.print("{d} FOLLOWING", .{n}),
     }
 }
 

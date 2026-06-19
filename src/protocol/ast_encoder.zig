@@ -37,6 +37,7 @@ const INVALID_BETWEEN_CONDITION =
     "FALSE /* ERROR: BETWEEN condition requires exactly two array values */";
 const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
 const INVALID_FUNCTION_KEYWORD = "/* ERROR: Invalid function keyword */";
+const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */";
 const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
 const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
 
@@ -1698,7 +1699,14 @@ fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
         try writer.writeAll(INVALID_IDENTIFIER);
         return;
     }
-    try writeIdentifierMaybeQuoted(writer, value);
+
+    var parts = std.mem.splitScalar(u8, value, '.');
+    var first = true;
+    while (parts.next()) |part| {
+        if (!first) try writer.writeByte('.');
+        first = false;
+        try writeIdentifierMaybeQuoted(writer, part);
+    }
 }
 
 fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
@@ -1981,13 +1989,18 @@ fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
 }
 
 fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
+    if (!isSafeFunctionName(w.func)) {
+        try writer.writeAll(INVALID_WINDOW_FUNCTION_NAME);
+        return;
+    }
+
     try writer.writeAll(w.func);
     try writer.writeAll("() OVER (");
     if (w.partition.len > 0) {
         try writer.writeAll("PARTITION BY ");
         for (w.partition, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(col);
+            try writeIdentifierOrError(writer, col);
         }
     }
     if (w.order.len > 0) {
@@ -1995,14 +2008,35 @@ fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
         try writer.writeAll("ORDER BY ");
         for (w.order, 0..) |o, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(o.column);
+            try writeIdentifierOrError(writer, o.column);
             try writer.writeAll(if (o.direction == .asc) " ASC" else " DESC");
         }
     }
+    if (w.frame) |frame| {
+        if (w.partition.len > 0 or w.order.len > 0) try writer.writeByte(' ');
+        try writer.writeAll(if (frame.kind == .rows) "ROWS" else "RANGE");
+        try writer.writeAll(" BETWEEN ");
+        try writeFrameBound(writer, frame.start_bound);
+        if (frame.end_bound) |end| {
+            try writer.writeAll(" AND ");
+            try writeFrameBound(writer, end);
+        }
+    }
     try writer.writeByte(')');
-    if (w.alias) |a| {
+    const alias_opt: ?[]const u8 = if (w.alias) |alias| alias else if (w.name.len > 0) w.name else null;
+    if (alias_opt) |a| {
         try writer.writeAll(" AS ");
-        try writer.writeAll(a);
+        try writeIdentifierMaybeQuoted(writer, a);
+    }
+}
+
+fn writeFrameBound(writer: anytype, bound: ast.expr.FrameBound) !void {
+    switch (bound) {
+        .unbounded_preceding => try writer.writeAll("UNBOUNDED PRECEDING"),
+        .unbounded_following => try writer.writeAll("UNBOUNDED FOLLOWING"),
+        .current_row => try writer.writeAll("CURRENT ROW"),
+        .preceding => |n| try writer.print("{d} PRECEDING", .{n}),
+        .following => |n| try writer.print("{d} FOLLOWING", .{n}),
     }
 }
 
@@ -2736,6 +2770,41 @@ test "ast encoder quotes expression identifiers and escapes json paths" {
     try std.testing.expect(std.mem.indexOf(u8, sql, ").\"field; DROP TABLE users; --\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "COLLATE \"C\"; DROP") == null);
     try std.testing.expect(std.mem.indexOf(u8, sql, ").field; DROP") == null);
+}
+
+test "ast encoder hardens window expressions" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const bad_window_cols = [_]Expr{.{ .window = .{
+        .name = "rn",
+        .func = "row_number); DROP TABLE users; --",
+    } }};
+    const bad_window_cmd = QailCmd.get("users").select(&bad_window_cols);
+
+    var bad_buf: [256]u8 = undefined;
+    var bad_writer = io.FixedBufferWriter.init(&bad_buf);
+    try encoder.writeAstToSql(bad_writer.writer(), &bad_window_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT /* ERROR: Invalid window function name */ FROM users",
+        bad_writer.getWritten(),
+    );
+
+    const window_cols = [_]Expr{.{ .window = .{
+        .name = "rn",
+        .func = "row_number",
+        .partition = &.{"tenant.id"},
+        .order = &[_]ast.expr.OrderByExpr{.{ .column = "name\"; DROP TABLE users; --" }},
+    } }};
+    const window_cmd = QailCmd.get("users").select(&window_cols);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &window_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT row_number() OVER (PARTITION BY tenant.id ORDER BY \"name\"\"; DROP TABLE users; --\" ASC) AS rn FROM users",
+        writer.getWritten(),
+    );
 }
 
 test "ast encoder privilege and policy validation" {
