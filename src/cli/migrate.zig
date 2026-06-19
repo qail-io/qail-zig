@@ -47,6 +47,7 @@ pub fn make(comptime Cli: type) type {
     const Allocator = std.mem.Allocator;
     const QailCmd = @import("../ast/cmd.zig").QailCmd;
     const Expr = @import("../ast/expr.zig").Expr;
+    const MigrationCmd = @import("../parser/mod.zig").MigrationCmd;
     const io_compat = @import("../runtime/io.zig");
     const data_safety = @import("../data_safety.zig");
     const schema_cli = @import("schema.zig");
@@ -1555,13 +1556,7 @@ pub fn make(comptime Cli: type) type {
                             success = false;
                             break;
                         };
-                        // Free heap-allocated columns after this iteration
-                        defer if (qail_cmd.columns.len > 0) {
-                            // Cast away const for deallocation (columns were heap-allocated by toQailCmd)
-                            const cols_ptr: [*]const Expr = qail_cmd.columns.ptr;
-                            const cols_many: [*]Expr = @constCast(cols_ptr);
-                            allocator.free(cols_many[0..qail_cmd.columns.len]);
-                        };
+                        defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
 
                         // Show what we're executing
                         const stmt_sql = migration_cmd.toSql(allocator) catch continue;

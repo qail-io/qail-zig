@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const QailCmd = @import("../ast/cmd.zig").QailCmd;
 const Expr = @import("../ast/expr.zig").Expr;
+const MigrationCmd = @import("../parser/mod.zig").MigrationCmd;
 const io_compat = @import("../runtime/io.zig");
 
 const print = std.debug.print;
@@ -67,17 +68,10 @@ fn connectPgUrl(
     return try driver_mod.driver.PgDriver.connectUrl(allocator, url);
 }
 
-fn freeGeneratedCmdColumns(allocator: Allocator, cmd: *const QailCmd) void {
-    if (cmd.columns.len == 0) return;
-    const cols_ptr: [*]const Expr = cmd.columns.ptr;
-    const cols_many: [*]Expr = @constCast(cols_ptr);
-    allocator.free(cols_many[0..cmd.columns.len]);
-}
-
 fn executeMigrationCmds(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
-    cmds: []const @import("../parser/mod.zig").MigrationCmd,
+    cmds: []const MigrationCmd,
     label: []const u8,
 ) !void {
     for (cmds, 0..) |migration_cmd, i| {
@@ -91,7 +85,7 @@ fn executeMigrationCmds(
             print("Error converting {s} step {d} to AST command: {}\n", .{ label, i + 1, err });
             return err;
         };
-        defer freeGeneratedCmdColumns(allocator, &qail_cmd);
+        defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
 
         print("  [{s} {d}] {s};\n", .{ label, i + 1, stmt_sql });
         _ = pg.execute(&qail_cmd) catch |err| {

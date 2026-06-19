@@ -32,8 +32,44 @@ pub const MigrationCmd = struct {
         revoke,
     };
 
+    fn writeColumnType(writer: anytype, col: ColumnDef) !void {
+        if (col.is_serial) {
+            try writer.writeAll(col.typ);
+            return;
+        }
+
+        try writer.writeAll(col.typ);
+        if (col.type_params) |params| {
+            try writer.print("({s})", .{params});
+        }
+        if (col.is_array) {
+            try writer.writeAll("[]");
+        }
+    }
+
+    fn allocColumnType(allocator: Allocator, col: ColumnDef) ![]const u8 {
+        var writer = io.AllocatingWriter.init(allocator);
+        defer writer.deinit();
+        try writeColumnType(writer.writer(), col);
+        return writer.toOwnedSlice();
+    }
+
+    pub fn deinitQailCmd(allocator: Allocator, cmd: *const @import("../../ast/cmd.zig").QailCmd) void {
+        if (cmd.columns.len == 0) return;
+
+        for (cmd.columns) |col| {
+            if (col == .column_def) {
+                allocator.free(col.column_def.data_type);
+            }
+        }
+
+        const cols_ptr: [*]const @import("../../ast/expr.zig").Expr = cmd.columns.ptr;
+        const cols_many: [*]@import("../../ast/expr.zig").Expr = @constCast(cols_ptr);
+        allocator.free(cols_many[0..cmd.columns.len]);
+    }
+
     /// Convert to QailCmd for AST-native execution (preferred method)
-    /// NOTE: caller must free returned cmd.columns if non-empty
+    /// NOTE: caller must invoke `deinitQailCmd` on returned commands.
     pub fn toQailCmd(self: *const MigrationCmd, allocator: Allocator) !@import("../../ast/cmd.zig").QailCmd {
         const QailCmd = @import("../../ast/cmd.zig").QailCmd;
         const Expr = @import("../../ast/expr.zig").Expr;
@@ -43,11 +79,16 @@ pub const MigrationCmd = struct {
                 var cmd = QailCmd.make(self.table);
                 if (self.table_columns.len > 0) {
                     const cols = try allocator.alloc(Expr, self.table_columns.len);
-                    for (self.table_columns, 0..) |col_def, i| {
-                        var type_buf: []const u8 = col_def.typ;
-                        if (col_def.is_serial) {
-                            type_buf = "serial";
+                    var initialized: usize = 0;
+                    errdefer {
+                        for (cols[0..initialized]) |expr| {
+                            if (expr == .column_def) allocator.free(expr.column_def.data_type);
                         }
+                        allocator.free(cols);
+                    }
+
+                    for (self.table_columns, 0..) |col_def, i| {
+                        const type_buf = try allocColumnType(allocator, col_def);
 
                         cols[i] = .{
                             .column_def = .{
@@ -60,6 +101,7 @@ pub const MigrationCmd = struct {
                                 .references = col_def.references,
                             },
                         };
+                        initialized += 1;
                     }
                     cmd.columns = cols;
                 }
@@ -70,7 +112,10 @@ pub const MigrationCmd = struct {
                 if (self.column) |col| {
                     var cmd = QailCmd.alter(self.table);
                     const cols = try allocator.alloc(Expr, 1);
-                    cols[0] = Expr.def(col.name, col.typ);
+                    errdefer allocator.free(cols);
+                    const type_buf = try allocColumnType(allocator, col);
+                    errdefer allocator.free(type_buf);
+                    cols[0] = Expr.def(col.name, type_buf);
                     cmd.columns = cols;
                     break :blk cmd;
                 }
@@ -90,7 +135,10 @@ pub const MigrationCmd = struct {
                 if (self.column) |col| {
                     var cmd = QailCmd.modify(self.table);
                     const cols = try allocator.alloc(Expr, 1);
-                    cols[0] = Expr.def(col.name, col.typ);
+                    errdefer allocator.free(cols);
+                    const type_buf = try allocColumnType(allocator, col);
+                    errdefer allocator.free(type_buf);
+                    cols[0] = Expr.def(col.name, type_buf);
                     cmd.columns = cols;
                     break :blk cmd;
                 }
@@ -154,7 +202,8 @@ pub const MigrationCmd = struct {
                     try w.writeAll(" (\n");
                     for (self.table_columns, 0..) |col, i| {
                         if (i > 0) try w.writeAll(",\n");
-                        try w.print("    {s} {s}", .{ col.name, col.typ });
+                        try w.print("    {s} ", .{col.name});
+                        try writeColumnType(w, col);
                         if (col.primary_key) try w.writeAll(" PRIMARY KEY");
                         if (!col.nullable and !col.primary_key) try w.writeAll(" NOT NULL");
                         if (col.unique and !col.primary_key) try w.writeAll(" UNIQUE");
@@ -173,14 +222,11 @@ pub const MigrationCmd = struct {
             },
             .add_column => {
                 if (self.column) |col| {
-                    try w.print("ALTER TABLE {s} ADD COLUMN {s} {s}", .{
+                    try w.print("ALTER TABLE {s} ADD COLUMN {s} ", .{
                         self.table,
                         col.name,
-                        col.typ,
                     });
-                    if (col.type_params) |params| {
-                        try w.print("({s})", .{params});
-                    }
+                    try writeColumnType(w, col);
                     if (!col.nullable) {
                         try w.writeAll(" NOT NULL");
                     }
@@ -199,11 +245,11 @@ pub const MigrationCmd = struct {
             },
             .alter_column => {
                 if (self.column) |col| {
-                    try w.print("ALTER TABLE {s} ALTER COLUMN {s} TYPE {s}", .{
+                    try w.print("ALTER TABLE {s} ALTER COLUMN {s} TYPE ", .{
                         self.table,
                         col.name,
-                        col.typ,
                     });
+                    try writeColumnType(w, col);
                 }
             },
             .create_index => {
