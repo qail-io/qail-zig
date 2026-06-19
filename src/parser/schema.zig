@@ -29,6 +29,14 @@ pub const GrantDef = schema_types.GrantDef;
 pub const TableDef = schema_types.TableDef;
 pub const ColumnDef = schema_types.ColumnDef;
 
+fn deinitPolicyDef(allocator: Allocator, policy: *const PolicyDef) void {
+    allocator.free(policy.name);
+    allocator.free(policy.table);
+    if (policy.role) |role| allocator.free(role);
+    if (policy.using_expr) |expr| freeOwnedExpr(allocator, expr);
+    if (policy.with_check_expr) |expr| freeOwnedExpr(allocator, expr);
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -54,11 +62,7 @@ pub const Schema = struct {
             table.deinit(self.allocator);
         }
         for (self.policies.items) |policy| {
-            self.allocator.free(policy.name);
-            self.allocator.free(policy.table);
-            if (policy.role) |role| self.allocator.free(role);
-            if (policy.using_expr) |expr| freeOwnedExpr(self.allocator, expr);
-            if (policy.with_check_expr) |expr| freeOwnedExpr(self.allocator, expr);
+            deinitPolicyDef(self.allocator, &policy);
         }
         for (self.grants.items) |grant| {
             grant.deinit(self.allocator);
@@ -255,21 +259,34 @@ const Parser = struct {
         const expr_start = self.pos;
 
         var depth: usize = 1;
+        var in_single = false;
         while (self.current()) |ch| {
-            if (ch == '(') {
+            if (ch == '\'') {
+                self.advance();
+                if (in_single and self.current() == '\'') {
+                    self.advance();
+                    continue;
+                }
+                in_single = !in_single;
+                continue;
+            }
+
+            if (!in_single and ch == '(') {
                 depth += 1;
-            } else if (ch == ')') {
+            } else if (!in_single and ch == ')') {
                 depth -= 1;
                 if (depth == 0) break;
             }
             self.advance();
         }
 
+        if (in_single) return error.UnterminatedStringLiteral;
         if (self.current() == null) return error.UnterminatedExpression;
         const expr_end = self.pos;
         self.advance(); // Skip closing ')'
 
         const expr = std.mem.trim(u8, self.input[expr_start..expr_end], " \t\r\n");
+        if (expr.len == 0) return error.InvalidPolicyExpression;
         return self.allocator.dupe(u8, expr);
     }
 
@@ -297,11 +314,13 @@ const Parser = struct {
         if (!self.matchKeyword("policy")) return error.ExpectedPolicy;
 
         const name = try self.parseIdentifier();
-        errdefer self.allocator.free(name);
+        var name_owned = true;
+        errdefer if (name_owned) self.allocator.free(name);
 
         if (!self.matchKeyword("on")) return error.ExpectedOnKeyword;
         const table = try self.parseIdentifier();
-        errdefer self.allocator.free(table);
+        var table_owned = true;
+        errdefer if (table_owned) self.allocator.free(table);
 
         var policy = PolicyDef{
             .name = name,
@@ -312,41 +331,52 @@ const Parser = struct {
             .using_expr = null,
             .with_check_expr = null,
         };
-        errdefer {
-            self.allocator.free(policy.name);
-            self.allocator.free(policy.table);
-            if (policy.role) |role| self.allocator.free(role);
-            if (policy.using_expr) |expr| freeOwnedExpr(self.allocator, expr);
-            if (policy.with_check_expr) |expr| freeOwnedExpr(self.allocator, expr);
-        }
+        name_owned = false;
+        table_owned = false;
+        errdefer deinitPolicyDef(self.allocator, &policy);
+
+        var seen_for = false;
+        var seen_role = false;
+        var seen_using = false;
+        var seen_with_check = false;
+        var seen_permissiveness = false;
 
         while (true) {
             const restore = self.pos;
 
             if (self.matchKeyword("for")) {
+                if (seen_for) return error.DuplicatePolicyClause;
+                seen_for = true;
                 policy.target = try self.parsePolicyTarget();
                 continue;
             }
 
             if (self.matchKeyword("to")) {
+                if (seen_role) return error.DuplicatePolicyClause;
+                seen_role = true;
                 const role = try self.parseIdentifier();
-                if (policy.role) |old_role| self.allocator.free(old_role);
                 policy.role = role;
                 continue;
             }
 
             if (self.matchKeyword("using")) {
+                if (seen_using) return error.DuplicatePolicyClause;
+                seen_using = true;
                 try self.parsePolicyPredicate(&policy.using_expr);
                 continue;
             }
 
             if (self.matchKeyword("with_check")) {
+                if (seen_with_check) return error.DuplicatePolicyClause;
+                seen_with_check = true;
                 try self.parsePolicyPredicate(&policy.with_check_expr);
                 continue;
             }
 
             if (self.matchKeyword("with")) {
                 if (self.matchKeyword("check")) {
+                    if (seen_with_check) return error.DuplicatePolicyClause;
+                    seen_with_check = true;
                     try self.parsePolicyPredicate(&policy.with_check_expr);
                     continue;
                 }
@@ -355,10 +385,14 @@ const Parser = struct {
             }
 
             if (self.matchKeyword("restrictive")) {
+                if (seen_permissiveness) return error.DuplicatePolicyClause;
+                seen_permissiveness = true;
                 policy.permissiveness = .restrictive;
                 continue;
             }
             if (self.matchKeyword("permissive")) {
+                if (seen_permissiveness) return error.DuplicatePolicyClause;
+                seen_permissiveness = true;
                 policy.permissiveness = .permissive;
                 continue;
             }
@@ -612,6 +646,7 @@ const Parser = struct {
                 }
                 const refs = std.mem.trim(u8, self.input[ref_start..self.pos], " \t\r\n");
                 if (refs.len == 0) return error.InvalidColumnConstraint;
+                if (std.mem.indexOfAny(u8, refs, "\r\n") != null) return error.InvalidColumnConstraint;
                 result.references = try self.allocator.dupe(u8, refs);
             } else if (self.matchKeyword("default")) {
                 if (seen_default) return error.DuplicateColumnConstraint;
@@ -620,23 +655,35 @@ const Parser = struct {
                 const def_start = self.pos;
                 // Parse default value - track parens for function calls like NOW()
                 var paren_depth: usize = 0;
+                var in_single = false;
                 while (self.current()) |ch| {
-                    if (ch == '(') {
+                    if (ch == '\'') {
+                        self.advance();
+                        if (in_single and self.current() == '\'') {
+                            self.advance();
+                            continue;
+                        }
+                        in_single = !in_single;
+                        continue;
+                    }
+
+                    if (!in_single and ch == '(') {
                         paren_depth += 1;
                         self.advance();
-                    } else if (ch == ')') {
+                    } else if (!in_single and ch == ')') {
                         if (paren_depth > 0) {
                             paren_depth -= 1;
                             self.advance();
                         } else {
                             break; // End of table definition
                         }
-                    } else if ((ch == ' ' or ch == '\t' or ch == ',' or ch == '}' or ch == '\n') and paren_depth == 0) {
+                    } else if (!in_single and (ch == ' ' or ch == '\t' or ch == ',' or ch == '}' or ch == '\n') and paren_depth == 0) {
                         break;
                     } else {
                         self.advance();
                     }
                 }
+                if (in_single) return error.UnterminatedStringLiteral;
                 const default_value = std.mem.trim(u8, self.input[def_start..self.pos], " \t\r\n");
                 if (default_value.len == 0) return error.InvalidColumnConstraint;
                 result.default_value = try self.allocator.dupe(u8, default_value);
@@ -646,14 +693,25 @@ const Parser = struct {
                 try self.expectChar('(');
                 const check_start = self.pos;
                 var depth: usize = 1;
+                var in_single = false;
                 while (self.current()) |ch| {
-                    if (ch == '(') depth += 1;
-                    if (ch == ')') {
+                    if (ch == '\'') {
+                        self.advance();
+                        if (in_single and self.current() == '\'') {
+                            self.advance();
+                            continue;
+                        }
+                        in_single = !in_single;
+                        continue;
+                    }
+                    if (!in_single and ch == '(') depth += 1;
+                    if (!in_single and ch == ')') {
                         depth -= 1;
                         if (depth == 0) break;
                     }
                     self.advance();
                 }
+                if (in_single) return error.UnterminatedStringLiteral;
                 if (self.current() != ')') return error.UnterminatedExpression;
                 const check_expr = std.mem.trim(u8, self.input[check_start..self.pos], " \t\r\n");
                 if (check_expr.len == 0) return error.InvalidColumnConstraint;
@@ -713,6 +771,13 @@ const Parser = struct {
             if (self.current() == null) break;
 
             const col = try self.parseColumn();
+            for (table.columns.items) |existing| {
+                if (std.ascii.eqlIgnoreCase(existing.name, col.name)) {
+                    var owned_col = col;
+                    owned_col.deinit(self.allocator);
+                    return error.DuplicateColumn;
+                }
+            }
             try table.columns.append(self.allocator, col);
 
             self.skipWhitespace();
@@ -723,6 +788,7 @@ const Parser = struct {
         }
 
         try self.expectChar(close_char);
+        if (table.columns.items.len == 0) return error.EmptyTable;
         return table;
     }
 
@@ -736,11 +802,19 @@ const Parser = struct {
 
             if (self.matchKeyword("table")) {
                 self.pos -= 5; // rewind "table"
-                const table = try self.parseTable();
+                var table = try self.parseTable();
+                if (schema.findTable(table.name) != null) {
+                    table.deinit(self.allocator);
+                    return error.DuplicateTable;
+                }
                 try schema.tables.append(self.allocator, table);
             } else if (self.matchKeyword("policy")) {
                 self.pos -= 6; // rewind "policy"
                 const policy = try self.parsePolicy();
+                if (schema.findPolicy(policy.name, policy.table) != null) {
+                    deinitPolicyDef(self.allocator, &policy);
+                    return error.DuplicatePolicy;
+                }
                 try schema.policies.append(self.allocator, policy);
             } else if (self.matchKeyword("grant")) {
                 self.pos -= 5; // rewind "grant"
@@ -1168,6 +1242,25 @@ const PolicyExprParser = struct {
         return std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.';
     }
 
+    fn isIdentStart(ch: u8) bool {
+        return std.ascii.isAlphabetic(ch) or ch == '_';
+    }
+
+    fn isIdentPart(ch: u8) bool {
+        return std.ascii.isAlphanumeric(ch) or ch == '_';
+    }
+
+    fn isValidIdentifierPath(path: []const u8) bool {
+        var parts = std.mem.splitScalar(u8, path, '.');
+        while (parts.next()) |part| {
+            if (part.len == 0 or !isIdentStart(part[0])) return false;
+            for (part[1..]) |ch| {
+                if (!isIdentPart(ch)) return false;
+            }
+        }
+        return true;
+    }
+
     fn matchKeyword(self: *PolicyExprParser, keyword: []const u8) bool {
         self.skipWhitespace();
         const rem = self.remaining();
@@ -1186,7 +1279,11 @@ const PolicyExprParser = struct {
     }
 
     fn parseExpr(self: *PolicyExprParser) anyerror!Expr {
-        var expr = try self.parseComparison();
+        return self.parseOrExpr();
+    }
+
+    fn parseOrExpr(self: *PolicyExprParser) anyerror!Expr {
+        var expr = try self.parseAndExpr();
 
         while (true) {
             if (self.matchKeyword("or")) {
@@ -1194,7 +1291,7 @@ const PolicyExprParser = struct {
                 left.* = expr;
                 errdefer self.allocator.destroy(left);
 
-                const right_expr = try self.parseComparison();
+                const right_expr = try self.parseAndExpr();
                 const right = try self.allocator.create(Expr);
                 right.* = right_expr;
                 errdefer self.allocator.destroy(right);
@@ -1209,6 +1306,16 @@ const PolicyExprParser = struct {
                 continue;
             }
 
+            break;
+        }
+
+        return expr;
+    }
+
+    fn parseAndExpr(self: *PolicyExprParser) anyerror!Expr {
+        var expr = try self.parseComparison();
+
+        while (true) {
             if (self.matchKeyword("and")) {
                 const left = try self.allocator.create(Expr);
                 left.* = expr;
@@ -1388,6 +1495,10 @@ const PolicyExprParser = struct {
     fn parseIdentifier(self: *PolicyExprParser) anyerror![]const u8 {
         self.skipWhitespace();
         const start = self.pos;
+        const first = self.current() orelse return error.ExpectedIdentifier;
+        if (!isIdentStart(first)) return error.ExpectedIdentifier;
+        self.advance();
+
         while (self.current()) |ch| {
             if (isIdentChar(ch)) {
                 self.advance();
@@ -1396,8 +1507,9 @@ const PolicyExprParser = struct {
             }
         }
 
-        if (self.pos == start) return error.ExpectedIdentifier;
-        return self.allocator.dupe(u8, self.input[start..self.pos]);
+        const identifier = self.input[start..self.pos];
+        if (!isValidIdentifierPath(identifier)) return error.ExpectedIdentifier;
+        return self.allocator.dupe(u8, identifier);
     }
 
     fn parseFuncOrIdent(self: *PolicyExprParser) anyerror!Expr {
@@ -1637,6 +1749,36 @@ test "schema parser rejects malformed identifiers" {
     }
 }
 
+test "schema parser rejects empty tables and duplicate schema objects" {
+    const invalid_inputs = [_][]const u8{
+        \\table empty (
+        \\)
+        ,
+        \\table users (
+        \\    id uuid,
+        \\    id text
+        \\)
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\table users (
+        \\    email text
+        \\)
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\policy users_filter on users using (id = 1)
+        \\policy users_filter on users using (id = 2)
+        ,
+    };
+
+    for (invalid_inputs) |input| {
+        try expectSchemaParseFailure(input);
+    }
+}
+
 test "schema parser rejects duplicate and contradictory column constraints" {
     const invalid_inputs = [_][]const u8{
         \\table users (
@@ -1698,6 +1840,38 @@ test "schema parser rejects duplicate and contradictory column constraints" {
     }
 }
 
+test "schema parser keeps constraint keywords inside quoted expressions" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table messages (
+        \\    plain text default 'unique not null primary key references users(id) check(x)',
+        \\    fn_default text default unique_label(),
+        \\    guarded text check(note = 'unique not null primary key')
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const messages = schema.tables.items[0];
+    const plain = messages.findColumn("plain").?;
+    try std.testing.expectEqualStrings("'unique not null primary key references users(id) check(x)'", plain.default_value.?);
+    try std.testing.expect(!plain.unique);
+    try std.testing.expect(plain.nullable);
+    try std.testing.expect(!plain.primary_key);
+    try std.testing.expect(plain.references == null);
+    try std.testing.expect(plain.check == null);
+
+    const fn_default = messages.findColumn("fn_default").?;
+    try std.testing.expectEqualStrings("unique_label()", fn_default.default_value.?);
+    try std.testing.expect(!fn_default.unique);
+
+    const guarded = messages.findColumn("guarded").?;
+    try std.testing.expectEqualStrings("note = 'unique not null primary key'", guarded.check.?);
+    try std.testing.expect(!guarded.unique);
+}
+
 test "parse policy block" {
     const allocator = std.testing.allocator;
 
@@ -1737,6 +1911,99 @@ test "parse policy block" {
     try std.testing.expectEqualStrings("uuid", using_expr.binary.right.cast.target_type);
     try std.testing.expect(using_expr.binary.right.cast.expr.* == .func_call);
     try std.testing.expectEqualStrings("current_setting", using_expr.binary.right.cast.expr.func_call.name);
+}
+
+test "parse policy block rejects duplicate clauses" {
+    const invalid_inputs = [_][]const u8{
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+        \\policy p on orders for select for update using (id = 1)
+        ,
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+        \\policy p on orders to app_user to app_admin using (id = 1)
+        ,
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+        \\policy p on orders restrictive restrictive using (id = 1)
+        ,
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+        \\policy p on orders using (id = 1) using (id = 2)
+        ,
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+        \\policy p on orders with check (id = 1) with_check (id = 2)
+        ,
+    };
+
+    for (invalid_inputs) |input| {
+        try expectSchemaParseFailure(input);
+    }
+}
+
+test "parse policy block handles escaped strings and rejects unterminated strings" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table users (
+        \\    id uuid primary_key,
+        \\    name text
+        \\)
+        \\policy users_name on users
+        \\    for select
+        \\    using (name = 'Bob''s account')
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const policy = schema.policies.items[0];
+    const expr = policy.using_expr.?;
+    try std.testing.expect(expr == .binary);
+    try std.testing.expect(expr.binary.right.* == .literal);
+    try std.testing.expect(expr.binary.right.literal == .string);
+    try std.testing.expectEqualStrings("Bob's account", expr.binary.right.literal.string);
+
+    try expectSchemaParseFailure(
+        \\table users (
+        \\    id uuid primary_key,
+        \\    name text
+        \\)
+        \\policy users_name on users
+        \\    for select
+        \\    using (name = 'unterminated)
+    );
+}
+
+test "parse policy block gives and higher precedence than or" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid,
+        \\    active bool,
+        \\    public bool
+        \\)
+        \\policy mixed on orders
+        \\    for select
+        \\    using (public = true or tenant_id = 7 and active = true)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const expr = schema.policies.items[0].using_expr.?;
+    try std.testing.expect(expr == .binary);
+    try std.testing.expectEqual(BinaryOp.@"or", expr.binary.op);
+    try std.testing.expect(expr.binary.right.* == .binary);
+    try std.testing.expectEqual(BinaryOp.@"and", expr.binary.right.binary.op);
 }
 
 test "parse policy block falls back to raw sql for unsupported predicate forms" {
