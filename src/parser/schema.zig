@@ -148,6 +148,17 @@ const Parser = struct {
         }
     }
 
+    fn skipInlineWhitespace(self: *Parser) void {
+        while (self.pos < self.input.len) {
+            const c = self.input[self.pos];
+            if (c == ' ' or c == '\t') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
     fn isIdentifierStart(c: u8) bool {
         return std.ascii.isAlphabetic(c) or c == '_';
     }
@@ -235,7 +246,7 @@ const Parser = struct {
         if (rem.len >= keyword.len) {
             if (std.ascii.eqlIgnoreCase(rem[0..keyword.len], keyword)) {
                 // Check word boundary
-                if (rem.len == keyword.len or !std.ascii.isAlphanumeric(rem[keyword.len])) {
+                if (rem.len == keyword.len or !isIdentifierPart(rem[keyword.len])) {
                     self.pos += keyword.len;
                     return true;
                 }
@@ -665,9 +676,11 @@ const Parser = struct {
 
         // Parse constraint keywords until we hit , or ) or } or newline
         while (true) {
-            self.skipWhitespace();
+            self.skipInlineWhitespace();
             const c = self.current() orelse break;
-            if (c == ',' or c == ')' or c == '}' or c == '\n') break;
+            if (c == ',' or c == ')' or c == '}' or c == '\n' or c == '\r') break;
+            if (c == '#') break;
+            if (c == '-' and self.pos + 1 < self.input.len and self.input[self.pos + 1] == '-') break;
 
             if (self.matchKeyword("primary_key") or self.matchKeyword("primary")) {
                 _ = self.matchKeyword("key"); // optional "key" part
@@ -962,7 +975,7 @@ const Parser = struct {
                 const revoke = try self.parseGrantLike(.revoke);
                 try schema.grants.append(self.allocator, revoke);
             } else {
-                break;
+                return error.UnknownSchemaStatement;
             }
         }
 
@@ -2157,6 +2170,50 @@ test "schema parser rejects empty tables and duplicate schema objects" {
     for (invalid_inputs) |input| {
         try expectSchemaParseFailure(input);
     }
+}
+
+test "schema parser rejects unknown top-level input" {
+    const invalid_inputs = [_][]const u8{
+        \\not_a_schema_statement
+        ,
+        \\table_name users (
+        \\    id uuid
+        \\)
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\trailing garbage
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\view users_view as select * from users
+        ,
+    };
+
+    for (invalid_inputs) |input| {
+        try expectSchemaParseFailure(input);
+    }
+}
+
+test "schema parser skips sql comments inside table blocks" {
+    const input =
+        \\table users (
+        \\    -- external auth identifier
+        \\    id uuid
+        \\    # display name
+        \\    name text
+        \\)
+    ;
+
+    var schema = try Schema.parse(std.testing.allocator, input);
+    defer schema.deinit();
+
+    const users = schema.findTable("users").?;
+    try std.testing.expectEqual(@as(usize, 2), users.columns.items.len);
+    try std.testing.expectEqualStrings("id", users.columns.items[0].name);
+    try std.testing.expectEqualStrings("name", users.columns.items[1].name);
 }
 
 test "schema parser rejects duplicate and contradictory column constraints" {
