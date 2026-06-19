@@ -820,6 +820,7 @@ const Parser = struct {
 
         try self.expectChar(close_char);
         if (table.columns.items.len == 0) return error.EmptyTable;
+        try validateTableCheckReferences(&table);
         return table;
     }
 
@@ -863,6 +864,124 @@ const Parser = struct {
         return schema;
     }
 };
+
+fn validateTableCheckReferences(table: *const TableDef) !void {
+    for (table.columns.items) |col| {
+        if (col.check) |expr| {
+            try validateCheckColumnReferences(table, expr);
+        }
+    }
+}
+
+fn validateCheckColumnReferences(table: *const TableDef, expr: []const u8) !void {
+    var i: usize = 0;
+    var in_single = false;
+
+    while (i < expr.len) {
+        const b = expr[i];
+
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < expr.len and expr[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (b == '\'') {
+            in_single = true;
+            i += 1;
+            continue;
+        }
+
+        if (!isCheckIdentifierStart(b)) {
+            i += 1;
+            continue;
+        }
+
+        const start = i;
+        i += 1;
+        while (i < expr.len and isCheckIdentifierContinue(expr[i])) : (i += 1) {}
+        const token = expr[start..i];
+        const referenced = unqualifiedCheckIdentifier(token);
+
+        if (isCheckKeyword(referenced)) continue;
+        if (isCastTypeToken(expr, start)) continue;
+        if (nextNonWhitespace(expr, i) == '(') continue;
+
+        if (table.findColumn(referenced) == null) {
+            return error.InvalidCheckColumnReference;
+        }
+    }
+}
+
+fn isCheckIdentifierStart(c: u8) bool {
+    return std.ascii.isAlphabetic(c) or c == '_';
+}
+
+fn isCheckIdentifierContinue(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '.';
+}
+
+fn unqualifiedCheckIdentifier(token: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, token, '.')) |dot| {
+        return token[dot + 1 ..];
+    }
+    return token;
+}
+
+fn isCastTypeToken(expr: []const u8, token_start: usize) bool {
+    var idx = token_start;
+    while (idx > 0 and std.ascii.isWhitespace(expr[idx - 1])) : (idx -= 1) {}
+    return idx >= 2 and expr[idx - 1] == ':' and expr[idx - 2] == ':';
+}
+
+fn nextNonWhitespace(expr: []const u8, start: usize) ?u8 {
+    var idx = start;
+    while (idx < expr.len) : (idx += 1) {
+        if (!std.ascii.isWhitespace(expr[idx])) return expr[idx];
+    }
+    return null;
+}
+
+fn isCheckKeyword(token: []const u8) bool {
+    const keywords = [_][]const u8{
+        "and",
+        "or",
+        "not",
+        "null",
+        "is",
+        "in",
+        "between",
+        "like",
+        "ilike",
+        "similar",
+        "to",
+        "true",
+        "false",
+        "unknown",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
+        "coalesce",
+        "distinct",
+        "from",
+        "as",
+        "any",
+        "all",
+    };
+
+    for (keywords) |keyword| {
+        if (std.ascii.eqlIgnoreCase(token, keyword)) return true;
+    }
+    return false;
+}
 
 fn parseOwnedPolicyExpr(allocator: Allocator, input: []const u8) !Expr {
     var normalized = try tryParseNormalizedPolicyExpr(allocator, input);
@@ -1878,7 +1997,7 @@ test "schema parser keeps constraint keywords inside quoted expressions" {
         \\table messages (
         \\    plain text default 'unique not null primary key references users(id) check(x)',
         \\    fn_default text default unique_label(),
-        \\    guarded text check(note = 'unique not null primary key')
+        \\    guarded text check(guarded = 'unique not null primary key')
         \\)
     ;
 
@@ -1899,8 +2018,34 @@ test "schema parser keeps constraint keywords inside quoted expressions" {
     try std.testing.expect(!fn_default.unique);
 
     const guarded = messages.findColumn("guarded").?;
-    try std.testing.expectEqualStrings("note = 'unique not null primary key'", guarded.check.?);
+    try std.testing.expectEqualStrings("guarded = 'unique not null primary key'", guarded.check.?);
     try std.testing.expect(!guarded.unique);
+}
+
+test "schema parser validates column check references" {
+    const invalid_input =
+        \\table orders (
+        \\    status text check (missing_status = 'paid')
+        \\)
+    ;
+    try expectSchemaParseFailure(invalid_input);
+
+    const allocator = std.testing.allocator;
+    const valid_input =
+        \\table bookings (
+        \\    starts_at timestamp check (starts_at <= coalesce(ends_at, '2099-12-31'::timestamp)),
+        \\    ends_at timestamp,
+        \\    code text check (length(code) <= 12 and code <> 'missing_name')
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, valid_input);
+    defer schema.deinit();
+
+    const bookings = schema.tables.items[0];
+    try std.testing.expect(bookings.findColumn("starts_at") != null);
+    try std.testing.expect(bookings.findColumn("ends_at") != null);
+    try std.testing.expect(bookings.findColumn("code") != null);
 }
 
 test "parse policy block" {
