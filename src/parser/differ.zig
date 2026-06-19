@@ -20,6 +20,11 @@ pub const IndexInfo = differ_types.IndexInfo;
 fn columnTypesEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
     if (old_col.is_serial != new_col.is_serial) return false;
     if (old_col.is_array != new_col.is_array) return false;
+    const old_kind = normalizedTypeKind(old_col.typ);
+    const new_kind = normalizedTypeKind(new_col.typ);
+    if (old_kind == .decimal and new_kind == .decimal) {
+        return typeParamsEquivalent(old_col.type_params, new_col.type_params);
+    }
     if (!std.ascii.eqlIgnoreCase(old_col.typ, new_col.typ)) return false;
     return typeParamsEquivalent(old_col.type_params, new_col.type_params);
 }
@@ -39,6 +44,9 @@ fn isSafeColumnTypeChange(old_col: *const ColumnDef, new_col: *const ColumnDef) 
     if (old_kind == .varchar and new_kind == .varchar) {
         return varcharWidening(old_col.type_params, new_col.type_params);
     }
+    if (old_kind == .decimal and new_kind == .decimal) {
+        return decimalWidening(old_col.type_params, new_col.type_params);
+    }
 
     return false;
 }
@@ -49,6 +57,7 @@ const TypeKind = enum {
     bigint,
     text,
     varchar,
+    decimal,
     other,
 };
 
@@ -79,6 +88,11 @@ fn normalizedTypeKind(typ: []const u8) TypeKind {
     {
         return .varchar;
     }
+    if (std.ascii.eqlIgnoreCase(trimmed, "numeric") or
+        std.ascii.eqlIgnoreCase(trimmed, "decimal"))
+    {
+        return .decimal;
+    }
     return .other;
 }
 
@@ -103,6 +117,45 @@ fn parseSingleTypeParam(params: []const u8) ?u64 {
     const trimmed = std.mem.trim(u8, params, " \t\r\n");
     if (trimmed.len == 0 or std.mem.indexOfScalar(u8, trimmed, ',') != null) return null;
     return std.fmt.parseInt(u64, trimmed, 10) catch null;
+}
+
+fn decimalWidening(old_params: ?[]const u8, new_params: ?[]const u8) bool {
+    if (new_params == null) return old_params != null;
+    if (old_params == null) return false;
+
+    const old_decimal = parseDecimalTypeParams(old_params.?) orelse return false;
+    const new_decimal = parseDecimalTypeParams(new_params.?) orelse return false;
+    const old_integer_digits = old_decimal.precision - old_decimal.scale;
+    const new_integer_digits = new_decimal.precision - new_decimal.scale;
+    return new_integer_digits >= old_integer_digits and new_decimal.scale >= old_decimal.scale;
+}
+
+const DecimalTypeParams = struct {
+    precision: u64,
+    scale: u64,
+};
+
+fn parseDecimalTypeParams(params: []const u8) ?DecimalTypeParams {
+    var parts = std.mem.splitScalar(u8, params, ',');
+    const precision_raw = parts.next() orelse return null;
+    const precision_text = std.mem.trim(u8, precision_raw, " \t\r\n");
+    if (precision_text.len == 0) return null;
+    const precision = std.fmt.parseInt(u64, precision_text, 10) catch return null;
+    if (precision == 0) return null;
+
+    var scale: u64 = 0;
+    if (parts.next()) |scale_raw| {
+        const scale_text = std.mem.trim(u8, scale_raw, " \t\r\n");
+        if (scale_text.len == 0) return null;
+        scale = std.fmt.parseInt(u64, scale_text, 10) catch return null;
+        if (parts.next() != null) return null;
+    }
+    if (scale > precision) return null;
+
+    return .{
+        .precision = precision,
+        .scale = scale,
+    };
 }
 
 fn columnChecksEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
@@ -1135,6 +1188,117 @@ test "diff type params ignore whitespace only drift" {
     defer cmds.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
+test "diff decimal typmod widening is safe" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table prices (
+        \\    amount numeric(12, 6)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const unbounded_input =
+        \\table prices (
+        \\    amount numeric
+        \\)
+    ;
+    var unbounded = try Schema.parse(allocator, unbounded_input);
+    defer unbounded.deinit();
+
+    var unbounded_cmds = try diffSchemas(allocator, &old, &unbounded);
+    defer unbounded_cmds.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), unbounded_cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.alter_column, unbounded_cmds.items[0].action);
+
+    const unbounded_sql = try unbounded_cmds.items[0].toSql(allocator);
+    defer allocator.free(unbounded_sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE prices ALTER COLUMN amount TYPE numeric",
+        unbounded_sql,
+    );
+
+    const wider_input =
+        \\table prices (
+        \\    amount decimal(14,8)
+        \\)
+    ;
+    var wider = try Schema.parse(allocator, wider_input);
+    defer wider.deinit();
+
+    var wider_cmds = try diffSchemas(allocator, &old, &wider);
+    defer wider_cmds.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), wider_cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.alter_column, wider_cmds.items[0].action);
+
+    const wider_sql = try wider_cmds.items[0].toSql(allocator);
+    defer allocator.free(wider_sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE prices ALTER COLUMN amount TYPE decimal(14,8)",
+        wider_sql,
+    );
+}
+
+test "diff decimal typmod narrowing fails closed" {
+    const allocator = std.testing.allocator;
+
+    const unbounded_input =
+        \\table prices (
+        \\    amount numeric
+        \\)
+    ;
+    var unbounded = try Schema.parse(allocator, unbounded_input);
+    defer unbounded.deinit();
+
+    const bounded_input =
+        \\table prices (
+        \\    amount numeric(12, 6)
+        \\)
+    ;
+    var bounded = try Schema.parse(allocator, bounded_input);
+    defer bounded.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedColumnTypeDrift,
+        diffSchemas(allocator, &unbounded, &bounded),
+    );
+
+    const old_input =
+        \\table prices (
+        \\    amount numeric(12, 6)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const scale_narrowing_input =
+        \\table prices (
+        \\    amount numeric(12, 5)
+        \\)
+    ;
+    var scale_narrowing = try Schema.parse(allocator, scale_narrowing_input);
+    defer scale_narrowing.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedColumnTypeDrift,
+        diffSchemas(allocator, &old, &scale_narrowing),
+    );
+
+    const integer_digit_narrowing_input =
+        \\table prices (
+        \\    amount numeric(11, 6)
+        \\)
+    ;
+    var integer_digit_narrowing = try Schema.parse(allocator, integer_digit_narrowing_input);
+    defer integer_digit_narrowing.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedColumnTypeDrift,
+        diffSchemas(allocator, &old, &integer_digit_narrowing),
+    );
 }
 
 test "diff array type suffix change" {
