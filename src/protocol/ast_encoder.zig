@@ -350,22 +350,34 @@ pub const AstEncoder = struct {
                 try writer.writeAll("UPDATE ");
                 if (cmd.only_table) try writer.writeAll("ONLY ");
                 try writeTableReferenceOrError(writer, cmd.table);
+                if (cmd.table_alias) |alias| {
+                    try writer.writeAll(" AS ");
+                    try writeIdentifierOrError(writer, alias);
+                }
                 try writer.writeAll(" SET ");
 
                 for (cmd.assignments, 0..) |assign, i| {
                     if (i > 0) try writer.writeAll(", ");
                     try writeIdentifierOrError(writer, assign.column);
                     try writer.writeAll(" = ");
-                    try writeValue(writer, &assign.value);
+                    try writeValue(writer, &assign.value, cmd);
                 }
 
-                try writeWhereClauses(writer, cmd.where_clauses);
+                if (cmd.from_tables.len > 0) {
+                    try writer.writeAll(" FROM ");
+                    for (cmd.from_tables, 0..) |table, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writeTableReferenceOrError(writer, table);
+                    }
+                }
+
+                try writeWhereClauses(writer, cmd.where_clauses, cmd);
 
                 if (cmd.returning.len > 0) {
                     try writer.writeAll(" RETURNING ");
                     for (cmd.returning, 0..) |col, i| {
                         if (i > 0) try writer.writeAll(", ");
-                        try writeExpr(writer, &col);
+                        try writeExpr(writer, &col, cmd);
                     }
                 }
             },
@@ -373,14 +385,26 @@ pub const AstEncoder = struct {
                 try writer.writeAll("DELETE FROM ");
                 if (cmd.only_table) try writer.writeAll("ONLY ");
                 try writeTableReferenceOrError(writer, cmd.table);
+                if (cmd.table_alias) |alias| {
+                    try writer.writeAll(" AS ");
+                    try writeIdentifierOrError(writer, alias);
+                }
 
-                try writeWhereClauses(writer, cmd.where_clauses);
+                if (cmd.using_tables.len > 0) {
+                    try writer.writeAll(" USING ");
+                    for (cmd.using_tables, 0..) |table, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writeTableReferenceOrError(writer, table);
+                    }
+                }
+
+                try writeWhereClauses(writer, cmd.where_clauses, cmd);
 
                 if (cmd.returning.len > 0) {
                     try writer.writeAll(" RETURNING ");
                     for (cmd.returning, 0..) |col, i| {
                         if (i > 0) try writer.writeAll(", ");
-                        try writeExpr(writer, &col);
+                        try writeExpr(writer, &col, cmd);
                     }
                 }
             },
@@ -435,7 +459,7 @@ pub const AstEncoder = struct {
                     try writer.writeAll(" (");
                     for (cmd.columns, 0..) |col, i| {
                         if (i > 0) try writer.writeAll(", ");
-                        try writeExpr(writer, &col);
+                        try writeExpr(writer, &col, null);
                     }
                     try writer.writeAll(")");
                 }
@@ -450,7 +474,7 @@ pub const AstEncoder = struct {
                 try writeIdentifierOrError(writer, cmd.table);
                 for (cmd.columns) |col| {
                     try writer.writeAll(" ADD COLUMN ");
-                    try writeExpr(writer, &col);
+                    try writeExpr(writer, &col, null);
                 }
             },
             .alter_add_constraint => {
@@ -479,7 +503,7 @@ pub const AstEncoder = struct {
                 try writeIdentifierOrError(writer, cmd.table);
                 for (cmd.columns) |col| {
                     try writer.writeAll(" DROP COLUMN ");
-                    try writeExpr(writer, &col);
+                    try writeExpr(writer, &col, null);
                 }
             },
             .mod, .alter_type => {
@@ -627,7 +651,7 @@ pub const AstEncoder = struct {
                 if (cmd.insert_values.len > 0) {
                     for (cmd.insert_values, 0..) |val, i| {
                         if (i > 0) try writer.writeAll(", ");
-                        try writeValue(writer, &val);
+                        try writeValue(writer, &val, null);
                     }
                 } else if (cmd.payload) |values_sql| {
                     const values_fragment = checkedEnumValuesFragment(values_sql) orelse return error.UnsafeSqlFragment;
@@ -903,14 +927,14 @@ pub const AstEncoder = struct {
                 if (policy.using_expr) |using_expr| {
                     try writer.writeAll(" USING (");
                     var expr = using_expr;
-                    try writeExpr(writer, &expr);
+                    try writeExpr(writer, &expr, null);
                     try writer.writeByte(')');
                 }
 
                 if (policy.with_check_expr) |with_check_expr| {
                     try writer.writeAll(" WITH CHECK (");
                     var expr = with_check_expr;
-                    try writeExpr(writer, &expr);
+                    try writeExpr(writer, &expr, null);
                     try writer.writeByte(')');
                 }
             },
@@ -961,7 +985,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
     } else {
         for (cmd.columns, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeExpr(writer, &col);
+            try writeExpr(writer, &col, cmd);
         }
     }
 
@@ -996,18 +1020,18 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
             try writeIdentifierOrError(writer, alias);
         }
         try writer.writeAll(" ON ");
-        try writeIdentifierOrError(writer, join.on_left);
+        try writeColumnReference(writer, join.on_left, cmd);
         try writer.writeAll(" = ");
-        try writeIdentifierOrError(writer, join.on_right);
+        try writeColumnReference(writer, join.on_right, cmd);
     }
 
-    try writeWhereClauses(writer, cmd.where_clauses);
+    try writeWhereClauses(writer, cmd.where_clauses, cmd);
 
     if (cmd.group_by.len > 0) {
         try writer.writeAll(" GROUP BY ");
         for (cmd.group_by, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeIdentifierOrError(writer, col);
+            try writeColumnReference(writer, col, cmd);
         }
     }
 
@@ -1017,7 +1041,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
             if (i > 0) {
                 try writer.print(" {s} ", .{clause.logical_op.toSql()});
             }
-            try writeCondition(writer, &clause.condition);
+            try writeCondition(writer, &clause.condition, cmd);
         }
     }
 
@@ -1025,7 +1049,7 @@ fn writeSelect(writer: anytype, cmd: *const QailCmd, count_only: bool) !void {
         try writer.writeAll(" ORDER BY ");
         for (cmd.order_by, 0..) |order, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeIdentifierOrError(writer, order.column);
+            try writeColumnReference(writer, order.column, cmd);
             try writer.print(" {s}", .{order.order.toSql()});
         }
     }
@@ -1083,7 +1107,7 @@ fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
     try writeMergeSource(writer, &merge.source);
 
     try writer.writeAll(" ON ");
-    try writeConditions(writer, merge.on);
+    try writeConditions(writer, merge.on, cmd);
 
     for (merge.clauses) |clause| {
         try writer.writeAll(" WHEN ");
@@ -1095,18 +1119,18 @@ fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
 
         if (clause.condition.len > 0) {
             try writer.writeAll(" AND ");
-            try writeConditions(writer, clause.condition);
+            try writeConditions(writer, clause.condition, cmd);
         }
 
         try writer.writeAll(" THEN ");
-        try writeMergeAction(writer, &clause.action);
+        try writeMergeAction(writer, &clause.action, cmd);
     }
 
     if (cmd.returning.len > 0) {
         try writer.writeAll(" RETURNING ");
         for (cmd.returning, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeExpr(writer, &col);
+            try writeExpr(writer, &col, cmd);
         }
     }
 }
@@ -1132,15 +1156,15 @@ fn writeMergeSource(writer: anytype, source: *const ast.cmd.MergeSource) !void {
     }
 }
 
-fn writeConditions(writer: anytype, conditions: []const ast.expr.Condition) !void {
+fn writeConditions(writer: anytype, conditions: []const ast.expr.Condition, cmd: ?*const QailCmd) !void {
     if (conditions.len == 0) return error.MissingMergeCondition;
     for (conditions, 0..) |*condition, i| {
         if (i > 0) try writer.writeAll(" AND ");
-        try writeCondition(writer, condition);
+        try writeCondition(writer, condition, cmd);
     }
 }
 
-fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
+fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction, cmd: ?*const QailCmd) !void {
     switch (action.*) {
         .update => |assignments| {
             try writer.writeAll("UPDATE SET ");
@@ -1149,7 +1173,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
                 try writeIdentifierOrError(writer, assignment.column);
                 try writer.writeAll(" = ");
                 var expr = assignment.expr;
-                try writeExpr(writer, &expr);
+                try writeExpr(writer, &expr, cmd);
             }
         },
         .insert => |insert| {
@@ -1166,7 +1190,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
             for (insert.values, 0..) |value, i| {
                 if (i > 0) try writer.writeAll(", ");
                 var expr = value;
-                try writeExpr(writer, &expr);
+                try writeExpr(writer, &expr, cmd);
             }
             try writer.writeByte(')');
         },
@@ -1496,14 +1520,14 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
         try writer.writeAll(" VALUES (");
         for (cmd.insert_values, 0..) |val, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeValue(writer, &val);
+            try writeValue(writer, &val, cmd);
         }
         try writer.writeByte(')');
     } else if (cmd.assignments.len > 0) {
         try writer.writeAll(" VALUES (");
         for (cmd.assignments, 0..) |assign, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeValue(writer, &assign.value);
+            try writeValue(writer, &assign.value, cmd);
         }
         try writer.writeByte(')');
     } else {
@@ -1542,7 +1566,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
                             if (i > 0) try writer.writeAll(", ");
                             try writeIdentifierOrError(writer, assign.column);
                             try writer.writeAll(" = ");
-                            try writeValue(writer, &assign.value);
+                            try writeValue(writer, &assign.value, cmd);
                         }
                     }
                 },
@@ -1557,12 +1581,12 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
         try writer.writeAll(" RETURNING ");
         for (cmd.returning, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeExpr(writer, &col);
+            try writeExpr(writer, &col, cmd);
         }
     }
 }
 
-fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
+fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause, cmd: ?*const QailCmd) !void {
     var has_and = false;
     var has_or = false;
 
@@ -1587,7 +1611,7 @@ fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !voi
             if (wrote_clause) {
                 try writer.writeAll(" AND ");
             }
-            try writeWhereCondition(writer, clause);
+            try writeWhereCondition(writer, clause, cmd);
             wrote_clause = true;
         }
     }
@@ -1604,81 +1628,81 @@ fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !voi
                 try writer.writeAll(" OR ");
             }
             first = false;
-            try writeWhereCondition(writer, clause);
+            try writeWhereCondition(writer, clause, cmd);
         }
         try writer.writeAll(")");
     }
 }
 
-fn writeWhereCondition(writer: anytype, clause: ast.cmd.WhereClause) !void {
-    try writeCondition(writer, &clause.condition);
+fn writeWhereCondition(writer: anytype, clause: ast.cmd.WhereClause, cmd: ?*const QailCmd) !void {
+    try writeCondition(writer, &clause.condition, cmd);
 }
 
-fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) anyerror!void {
+fn writeCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*const QailCmd) anyerror!void {
     switch (condition.op) {
-        .in, .not_in => return writeInCondition(writer, condition),
-        .between, .not_between => return writeBetweenCondition(writer, condition),
+        .in, .not_in => return writeInCondition(writer, condition, cmd),
+        .between, .not_between => return writeBetweenCondition(writer, condition, cmd),
         .exists, .not_exists => return writer.writeAll(INVALID_EXISTS_CONDITION),
         else => {},
     }
 
-    try writeConditionLeft(writer, condition);
+    try writeConditionLeft(writer, condition, cmd);
 
     switch (condition.op) {
         .is_null, .is_not_null => try writer.print(" {s}", .{condition.op.toSql()}),
         else => {
             try writer.print(" {s} ", .{condition.op.toSql()});
-            try writeValue(writer, &condition.value);
+            try writeValue(writer, &condition.value, cmd);
         },
     }
 }
 
-fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition) anyerror!void {
+fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*const QailCmd) anyerror!void {
     if (condition.column.len != 0) {
-        try writer.writeAll(condition.column);
+        try writeColumnReference(writer, condition.column, cmd);
     } else {
         var left = condition.left;
-        try writeExpr(writer, &left);
+        try writeExpr(writer, &left, cmd);
     }
 }
 
-fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*const QailCmd) !void {
     switch (condition.value) {
         .array => |values| {
             if (values.len == 0) return writer.writeAll(INVALID_IN_CONDITION);
 
-            try writeConditionLeft(writer, condition);
+            try writeConditionLeft(writer, condition, cmd);
             try writer.print(" {s} (", .{condition.op.toSql()});
             for (values, 0..) |value, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writeValue(writer, &value);
+                try writeValue(writer, &value, cmd);
             }
             try writer.writeByte(')');
         },
         .param, .named_param => {
-            try writeConditionLeft(writer, condition);
+            try writeConditionLeft(writer, condition, cmd);
             try writer.writeAll(if (condition.op == .in) " = ANY(" else " != ALL(");
-            try writeValue(writer, &condition.value);
+            try writeValue(writer, &condition.value, cmd);
             try writer.writeByte(')');
         },
         else => try writer.writeAll(INVALID_IN_CONDITION),
     }
 }
 
-fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*const QailCmd) !void {
     switch (condition.value) {
         .range => |range| {
-            try writeConditionLeft(writer, condition);
+            try writeConditionLeft(writer, condition, cmd);
             try writer.print(" {s} {d} AND {d}", .{ condition.op.toSql(), range.low, range.high });
         },
         .array => |values| {
             if (values.len != 2) return writer.writeAll(INVALID_BETWEEN_CONDITION);
 
-            try writeConditionLeft(writer, condition);
+            try writeConditionLeft(writer, condition, cmd);
             try writer.print(" {s} ", .{condition.op.toSql()});
-            try writeValue(writer, &values[0]);
+            try writeValue(writer, &values[0], cmd);
             try writer.writeAll(" AND ");
-            try writeValue(writer, &values[1]);
+            try writeValue(writer, &values[1], cmd);
         },
         else => try writer.writeAll(INVALID_BETWEEN_CONDITION),
     }
@@ -2539,6 +2563,11 @@ const TableReference = struct {
     explicit_as: bool = false,
 };
 
+const ColumnResolution = struct {
+    qualifier: []const u8,
+    tail: []const u8,
+};
+
 fn splitTableReference(value: []const u8) ?TableReference {
     var parts = std.mem.tokenizeAny(u8, value, " \t\r\n");
     const table = parts.next() orelse return null;
@@ -2559,6 +2588,112 @@ fn splitTableReference(value: []const u8) ?TableReference {
     return .{ .table = table, .alias = third.?, .explicit_as = true };
 }
 
+fn firstPart(value: []const u8) ?[]const u8 {
+    if (std.mem.indexOfScalar(u8, value, '.')) |dot| {
+        if (dot == 0 or dot + 1 >= value.len) return null;
+        return value[0..dot];
+    }
+    return value;
+}
+
+fn tailAfterFirstPart(value: []const u8) ?[]const u8 {
+    const dot = std.mem.indexOfScalar(u8, value, '.') orelse return null;
+    if (dot == 0 or dot + 1 >= value.len) return null;
+    return value[dot + 1 ..];
+}
+
+fn lastPart(value: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, value, '.')) |dot| {
+        return value[dot + 1 ..];
+    }
+    return value;
+}
+
+fn identEq(left: []const u8, right: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(
+        std.mem.trim(u8, left, "\""),
+        std.mem.trim(u8, right, "\""),
+    );
+}
+
+fn resolveAgainstTableReference(value: []const u8, table_value: []const u8, explicit_alias: ?[]const u8) ?ColumnResolution {
+    const parsed = splitTableReference(table_value) orelse TableReference{ .table = table_value };
+    const alias = explicit_alias orelse parsed.alias;
+    const alias_name = alias orelse return null;
+    const first = firstPart(value) orelse return null;
+
+    if (identEq(first, alias_name)) {
+        return .{ .qualifier = alias_name, .tail = tailAfterFirstPart(value) orelse "" };
+    }
+
+    if (value.len > parsed.table.len and
+        value[parsed.table.len] == '.' and
+        std.ascii.eqlIgnoreCase(value[0..parsed.table.len], parsed.table))
+    {
+        return .{ .qualifier = alias_name, .tail = value[parsed.table.len + 1 ..] };
+    }
+
+    if (identEq(first, lastPart(parsed.table))) {
+        return .{ .qualifier = alias_name, .tail = tailAfterFirstPart(value) orelse "" };
+    }
+
+    return null;
+}
+
+fn resolveKnownColumnReference(value: []const u8, cmd: ?*const QailCmd) ?ColumnResolution {
+    const current = cmd orelse return null;
+    const first = firstPart(value) orelse return null;
+
+    if (current.table.len > 0) {
+        if (resolveAgainstTableReference(value, current.table, current.table_alias)) |resolved| {
+            return resolved;
+        }
+    }
+
+    if (current.merge) |merge| {
+        if (merge.target_alias) |alias| {
+            if (resolveAgainstTableReference(value, current.table, alias)) |resolved| {
+                return resolved;
+            }
+        }
+
+        switch (merge.source) {
+            .table => |table| {
+                if (resolveAgainstTableReference(value, table.name, table.alias)) |resolved| {
+                    return resolved;
+                }
+            },
+            .query => |query| {
+                if (query.alias) |alias| {
+                    if (identEq(first, alias)) {
+                        return .{ .qualifier = alias, .tail = tailAfterFirstPart(value) orelse "" };
+                    }
+                }
+            },
+        }
+    }
+
+    for (current.joins) |join| {
+        if (resolveAgainstTableReference(value, join.table, join.alias)) |resolved| {
+            return resolved;
+        }
+    }
+
+    for (current.from_tables) |table| {
+        if (resolveAgainstTableReference(value, table, null)) |resolved| {
+            return resolved;
+        }
+    }
+
+    for (current.using_tables) |table| {
+        if (resolveAgainstTableReference(value, table, null)) |resolved| {
+            return resolved;
+        }
+    }
+
+    return null;
+}
+
 fn writeTableReferenceOrError(writer: anytype, value: []const u8) !void {
     const ref = splitTableReference(value) orelse {
         try writeIdentifierOrError(writer, value);
@@ -2576,12 +2711,33 @@ fn writeTableReferenceOrError(writer: anytype, value: []const u8) !void {
     }
 }
 
-fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
+fn writeColumnReference(writer: anytype, value: []const u8, cmd: ?*const QailCmd) !void {
+    if (resolveKnownColumnReference(value, cmd)) |resolved| {
+        try writeIdentifierOrError(writer, resolved.qualifier);
+        if (resolved.tail.len > 0) {
+            try writer.writeByte('.');
+            try writeIdentifierOrError(writer, resolved.tail);
+        }
+        return;
+    }
+
+    try writeIdentifierOrError(writer, value);
+}
+
+fn writeIdentifierOrStarWithContext(writer: anytype, value: []const u8, cmd: ?*const QailCmd) !void {
+    if (std.mem.eql(u8, value, "*")) {
+        try writer.writeByte('*');
+    } else {
+        try writeColumnReference(writer, value, cmd);
+    }
+}
+
+fn writeExpr(writer: anytype, expr: *const Expr, cmd: ?*const QailCmd) anyerror!void {
     switch (expr.*) {
         .star => try writer.writeAll("*"),
-        .named => |name| try writeIdentifierOrError(writer, name),
+        .named => |name| try writeColumnReference(writer, name, cmd),
         .aliased => |a| {
-            try writeIdentifierOrError(writer, a.name);
+            try writeColumnReference(writer, a.name, cmd);
             try writer.writeAll(" AS ");
             try writeIdentifierMaybeQuoted(writer, a.alias);
         },
@@ -2589,21 +2745,21 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             try writer.writeAll(agg.func.toSql());
             try writer.writeAll("(");
             if (agg.distinct) try writer.writeAll("DISTINCT ");
-            try writeIdentifierOrStar(writer, agg.column);
+            try writeIdentifierOrStarWithContext(writer, agg.column, cmd);
             try writer.writeAll(")");
             if (agg.alias) |alias| {
                 try writer.writeAll(" AS ");
                 try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
-        .literal => |val| try writeValue(writer, &val),
+        .literal => |val| try writeValue(writer, &val, cmd),
         .binary => |b| {
-            try writeExpr(writer, b.left);
+            try writeExpr(writer, b.left, cmd);
             switch (b.op) {
                 .is_null, .is_not_null => try writer.print(" {s}", .{b.op.toSql()}),
                 else => {
                     try writer.print(" {s} ", .{b.op.toSql()});
-                    try writeExpr(writer, b.right);
+                    try writeExpr(writer, b.right, cmd);
                 },
             }
             if (b.alias) |alias| {
@@ -2620,7 +2776,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             try writer.writeAll("(");
             for (fc.args, 0..) |arg, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writeExpr(writer, &arg);
+                try writeExpr(writer, &arg, cmd);
             }
             try writer.writeAll(")");
             if (fc.alias) |alias| {
@@ -2632,13 +2788,13 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             try writer.writeAll("CASE");
             for (c.when_clauses) |when_clause| {
                 try writer.writeAll(" WHEN ");
-                try writeCondition(writer, &when_clause.condition);
+                try writeCondition(writer, &when_clause.condition, cmd);
                 try writer.writeAll(" THEN ");
-                try writeExpr(writer, &when_clause.result);
+                try writeExpr(writer, &when_clause.result, cmd);
             }
             if (c.else_value) |else_expr| {
                 try writer.writeAll(" ELSE ");
-                try writeExpr(writer, else_expr);
+                try writeExpr(writer, else_expr, cmd);
             }
             try writer.writeAll(" END");
             if (c.alias) |alias| {
@@ -2659,7 +2815,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             try writer.writeAll("COALESCE(");
             for (c.exprs, 0..) |ex_inner, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writeExpr(writer, &ex_inner);
+                try writeExpr(writer, &ex_inner, cmd);
             }
             try writer.writeAll(")");
             if (c.alias) |alias| {
@@ -2672,7 +2828,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
                 try writer.writeAll(INVALID_CAST_TARGET);
                 return;
             };
-            try writeExpr(writer, c.expr);
+            try writeExpr(writer, c.expr, cmd);
             try writer.writeAll("::");
             try writer.writeAll(target_type);
             if (c.alias) |alias| {
@@ -2681,7 +2837,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             }
         },
         .json_access => |ja| {
-            try writeIdentifierOrError(writer, ja.column);
+            try writeColumnReference(writer, ja.column, cmd);
             for (ja.path) |seg| {
                 if (seg.as_text) {
                     try writer.writeAll("->>'");
@@ -2698,7 +2854,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
         },
         .raw => |raw| try writeCheckedRawExpression(writer, raw),
         .column_def => |def| try writeColumnDefExpr(writer, def),
-        .window => |w| try writeWindowExpr(writer, w),
+        .window => |w| try writeWindowExpr(writer, w, cmd),
         .col_mod => |m| {
             // +col or -col for ALTER TABLE
             if (m.kind == .add) {
@@ -2706,7 +2862,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             } else {
                 try writer.writeByte('-');
             }
-            try writeExpr(writer, m.col);
+            try writeExpr(writer, m.col, cmd);
         },
         .special_func => |sf| {
             // SUBSTRING(expr FROM pos FOR len), EXTRACT(YEAR FROM date), etc.
@@ -2726,7 +2882,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
                     try writer.writeAll(kw);
                     try writer.writeAll(" ");
                 }
-                try writeExpr(writer, arg.expr);
+                try writeExpr(writer, arg.expr, cmd);
             }
             try writer.writeByte(')');
             if (sf.alias) |a| {
@@ -2738,7 +2894,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             try writer.writeAll("ARRAY[");
             for (a.elements, 0..) |elem, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writeExpr(writer, &elem);
+                try writeExpr(writer, &elem, cmd);
             }
             try writer.writeByte(']');
             if (a.alias) |alias| {
@@ -2750,7 +2906,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             try writer.writeAll("ROW(");
             for (r.elements, 0..) |elem, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writeExpr(writer, &elem);
+                try writeExpr(writer, &elem, cmd);
             }
             try writer.writeByte(')');
             if (r.alias) |alias| {
@@ -2759,9 +2915,9 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             }
         },
         .subscript => |s| {
-            try writeExpr(writer, s.base);
+            try writeExpr(writer, s.base, cmd);
             try writer.writeByte('[');
-            try writeExpr(writer, s.index);
+            try writeExpr(writer, s.index, cmd);
             try writer.writeByte(']');
             if (s.alias) |alias| {
                 try writer.writeAll(" AS ");
@@ -2769,7 +2925,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             }
         },
         .collate => |c| {
-            try writeExpr(writer, c.expr);
+            try writeExpr(writer, c.expr, cmd);
             try writer.writeAll(" COLLATE ");
             try writeIdentifierOrError(writer, c.collation);
             if (c.alias) |alias| {
@@ -2779,7 +2935,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
         },
         .field_access => |f| {
             try writer.writeByte('(');
-            try writeExpr(writer, f.expr);
+            try writeExpr(writer, f.expr, cmd);
             try writer.writeAll(").");
             try writeIdentifierOrError(writer, f.field);
             if (f.alias) |alias| {
@@ -2805,7 +2961,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
                 .not => try writer.writeAll("NOT "),
                 else => try writer.writeAll(u.op.toSql()),
             }
-            try writeExpr(writer, u.operand);
+            try writeExpr(writer, u.operand, cmd);
         },
     }
 }
@@ -2867,7 +3023,7 @@ fn writeSqlExprFragmentOrError(writer: anytype, fragment: []const u8) !void {
     try writer.writeAll(checked);
 }
 
-fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
+fn writeWindowExpr(writer: anytype, w: WindowExpr, cmd: ?*const QailCmd) !void {
     if (!isSafeFunctionName(w.func)) {
         try writer.writeAll(INVALID_WINDOW_FUNCTION_NAME);
         return;
@@ -2879,7 +3035,7 @@ fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
         try writer.writeAll("PARTITION BY ");
         for (w.partition, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeIdentifierOrError(writer, col);
+            try writeColumnReference(writer, col, cmd);
         }
     }
     if (w.order.len > 0) {
@@ -2887,7 +3043,7 @@ fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
         try writer.writeAll("ORDER BY ");
         for (w.order, 0..) |o, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeIdentifierOrError(writer, o.column);
+            try writeColumnReference(writer, o.column, cmd);
             try writer.writeAll(if (o.direction == .asc) " ASC" else " DESC");
         }
     }
@@ -2919,9 +3075,20 @@ fn writeFrameBound(writer: anytype, bound: ast.expr.FrameBound) !void {
     }
 }
 
-fn writeValue(writer: anytype, val: *const Value) !void {
+fn writeValue(writer: anytype, val: *const Value, cmd: ?*const QailCmd) !void {
     try val.validateFinite();
-    try val.format(writer);
+    switch (val.*) {
+        .column => |column| try writeColumnReference(writer, column, cmd),
+        .array => |values| {
+            try writer.writeAll("ARRAY[");
+            for (values, 0..) |value, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeValue(writer, &value, cmd);
+            }
+            try writer.writeByte(']');
+        },
+        else => try val.format(writer),
+    }
 }
 
 // ==================== Tests ====================
@@ -3037,6 +3204,48 @@ test "ast encoder renders table references without raw injection" {
     );
 }
 
+test "ast encoder resolves schema-qualified references through aliases" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const cols = [_]Expr{
+        Expr.col("public.orders.id"),
+        .{ .aggregate = .{ .func = .sum, .column = "public.orders.total", .alias = "total" } },
+        .{ .json_access = .{
+            .column = "public.orders.payload",
+            .path = &[_]ast.expr.JsonPathSegment{.{ .key = "tier", .as_text = true }},
+            .alias = "tier",
+        } },
+    };
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("public.orders.status", .eq, Value.fromColumn("public.orders.previous_status")),
+    };
+    const groups = [_][]const u8{ "public.orders.id", "public.orders.payload" };
+    const orders = [_]ast.cmd.OrderBy{.{ .column = "public.orders.created_at", .order = .desc }};
+    const joins = [_]ast.cmd.Join{.{
+        .kind = .left,
+        .table = "crm.users AS u",
+        .on_left = "public.orders.user_id",
+        .on_right = "crm.users.id",
+    }};
+    const cmd = QailCmd.get("public.orders")
+        .alias("o")
+        .select(&cols)
+        .join(&joins)
+        .where(&wheres)
+        .groupBy(&groups)
+        .orderBy(&orders);
+
+    var sql_buf: [1024]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "SELECT o.id, SUM(o.total) AS total, o.payload->>'tier' AS tier FROM public.orders AS o LEFT JOIN crm.users AS u ON o.user_id = u.id WHERE o.status = o.previous_status GROUP BY o.id, o.payload ORDER BY o.created_at DESC",
+        writer.getWritten(),
+    );
+}
+
 test "ast encoder renders mutation targets without raw injection" {
     var encoder = AstEncoder.init(std.testing.allocator);
     defer encoder.deinit();
@@ -3057,6 +3266,67 @@ test "ast encoder renders mutation targets without raw injection" {
     try std.testing.expectEqualStrings(
         "DELETE FROM \"users; DROP TABLE users; --\"",
         delete_writer.getWritten(),
+    );
+}
+
+test "ast encoder renders update from and delete using aliases" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const update_assignments = [_]ast.cmd.Assignment{.{
+        .column = "status",
+        .value = Value.fromColumn("billing.payments.status"),
+    }};
+    const update_wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("public.orders.payment_id", .eq, Value.fromColumn("billing.payments.id")),
+    };
+    var update_cmd = QailCmd.set("public.orders").alias("o");
+    update_cmd.assignments = &update_assignments;
+    update_cmd.from_tables = &.{"billing.payments p"};
+    update_cmd.where_clauses = &update_wheres;
+
+    var update_buf: [512]u8 = undefined;
+    var update_writer = io.FixedBufferWriter.init(&update_buf);
+    try encoder.writeAstToSql(update_writer.writer(), &update_cmd);
+    try std.testing.expectEqualStrings(
+        "UPDATE public.orders AS o SET status = p.status FROM billing.payments p WHERE o.payment_id = p.id",
+        update_writer.getWritten(),
+    );
+
+    const delete_wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("public.sessions.user_id", .eq, Value.fromColumn("auth.users.id")),
+    };
+    const returning = [_]Expr{Expr.col("public.sessions.id")};
+    var delete_cmd = QailCmd.del("public.sessions").alias("s");
+    delete_cmd.using_tables = &.{"auth.users u"};
+    delete_cmd.where_clauses = &delete_wheres;
+    delete_cmd.returning = &returning;
+
+    var delete_buf: [512]u8 = undefined;
+    var delete_writer = io.FixedBufferWriter.init(&delete_buf);
+    try encoder.writeAstToSql(delete_writer.writer(), &delete_cmd);
+    try std.testing.expectEqualStrings(
+        "DELETE FROM public.sessions AS s USING auth.users u WHERE s.user_id = u.id RETURNING s.id",
+        delete_writer.getWritten(),
+    );
+}
+
+test "ast encoder quotes condition column shorthand instead of emitting raw text" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("id; DROP TABLE users; --", .eq, Value.fromInt(7)),
+    };
+    const cmd = QailCmd.get("users").where(&wheres);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE \"id; DROP TABLE users; --\" = 7",
+        writer.getWritten(),
     );
 }
 
@@ -4241,6 +4511,56 @@ test "ast encoder merge renders table references defensively" {
 
     try std.testing.expectEqualStrings(
         "MERGE INTO \"users; DROP TABLE users; --\" AS u USING public.staging_users s ON u.id = s.id WHEN NOT MATCHED BY TARGET THEN DO NOTHING",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder merge resolves schema-qualified aliases" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const on = [_]ast.expr.Condition{.{
+        .left = Expr.col("public.orders.id"),
+        .op = .eq,
+        .value = Value.fromColumn("staging.orders.order_id"),
+    }};
+    const update_assignments = [_]ast.cmd.MergeAssignment{.{
+        .column = "status",
+        .expr = Expr.col("staging.orders.status"),
+    }};
+    const insert_values = [_]Expr{
+        Expr.col("staging.orders.id"),
+        Expr.col("staging.orders.status"),
+    };
+    const clauses = [_]ast.cmd.MergeClause{
+        .{
+            .match_kind = .matched,
+            .action = .{ .update = &update_assignments },
+        },
+        .{
+            .match_kind = .not_matched_by_target,
+            .action = .{ .insert = .{
+                .columns = &.{ "id", "status" },
+                .values = &insert_values,
+            } },
+        },
+    };
+    const returning = [_]Expr{Expr.col("public.orders.id")};
+    const merge = ast.cmd.Merge{
+        .target_alias = "o",
+        .source = ast.cmd.MergeSource.fromTableAs("staging.orders", "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    var cmd = QailCmd.mergeInto("public.orders").withMerge(merge);
+    cmd.returning = &returning;
+
+    var sql_buf: [1024]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "MERGE INTO public.orders AS o USING staging.orders AS s ON o.id = s.order_id WHEN MATCHED THEN UPDATE SET status = s.status WHEN NOT MATCHED BY TARGET THEN INSERT (id, status) VALUES (s.id, s.status) RETURNING o.id",
         writer.getWritten(),
     );
 }
