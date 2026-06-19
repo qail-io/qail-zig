@@ -12,6 +12,8 @@ const Mode = enum {
     parameter_status_before_auth,
     backend_key_before_auth,
     ready_before_auth,
+    ready_in_transaction_after_auth,
+    ready_failed_after_auth,
     auth_method_switch,
     auth_ok_before_sasl_final,
     auth_after_ok,
@@ -129,6 +131,14 @@ fn serverThread(ctx: *ServerCtx) void {
         .ready_before_auth => {
             sendReadyForQuery(conn.stream, 'I') catch {};
         },
+        .ready_in_transaction_after_auth => {
+            sendAuth(conn.stream, 0, &.{}) catch {};
+            sendReadyForQuery(conn.stream, 'T') catch {};
+        },
+        .ready_failed_after_auth => {
+            sendAuth(conn.stream, 0, &.{}) catch {};
+            sendReadyForQuery(conn.stream, 'E') catch {};
+        },
         .auth_method_switch => {
             sendAuth(conn.stream, 3, &.{}) catch {};
             _ = readFrontendMessage(conn.stream) catch return;
@@ -178,6 +188,14 @@ test "startup rejects BackendKeyData before AuthenticationOk" {
 test "startup rejects ReadyForQuery before AuthenticationOk" {
     const res = try runStartupScript(.ready_before_auth, null);
     try std.testing.expectEqual(error.StartupCompletedWithoutAuthOk, res.err);
+}
+
+test "startup rejects non-idle ReadyForQuery after AuthenticationOk" {
+    const in_transaction = try runStartupScript(.ready_in_transaction_after_auth, null);
+    try std.testing.expectEqual(error.StartupCompletedWithNonIdleStatus, in_transaction.err);
+
+    const failed = try runStartupScript(.ready_failed_after_auth, null);
+    try std.testing.expectEqual(error.StartupCompletedWithNonIdleStatus, failed.err);
 }
 
 test "startup rejects auth method switch mid-handshake" {

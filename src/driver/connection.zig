@@ -401,6 +401,7 @@ pub const Connection = struct {
                     if (!auth_ok) return error.StartupCompletedWithoutAuthOk;
                     var decoder = Decoder.init(msg.payload);
                     const status = try decoder.parseReadyForQuery();
+                    if (status != .idle) return error.StartupCompletedWithNonIdleStatus;
                     self.in_transaction = status == .in_transaction;
                     self.ready = true;
                 },

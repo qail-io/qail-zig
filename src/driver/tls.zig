@@ -492,6 +492,9 @@ pub const TlsConnection = struct {
                 },
                 .ready_for_query => {
                     if (!auth_ok) return error.StartupCompletedWithoutAuthOk;
+                    var decoder = Decoder.init(msg.payload);
+                    const status = try decoder.parseReadyForQuery();
+                    if (status != .idle) return error.StartupCompletedWithNonIdleStatus;
                     self.ready = true;
                 },
                 .error_response => {
