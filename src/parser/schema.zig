@@ -253,6 +253,26 @@ const Parser = struct {
         return error.ExpectedPolicyTarget;
     }
 
+    fn canonicalGrantPrivilege(privilege: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, privilege, " \t\r\n");
+        if (std.ascii.eqlIgnoreCase(trimmed, "SELECT")) return "SELECT";
+        if (std.ascii.eqlIgnoreCase(trimmed, "INSERT")) return "INSERT";
+        if (std.ascii.eqlIgnoreCase(trimmed, "UPDATE")) return "UPDATE";
+        if (std.ascii.eqlIgnoreCase(trimmed, "DELETE")) return "DELETE";
+        if (std.ascii.eqlIgnoreCase(trimmed, "TRUNCATE")) return "TRUNCATE";
+        if (std.ascii.eqlIgnoreCase(trimmed, "REFERENCES")) return "REFERENCES";
+        if (std.ascii.eqlIgnoreCase(trimmed, "TRIGGER")) return "TRIGGER";
+        if (std.ascii.eqlIgnoreCase(trimmed, "USAGE")) return "USAGE";
+        if (std.ascii.eqlIgnoreCase(trimmed, "CREATE")) return "CREATE";
+        if (std.ascii.eqlIgnoreCase(trimmed, "CONNECT")) return "CONNECT";
+        if (std.ascii.eqlIgnoreCase(trimmed, "TEMP") or
+            std.ascii.eqlIgnoreCase(trimmed, "TEMPORARY")) return "TEMPORARY";
+        if (std.ascii.eqlIgnoreCase(trimmed, "EXECUTE")) return "EXECUTE";
+        if (std.ascii.eqlIgnoreCase(trimmed, "ALL") or
+            std.ascii.eqlIgnoreCase(trimmed, "ALL PRIVILEGES")) return "ALL PRIVILEGES";
+        return null;
+    }
+
     fn parseParenthesizedExpr(self: *Parser) ![]const u8 {
         self.skipWhitespace();
         try self.expectChar('(');
@@ -425,7 +445,18 @@ const Parser = struct {
 
             const raw = std.mem.trim(u8, self.input[start..self.pos], " \t\r\n");
             if (raw.len == 0) return error.ExpectedPrivilege;
-            try privileges.append(self.allocator, try self.allocator.dupe(u8, raw));
+
+            var canonical = canonicalGrantPrivilege(raw) orelse return error.ExpectedPrivilege;
+            if (std.ascii.eqlIgnoreCase(raw, "ALL")) {
+                const after_all = self.pos;
+                self.skipWhitespace();
+                if (self.matchKeyword("privileges")) {
+                    canonical = "ALL PRIVILEGES";
+                } else {
+                    self.pos = after_all;
+                }
+            }
+            try privileges.append(self.allocator, try self.allocator.dupe(u8, canonical));
 
             self.skipWhitespace();
             if (self.current() == ',') self.advance();
@@ -2110,15 +2141,40 @@ test "parse grant and revoke statements" {
     const grant = schema.grants.items[0];
     try std.testing.expectEqual(GrantAction.grant, grant.action);
     try std.testing.expectEqual(@as(usize, 2), grant.privileges.len);
-    try std.testing.expectEqualStrings("select", grant.privileges[0]);
-    try std.testing.expectEqualStrings("insert", grant.privileges[1]);
+    try std.testing.expectEqualStrings("SELECT", grant.privileges[0]);
+    try std.testing.expectEqualStrings("INSERT", grant.privileges[1]);
     try std.testing.expectEqualStrings("users", grant.on_object);
     try std.testing.expectEqualStrings("app_role", grant.role);
 
     const revoke = schema.grants.items[1];
     try std.testing.expectEqual(GrantAction.revoke, revoke.action);
     try std.testing.expectEqual(@as(usize, 1), revoke.privileges.len);
-    try std.testing.expectEqualStrings("update", revoke.privileges[0]);
+    try std.testing.expectEqualStrings("UPDATE", revoke.privileges[0]);
     try std.testing.expectEqualStrings("users", revoke.on_object);
     try std.testing.expectEqualStrings("app_role", revoke.role);
+}
+
+test "parse grant privileges are canonicalized and allowlisted" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\grant all privileges on users to app_role
+        \\grant temp on database_name to app_role
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), schema.grants.items.len);
+    try std.testing.expectEqual(@as(usize, 1), schema.grants.items[0].privileges.len);
+    try std.testing.expectEqualStrings("ALL PRIVILEGES", schema.grants.items[0].privileges[0]);
+    try std.testing.expectEqual(@as(usize, 1), schema.grants.items[1].privileges.len);
+    try std.testing.expectEqualStrings("TEMPORARY", schema.grants.items[1].privileges[0]);
+}
+
+test "parse grant rejects invalid privileges" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(error.ExpectedPrivilege, Schema.parse(allocator, "grant own on users to app_role"));
+    try std.testing.expectError(error.ExpectedPrivilege, Schema.parse(allocator, "grant select; drop table users on users to app_role"));
 }

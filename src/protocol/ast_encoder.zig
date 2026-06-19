@@ -831,13 +831,14 @@ pub const AstEncoder = struct {
 
                 try writer.writeAll("GRANT ");
                 for (cmd.privileges, 0..) |privilege, i| {
+                    const canonical = checkedPrivilege(privilege) orelse return error.InvalidGrantPrivilege;
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(privilege);
+                    try writer.writeAll(canonical);
                 }
                 try writer.writeAll(" ON ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" TO ");
-                try writer.writeAll(role);
+                try writeIdentifierMaybeQuoted(writer, role);
             },
             .revoke => {
                 const role = cmd.payload orelse return error.MissingRevokeRole;
@@ -846,13 +847,14 @@ pub const AstEncoder = struct {
 
                 try writer.writeAll("REVOKE ");
                 for (cmd.privileges, 0..) |privilege, i| {
+                    const canonical = checkedPrivilege(privilege) orelse return error.InvalidGrantPrivilege;
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(privilege);
+                    try writer.writeAll(canonical);
                 }
                 try writer.writeAll(" ON ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 try writer.writeAll(" FROM ");
-                try writer.writeAll(role);
+                try writeIdentifierMaybeQuoted(writer, role);
             },
             .create_policy => {
                 const policy = cmd.policy_def orelse return error.MissingPolicyDefinition;
@@ -1797,6 +1799,26 @@ fn checkedSqlTypeFragment(fragment: []const u8) ?[]const u8 {
         if (!ok) return null;
     }
     return trimmed;
+}
+
+fn checkedPrivilege(privilege: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, privilege, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "SELECT")) return "SELECT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "INSERT")) return "INSERT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "UPDATE")) return "UPDATE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "DELETE")) return "DELETE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "TRUNCATE")) return "TRUNCATE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "REFERENCES")) return "REFERENCES";
+    if (std.ascii.eqlIgnoreCase(trimmed, "TRIGGER")) return "TRIGGER";
+    if (std.ascii.eqlIgnoreCase(trimmed, "USAGE")) return "USAGE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "CREATE")) return "CREATE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "CONNECT")) return "CONNECT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "TEMP") or
+        std.ascii.eqlIgnoreCase(trimmed, "TEMPORARY")) return "TEMPORARY";
+    if (std.ascii.eqlIgnoreCase(trimmed, "EXECUTE")) return "EXECUTE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "ALL") or
+        std.ascii.eqlIgnoreCase(trimmed, "ALL PRIVILEGES")) return "ALL PRIVILEGES";
+    return null;
 }
 
 fn isValidQualifiedIdentifier(value: []const u8) bool {
@@ -2766,6 +2788,35 @@ test "ast encoder grant and revoke" {
     const revoke_cmd = QailCmd.revoke("users", &privs, "app_role");
     try encoder.encodeQuery(&revoke_cmd);
     try std.testing.expect(std.mem.indexOf(u8, encoder.getWritten(), "REVOKE SELECT, INSERT ON users FROM app_role") != null);
+}
+
+test "ast encoder grant privileges are canonicalized and validated" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const privs = [_][]const u8{ "select", "all privileges", "temp" };
+    const grant_cmd = QailCmd.grant("users", &privs, "app_role");
+
+    var sql_buf: [256]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &grant_cmd);
+    try std.testing.expectEqualStrings(
+        "GRANT SELECT, ALL PRIVILEGES, TEMPORARY ON users TO app_role",
+        writer.getWritten(),
+    );
+
+    const object_privs = [_][]const u8{"select"};
+    const qualified_grant = QailCmd.grant("public.users", &object_privs, "app_role");
+    var qualified_buf: [256]u8 = undefined;
+    var qualified_writer = io.FixedBufferWriter.init(&qualified_buf);
+    try encoder.writeAstToSql(qualified_writer.writer(), &qualified_grant);
+    try std.testing.expectEqualStrings("GRANT SELECT ON public.users TO app_role", qualified_writer.getWritten());
+
+    const bad_privs = [_][]const u8{"UPDATE; DROP TABLE users; --"};
+    const bad_revoke = QailCmd.revoke("users", &bad_privs, "app_role");
+    var bad_buf: [256]u8 = undefined;
+    var bad_writer = io.FixedBufferWriter.init(&bad_buf);
+    try std.testing.expectError(error.InvalidGrantPrivilege, encoder.writeAstToSql(bad_writer.writer(), &bad_revoke));
 }
 
 test "ast encoder escapes notify payload" {

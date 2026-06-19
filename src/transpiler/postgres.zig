@@ -122,13 +122,14 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
 
             try writer.writeAll("GRANT ");
             for (cmd.privileges, 0..) |privilege, i| {
+                const canonical = checkedPrivilege(privilege) orelse return error.InvalidGrantPrivilege;
                 if (i > 0) try writer.writeAll(", ");
-                try writer.writeAll(privilege);
+                try writer.writeAll(canonical);
             }
             try writer.writeAll(" ON ");
-            try writer.writeAll(cmd.table);
+            try render.writeIdentifierOrError(writer, cmd.table);
             try writer.writeAll(" TO ");
-            try writer.writeAll(role);
+            try writeIdentifierMaybeQuoted(writer, role);
         },
         .revoke => {
             const role = cmd.payload orelse return error.MissingRevokeRole;
@@ -137,13 +138,14 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
 
             try writer.writeAll("REVOKE ");
             for (cmd.privileges, 0..) |privilege, i| {
+                const canonical = checkedPrivilege(privilege) orelse return error.InvalidGrantPrivilege;
                 if (i > 0) try writer.writeAll(", ");
-                try writer.writeAll(privilege);
+                try writer.writeAll(canonical);
             }
             try writer.writeAll(" ON ");
-            try writer.writeAll(cmd.table);
+            try render.writeIdentifierOrError(writer, cmd.table);
             try writer.writeAll(" FROM ");
-            try writer.writeAll(role);
+            try writeIdentifierMaybeQuoted(writer, role);
         },
         .create_policy => {
             const policy = cmd.policy_def orelse return error.MissingPolicyDefinition;
@@ -284,6 +286,26 @@ fn containsUnquotedStatementDelimiter(value: []const u8) bool {
 fn isSafeSqlExprFragment(value: []const u8) bool {
     const trimmed = std.mem.trim(u8, value, " \t\r\n");
     return trimmed.len != 0 and !containsUnquotedStatementDelimiter(trimmed);
+}
+
+fn checkedPrivilege(privilege: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, privilege, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "SELECT")) return "SELECT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "INSERT")) return "INSERT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "UPDATE")) return "UPDATE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "DELETE")) return "DELETE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "TRUNCATE")) return "TRUNCATE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "REFERENCES")) return "REFERENCES";
+    if (std.ascii.eqlIgnoreCase(trimmed, "TRIGGER")) return "TRIGGER";
+    if (std.ascii.eqlIgnoreCase(trimmed, "USAGE")) return "USAGE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "CREATE")) return "CREATE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "CONNECT")) return "CONNECT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "TEMP") or
+        std.ascii.eqlIgnoreCase(trimmed, "TEMPORARY")) return "TEMPORARY";
+    if (std.ascii.eqlIgnoreCase(trimmed, "EXECUTE")) return "EXECUTE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "ALL") or
+        std.ascii.eqlIgnoreCase(trimmed, "ALL PRIVILEGES")) return "ALL PRIVILEGES";
+    return null;
 }
 
 // ==================== Tests ====================
@@ -793,6 +815,21 @@ test "transpile grant revoke and policy commands" {
     const revoke_sql = try toSql(std.testing.allocator, &revoke_cmd);
     defer std.testing.allocator.free(revoke_sql);
     try std.testing.expectEqualStrings("REVOKE SELECT, INSERT ON users FROM app_role", revoke_sql);
+
+    const canonical_privs = [_][]const u8{ "select", "all privileges", "temp" };
+    const canonical_grant = QailCmd.grant("users", &canonical_privs, "app_role");
+    const canonical_sql = try toSql(std.testing.allocator, &canonical_grant);
+    defer std.testing.allocator.free(canonical_sql);
+    try std.testing.expectEqualStrings("GRANT SELECT, ALL PRIVILEGES, TEMPORARY ON users TO app_role", canonical_sql);
+
+    const qualified_grant = QailCmd.grant("public.users", &privs, "app_role");
+    const qualified_sql = try toSql(std.testing.allocator, &qualified_grant);
+    defer std.testing.allocator.free(qualified_sql);
+    try std.testing.expectEqualStrings("GRANT SELECT, INSERT ON public.users TO app_role", qualified_sql);
+
+    const bad_privs = [_][]const u8{"SELECT; DROP TABLE users; --"};
+    const bad_grant = QailCmd.grant("users", &bad_privs, "app_role");
+    try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &bad_grant));
 
     const policy = ast.trusted_policy_sql.usingAndCheckSql(
         ast.cmd.PolicyDef.create("orders_tenant_isolation", "orders")

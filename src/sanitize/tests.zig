@@ -195,6 +195,22 @@ test "sanitize: grant role payload is an identifier" {
     try std.testing.expectEqualStrings("role", err.field);
 }
 
+test "sanitize: grant privileges are allowlisted" {
+    const allowed = [_][]const u8{ "select", "ALL PRIVILEGES", "temp" };
+    const safe = QailCmd.grant("users", &allowed, "app_role");
+    try std.testing.expect(validateCmd(&safe) == null);
+
+    const unknown = [_][]const u8{"OWN"};
+    const unknown_cmd = QailCmd.grant("users", &unknown, "app_role");
+    const unknown_err = validateCmd(&unknown_cmd).?;
+    try std.testing.expectEqualStrings("privilege", unknown_err.field);
+
+    const injected = [_][]const u8{"SELECT; DROP TABLE users; --"};
+    const injected_cmd = QailCmd.revoke("users", &injected, "app_role");
+    const injected_err = validateCmd(&injected_cmd).?;
+    try std.testing.expectEqualStrings("privilege", injected_err.field);
+}
+
 test "sanitize: raw default payload rejected" {
     var cmd = QailCmd{
         .kind = .alter_set_default,

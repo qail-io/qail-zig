@@ -116,6 +116,34 @@ fn checkTableRef(field: []const u8, value: []const u8) ?SanitizeError {
     return checkIdent(field, third.?);
 }
 
+fn isKnownPrivilege(privilege: []const u8) bool {
+    const trimmed = std.mem.trim(u8, privilege, " \t\r\n");
+    return std.ascii.eqlIgnoreCase(trimmed, "SELECT") or
+        std.ascii.eqlIgnoreCase(trimmed, "INSERT") or
+        std.ascii.eqlIgnoreCase(trimmed, "UPDATE") or
+        std.ascii.eqlIgnoreCase(trimmed, "DELETE") or
+        std.ascii.eqlIgnoreCase(trimmed, "TRUNCATE") or
+        std.ascii.eqlIgnoreCase(trimmed, "REFERENCES") or
+        std.ascii.eqlIgnoreCase(trimmed, "TRIGGER") or
+        std.ascii.eqlIgnoreCase(trimmed, "USAGE") or
+        std.ascii.eqlIgnoreCase(trimmed, "CREATE") or
+        std.ascii.eqlIgnoreCase(trimmed, "CONNECT") or
+        std.ascii.eqlIgnoreCase(trimmed, "TEMP") or
+        std.ascii.eqlIgnoreCase(trimmed, "TEMPORARY") or
+        std.ascii.eqlIgnoreCase(trimmed, "EXECUTE") or
+        std.ascii.eqlIgnoreCase(trimmed, "ALL") or
+        std.ascii.eqlIgnoreCase(trimmed, "ALL PRIVILEGES");
+}
+
+fn checkPrivilege(field: []const u8, value: []const u8) ?SanitizeError {
+    if (isKnownPrivilege(value)) return null;
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "grant privileges must be known PostgreSQL privilege keywords",
+    };
+}
+
 fn actionAllowsTableAlias(kind: ast.CmdKind) bool {
     return switch (kind) {
         .get, .cnt, .set, .del, .search, .over, .with, .explain, .explain_analyze => true,
@@ -781,7 +809,7 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     }
 
     for (cmd.privileges) |p| {
-        if (checkIdent("privilege", p)) |err| return err;
+        if (checkPrivilege("privilege", p)) |err| return err;
     }
 
     if (cmd.payload) |payload| {

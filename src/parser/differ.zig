@@ -546,5 +546,5 @@ test "diff grant removal emits revoke" {
 
     const sql = try cmds.items[0].toSql(allocator);
     defer allocator.free(sql);
-    try std.testing.expect(std.mem.indexOf(u8, sql, "REVOKE select, insert ON users FROM app_role") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "REVOKE SELECT, INSERT ON users FROM app_role") != null);
 }
