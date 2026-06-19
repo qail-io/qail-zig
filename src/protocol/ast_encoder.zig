@@ -571,7 +571,12 @@ pub const AstEncoder = struct {
             },
             .drop_function => {
                 try writer.writeAll("DROP FUNCTION IF EXISTS ");
-                try writer.writeAll(cmd.table);
+                if (cmd.payload) |signature| {
+                    try writeFunctionSignature(writer, signature);
+                } else {
+                    try writeIdentifierOrError(writer, cmd.table);
+                    try writer.writeAll("()");
+                }
             },
             .create_trigger => {
                 if (cmd.raw_sql) |raw| {
@@ -802,29 +807,29 @@ pub const AstEncoder = struct {
             },
             .call => {
                 try writer.writeAll("CALL ");
-                try writer.writeAll(cmd.table);
+                try writeCallTarget(writer, cmd.table);
             },
             .do_block => {
                 const lang = if (cmd.table.len == 0) "plpgsql" else cmd.table;
-                try writer.writeAll("DO $$ ");
-                try writer.writeAll(cmd.payload orelse "");
-                try writer.writeAll(" $$ LANGUAGE ");
-                try writer.writeAll(lang);
+                try writer.writeAll("DO ");
+                try writeDollarQuotedBlock(writer, cmd.payload orelse "");
+                try writer.writeAll(" LANGUAGE ");
+                try writeIdentifierMaybeQuoted(writer, lang);
             },
             .session_set => {
                 try writer.writeAll("SET ");
-                try writer.writeAll(cmd.table);
+                try writeSessionSettingName(writer, cmd.table);
                 try writer.writeAll(" = '");
                 try writeEscapedSqlString(writer, cmd.payload orelse "");
                 try writer.writeByte('\'');
             },
             .session_show => {
                 try writer.writeAll("SHOW ");
-                try writer.writeAll(cmd.table);
+                try writeSessionSettingName(writer, cmd.table);
             },
             .session_reset => {
                 try writer.writeAll("RESET ");
-                try writer.writeAll(cmd.table);
+                try writeSessionSettingName(writer, cmd.table);
             },
             .create_database => {
                 try writer.writeAll("CREATE DATABASE ");
@@ -1894,6 +1899,176 @@ fn writeCommentTarget(writer: anytype, target: []const u8) !void {
         try writer.writeAll("TABLE ");
         try writeIdentifierOrError(writer, trimmed);
     }
+}
+
+fn trimTrailingSemicolon(value: []const u8) []const u8 {
+    var trimmed = std.mem.trim(u8, value, " \t\r\n");
+    while (std.mem.endsWith(u8, trimmed, ";")) {
+        trimmed = std.mem.trim(u8, trimmed[0 .. trimmed.len - 1], " \t\r\n");
+    }
+    return trimmed;
+}
+
+fn containsRawDelimiter(value: []const u8) bool {
+    return value.len == 0 or
+        std.mem.indexOfScalar(u8, value, 0) != null or
+        std.mem.indexOfScalar(u8, value, ';') != null or
+        std.mem.indexOf(u8, value, "--") != null or
+        std.mem.indexOf(u8, value, "/*") != null or
+        std.mem.indexOf(u8, value, "*/") != null;
+}
+
+fn writeCallTarget(writer: anytype, target: []const u8) !void {
+    const trimmed = trimTrailingSemicolon(target);
+    if (containsRawDelimiter(trimmed)) {
+        try writeIdentifierOrError(writer, trimmed);
+        return;
+    }
+
+    if (std.mem.indexOfScalar(u8, trimmed, '(')) |open| {
+        const name = std.mem.trim(u8, trimmed[0..open], " \t\r\n");
+        const args = trimmed[open + 1 ..];
+        if (std.mem.endsWith(u8, args, ")") and std.mem.indexOfScalar(u8, args[0 .. args.len - 1], '(') == null) {
+            try writeIdentifierOrError(writer, name);
+            try writer.writeByte('(');
+            try writer.writeAll(args[0 .. args.len - 1]);
+            try writer.writeByte(')');
+            return;
+        }
+        try writeIdentifierOrError(writer, trimmed);
+        return;
+    }
+
+    try writeIdentifierOrError(writer, trimmed);
+}
+
+fn functionArgsAreSafe(args: []const u8) bool {
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    if (trimmed.len == 0) return true;
+
+    var start: usize = 0;
+    var depth: usize = 0;
+    for (args, 0..) |ch, idx| {
+        switch (ch) {
+            '(' => depth += 1,
+            ')' => {
+                if (depth == 0) return false;
+                depth -= 1;
+            },
+            ',' => if (depth == 0) {
+                const part = std.mem.trim(u8, args[start..idx], " \t\r\n");
+                if (part.len == 0 or checkedSqlTypeFragment(part) == null) return false;
+                start = idx + 1;
+            },
+            else => {},
+        }
+    }
+    if (depth != 0) return false;
+
+    const tail = std.mem.trim(u8, args[start..], " \t\r\n");
+    return tail.len != 0 and checkedSqlTypeFragment(tail) != null;
+}
+
+fn writeFunctionArgs(writer: anytype, args: []const u8) !void {
+    const trimmed = std.mem.trim(u8, args, " \t\r\n");
+    if (trimmed.len == 0) return;
+
+    var start: usize = 0;
+    var depth: usize = 0;
+    var first = true;
+    for (args, 0..) |ch, idx| {
+        switch (ch) {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' => if (depth == 0) {
+                const part = checkedSqlTypeFragment(args[start..idx]).?;
+                if (!first) try writer.writeAll(", ");
+                first = false;
+                try writer.writeAll(part);
+                start = idx + 1;
+            },
+            else => {},
+        }
+    }
+
+    const tail = checkedSqlTypeFragment(args[start..]).?;
+    if (!first) try writer.writeAll(", ");
+    try writer.writeAll(tail);
+}
+
+fn writeFunctionSignature(writer: anytype, signature: []const u8) !void {
+    const trimmed = trimTrailingSemicolon(signature);
+    if (containsRawDelimiter(trimmed)) {
+        try writeIdentifierOrError(writer, trimmed);
+        return;
+    }
+
+    if (std.mem.indexOfScalar(u8, trimmed, '(')) |open| {
+        if (!std.mem.endsWith(u8, trimmed, ")")) {
+            try writeIdentifierOrError(writer, trimmed);
+            return;
+        }
+        const name = std.mem.trim(u8, trimmed[0..open], " \t\r\n");
+        const args = trimmed[open + 1 .. trimmed.len - 1];
+        if (!functionArgsAreSafe(args)) {
+            try writeIdentifierOrError(writer, trimmed);
+            return;
+        }
+        try writeIdentifierOrError(writer, name);
+        try writer.writeByte('(');
+        try writeFunctionArgs(writer, args);
+        try writer.writeByte(')');
+        return;
+    }
+
+    try writeIdentifierOrError(writer, trimmed);
+}
+
+fn isValidSessionSettingName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    var parts = std.mem.splitScalar(u8, name, '.');
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        const first = part[0];
+        if (!std.ascii.isAlphabetic(first) and first != '_') return false;
+        for (part[1..]) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+        }
+    }
+    return true;
+}
+
+fn writeSessionSettingName(writer: anytype, name: []const u8) !void {
+    if (isValidSessionSettingName(name)) {
+        try writer.writeAll(name);
+    } else {
+        try writeIdentifierOrError(writer, name);
+    }
+}
+
+fn writeDollarQuotedBlock(writer: anytype, body: []const u8) !void {
+    var delimiter_buf: [64]u8 = undefined;
+    var idx: usize = 0;
+    while (idx <= body.len) : (idx += 1) {
+        const delimiter = if (idx == 0)
+            "$$"
+        else
+            try std.fmt.bufPrint(&delimiter_buf, "$qail_body_{d}$", .{idx});
+        if (std.mem.indexOf(u8, body, delimiter) == null) {
+            try writer.writeAll(delimiter);
+            try writer.writeByte(' ');
+            for (body) |ch| {
+                if (ch != 0) try writer.writeByte(ch);
+            }
+            try writer.writeByte(' ');
+            try writer.writeAll(delimiter);
+            return;
+        }
+    }
+
+    try writer.writeByte('\'');
+    try writeEscapedSqlStringNoNul(writer, body);
+    try writer.writeByte('\'');
 }
 
 fn isValidQualifiedIdentifier(value: []const u8) bool {
@@ -2977,6 +3152,74 @@ test "ast encoder comment targets are sanitized" {
         "COMMENT ON TABLE \"TABLE users; DROP TABLE users; --\" IS 'owner''s note'",
         unsafe_writer.getWritten(),
     );
+}
+
+test "ast encoder procedural targets are sanitized" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const valid_call = QailCmd.callProc("maintenance.refresh()");
+    var valid_call_buf: [256]u8 = undefined;
+    var valid_call_writer = io.FixedBufferWriter.init(&valid_call_buf);
+    try encoder.writeAstToSql(valid_call_writer.writer(), &valid_call);
+    try std.testing.expectEqualStrings("CALL maintenance.refresh()", valid_call_writer.getWritten());
+
+    const malicious_call = QailCmd.callProc("refresh(); DROP TABLE users; --");
+    var malicious_call_buf: [256]u8 = undefined;
+    var malicious_call_writer = io.FixedBufferWriter.init(&malicious_call_buf);
+    try encoder.writeAstToSql(malicious_call_writer.writer(), &malicious_call);
+    try std.testing.expectEqualStrings("CALL \"refresh(); DROP TABLE users; --\"", malicious_call_writer.getWritten());
+
+    const do_cmd = QailCmd{
+        .kind = .do_block,
+        .table = "plpgsql",
+        .payload = "BEGIN RAISE NOTICE $$boom$$; END;",
+    };
+    var do_buf: [256]u8 = undefined;
+    var do_writer = io.FixedBufferWriter.init(&do_buf);
+    try encoder.writeAstToSql(do_writer.writer(), &do_cmd);
+    try std.testing.expectEqualStrings(
+        "DO $qail_body_1$ BEGIN RAISE NOTICE $$boom$$; END; $qail_body_1$ LANGUAGE plpgsql",
+        do_writer.getWritten(),
+    );
+}
+
+test "ast encoder function signatures and session settings are sanitized" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var valid_drop = QailCmd.dropFunction("");
+    valid_drop.payload = "public.cleanup(numeric(10,2), text)";
+    var valid_drop_buf: [256]u8 = undefined;
+    var valid_drop_writer = io.FixedBufferWriter.init(&valid_drop_buf);
+    try encoder.writeAstToSql(valid_drop_writer.writer(), &valid_drop);
+    try std.testing.expectEqualStrings(
+        "DROP FUNCTION IF EXISTS public.cleanup(numeric(10,2), text)",
+        valid_drop_writer.getWritten(),
+    );
+
+    var malicious_drop = QailCmd.dropFunction("");
+    malicious_drop.payload = "public.cleanup(int); DROP TABLE users; --";
+    var malicious_drop_buf: [256]u8 = undefined;
+    var malicious_drop_writer = io.FixedBufferWriter.init(&malicious_drop_buf);
+    try encoder.writeAstToSql(malicious_drop_writer.writer(), &malicious_drop);
+    try std.testing.expectEqualStrings(
+        "DROP FUNCTION IF EXISTS public.\"cleanup(int); DROP TABLE users; --\"",
+        malicious_drop_writer.getWritten(),
+    );
+
+    var session_set = QailCmd.sessionSet("app.current_tenant");
+    session_set.payload = "tenant-1";
+    var session_buf: [256]u8 = undefined;
+    var session_writer = io.FixedBufferWriter.init(&session_buf);
+    try encoder.writeAstToSql(session_writer.writer(), &session_set);
+    try std.testing.expectEqualStrings("SET app.current_tenant = 'tenant-1'", session_writer.getWritten());
+
+    const session_reset = QailCmd.sessionReset("app.current; DROP TABLE users; --");
+    var reset_buf: [256]u8 = undefined;
+    var reset_writer = io.FixedBufferWriter.init(&reset_buf);
+    try encoder.writeAstToSql(reset_writer.writer(), &session_reset);
+    try std.testing.expectEqualStrings("RESET app.\"current; DROP TABLE users; --\"", reset_writer.getWritten());
 }
 
 test "ast encoder explain analyze" {
