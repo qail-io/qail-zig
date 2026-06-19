@@ -436,3 +436,33 @@ test "parse connection url rejects malformed percent escapes" {
         parseConnectionUrl(allocator, "postgres://user:bad%@localhost/app"),
     );
 }
+
+test "parse connection url splits credentials at final at sign" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const parsed = try parseConnectionUrl(allocator, "postgres://alice:sec@ret@db.example:6543/app");
+
+    try std.testing.expectEqualStrings("alice", parsed.user);
+    try std.testing.expect(parsed.password != null);
+    try std.testing.expectEqualStrings("sec@ret", parsed.password.?);
+    try std.testing.expectEqualStrings("db.example", parsed.host);
+    try std.testing.expectEqual(@as(u16, 6543), parsed.port);
+    try std.testing.expectEqualStrings("app", parsed.database);
+}
+
+test "parse connection url rejects explicit empty user" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlMissingUser,
+        parseConnectionUrl(allocator, "postgres://@db.example/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlMissingUser,
+        parseConnectionUrl(allocator, "postgres://:secret@db.example/app"),
+    );
+}
