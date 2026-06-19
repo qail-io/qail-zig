@@ -553,7 +553,7 @@ pub const AstEncoder = struct {
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
                 } else if (cmd.raw_sql) |raw| {
-                    const query = checkedSqlExprFragment(raw) orelse "SELECT NULL WHERE FALSE";
+                    const query = checkedReadOnlySubquerySql(raw) orelse "SELECT NULL WHERE FALSE";
                     try writer.writeAll(query);
                 } else {
                     return error.MissingViewSourceQuery;
@@ -570,7 +570,7 @@ pub const AstEncoder = struct {
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
                 } else if (cmd.raw_sql) |raw| {
-                    const query = checkedSqlExprFragment(raw) orelse "SELECT NULL WHERE FALSE";
+                    const query = checkedReadOnlySubquerySql(raw) orelse "SELECT NULL WHERE FALSE";
                     try writer.writeAll(query);
                 } else {
                     return error.MissingMaterializedViewSourceQuery;
@@ -1516,7 +1516,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
         try writeNestedQueryableCmd(writer, source_query);
     } else if (cmd.raw_sql) |source_sql| {
         try writer.writeByte(' ');
-        const checked_source = checkedSqlExprFragment(source_sql) orelse "SELECT NULL WHERE FALSE";
+        const checked_source = checkedReadOnlySubquerySql(source_sql) orelse "SELECT NULL WHERE FALSE";
         try writer.writeAll(checked_source);
     } else if (cmd.insert_values.len > 0) {
         try writer.writeAll(" VALUES (");
@@ -3583,6 +3583,16 @@ test "ast encoder view payload fragments fail closed" {
         unsafe_writer.getWritten(),
     );
 
+    var mutating_view = QailCmd.createView("deleted_users");
+    mutating_view.raw_sql = "DELETE FROM users RETURNING id";
+    var mutating_view_buf: [256]u8 = undefined;
+    var mutating_view_writer = io.FixedBufferWriter.init(&mutating_view_buf);
+    try encoder.writeAstToSql(mutating_view_writer.writer(), &mutating_view);
+    try std.testing.expectEqualStrings(
+        "CREATE VIEW deleted_users AS SELECT NULL WHERE FALSE",
+        mutating_view_writer.getWritten(),
+    );
+
     var unsafe_materialized = QailCmd.createMaterializedView("booking_stats");
     unsafe_materialized.raw_sql = "SELECT COUNT(*) FROM bookings; DROP TABLE bookings; --";
     var materialized_buf: [256]u8 = undefined;
@@ -3591,6 +3601,16 @@ test "ast encoder view payload fragments fail closed" {
     try std.testing.expectEqualStrings(
         "CREATE MATERIALIZED VIEW booking_stats AS SELECT NULL WHERE FALSE",
         materialized_writer.getWritten(),
+    );
+
+    var mutating_materialized = QailCmd.createMaterializedView("deleted_booking_stats");
+    mutating_materialized.raw_sql = "WITH deleted AS (DELETE FROM bookings RETURNING id) SELECT id FROM deleted";
+    var mutating_materialized_buf: [256]u8 = undefined;
+    var mutating_materialized_writer = io.FixedBufferWriter.init(&mutating_materialized_buf);
+    try encoder.writeAstToSql(mutating_materialized_writer.writer(), &mutating_materialized);
+    try std.testing.expectEqualStrings(
+        "CREATE MATERIALIZED VIEW deleted_booking_stats AS SELECT NULL WHERE FALSE",
+        mutating_materialized_writer.getWritten(),
     );
 }
 
@@ -3715,6 +3735,16 @@ test "ast encoder insert renders targets and raw sources defensively" {
     try std.testing.expectEqualStrings(
         "INSERT INTO events SELECT NULL WHERE FALSE",
         unsafe_writer.getWritten(),
+    );
+
+    var mutating_source = QailCmd.add("events");
+    mutating_source.raw_sql = "DELETE FROM users RETURNING id";
+    var mutating_buf: [256]u8 = undefined;
+    var mutating_writer = io.FixedBufferWriter.init(&mutating_buf);
+    try encoder.writeAstToSql(mutating_writer.writer(), &mutating_source);
+    try std.testing.expectEqualStrings(
+        "INSERT INTO events SELECT NULL WHERE FALSE",
+        mutating_writer.getWritten(),
     );
 }
 
