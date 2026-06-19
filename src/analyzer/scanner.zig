@@ -323,12 +323,14 @@ pub const CodebaseScanner = struct {
         var columns: std.ArrayList([]const u8) = .empty;
         defer freeStringList(self.allocator, &columns);
         try appendSqlProjectionColumns(&columns, self.allocator, line[select_pos + "select".len .. from_pos]);
+        try appendSqlJoinPredicateColumns(&columns, self.allocator, line, lower, table_end);
         if (findKeyword(lower, "where", table_end)) |where_pos| {
             try appendSqlPredicateColumns(&columns, self.allocator, line[where_pos + "where".len ..]);
         }
         try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
 
         try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+        try self.appendSqlJoinedTableRefs(file_path, line_num, line, lower, table_end, columns.items);
     }
 
     /// Find SQL INSERT pattern
@@ -372,6 +374,11 @@ pub const CodebaseScanner = struct {
         try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
 
         try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+        if (findKeyword(lower, "from", set_pos + "set".len)) |from_pos| {
+            const from_start = from_pos + "from".len;
+            const from_end = minKeywordPos(lower, from_start, &.{ "where", "returning" }) orelse lower.len;
+            try self.appendSqlTableListRefs(file_path, line_num, line, lower, from_start, from_end, columns.items);
+        }
     }
 
     /// Find SQL DELETE pattern
@@ -394,6 +401,67 @@ pub const CodebaseScanner = struct {
         try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
 
         try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+        if (findKeyword(lower, "using", table_end)) |using_pos| {
+            const using_start = using_pos + "using".len;
+            const using_end = minKeywordPos(lower, using_start, &.{ "where", "returning" }) orelse lower.len;
+            try self.appendSqlTableListRefs(file_path, line_num, line, lower, using_start, using_end, columns.items);
+        }
+    }
+
+    fn appendSqlJoinedTableRefs(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        lower_scan_line: []const u8,
+        start: usize,
+        raw_columns: []const []const u8,
+    ) !void {
+        var idx = start;
+        while (findKeyword(lower_scan_line, "join", idx)) |join_pos| {
+            var table_start = skipSqlWs(lower_scan_line, join_pos + "join".len);
+            if (keywordAt(lower_scan_line, "lateral", table_start)) {
+                table_start = skipSqlWs(lower_scan_line, table_start + "lateral".len);
+            }
+            if (table_start >= lower_scan_line.len or lower_scan_line[table_start] == '(') {
+                idx = join_pos + "join".len;
+                continue;
+            }
+            const table_end = findSqlIdentifierEnd(lower_scan_line, table_start);
+            if (table_end > table_start) {
+                try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower_scan_line, raw_columns);
+                idx = table_end;
+            } else {
+                idx = join_pos + "join".len;
+            }
+        }
+    }
+
+    fn appendSqlTableListRefs(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        lower_scan_line: []const u8,
+        list_start: usize,
+        list_end: usize,
+        raw_columns: []const []const u8,
+    ) !void {
+        var start = list_start;
+        while (start < list_end) {
+            const comma = findTopLevelComma(lower_scan_line[0..list_end], start) orelse list_end;
+            var table_start = skipSqlWs(lower_scan_line, start);
+            if (keywordAt(lower_scan_line, "only", table_start)) {
+                table_start = skipSqlWs(lower_scan_line, table_start + "only".len);
+            }
+            if (table_start < comma and lower_scan_line[table_start] != '(') {
+                const table_end = findSqlIdentifierEnd(lower_scan_line, table_start);
+                if (table_end > table_start and table_end <= comma) {
+                    try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower_scan_line, raw_columns);
+                }
+            }
+            start = comma + 1;
+        }
     }
 
     fn appendRawSqlTableRef(
@@ -737,10 +805,39 @@ fn appendSqlPredicateColumns(
 
         const ident = predicate[i..ident_end];
         const next = skipSqlWs(lower, ident_end);
-        if (next < lower.len and isSqlPredicateOperatorAt(lower, next)) {
+        if ((next < lower.len and isSqlPredicateOperatorAt(lower, next)) or isSqlPredicateOperatorBefore(lower, i)) {
             try appendSqlColumnIdentifier(columns, allocator, ident);
         }
         i = ident_end;
+    }
+}
+
+fn appendSqlJoinPredicateColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    lower: []const u8,
+    start: usize,
+) !void {
+    var idx = start;
+    while (findKeyword(lower, "join", idx)) |join_pos| {
+        const on_pos = findKeyword(lower, "on", join_pos + "join".len) orelse {
+            idx = join_pos + "join".len;
+            continue;
+        };
+        const predicate_start = on_pos + "on".len;
+        const predicate_end = minKeywordPos(lower, predicate_start, &.{
+            "join",
+            "where",
+            "group",
+            "order",
+            "limit",
+            "offset",
+            "fetch",
+            "returning",
+        }) orelse lower.len;
+        try appendSqlPredicateColumns(columns, allocator, line[predicate_start..predicate_end]);
+        idx = predicate_end;
     }
 }
 
@@ -811,6 +908,30 @@ fn isSqlPredicateOperatorAt(lower: []const u8, pos: usize) bool {
         keywordAt(lower, "like", pos) or
         keywordAt(lower, "ilike", pos) or
         keywordAt(lower, "between", pos);
+}
+
+fn isSqlPredicateOperatorBefore(lower: []const u8, pos: usize) bool {
+    var idx = pos;
+    while (idx > 0 and std.ascii.isWhitespace(lower[idx - 1])) : (idx -= 1) {}
+    if (idx == 0) return false;
+
+    switch (lower[idx - 1]) {
+        '=', '<', '>', '!' => return true,
+        else => {},
+    }
+
+    const before = lower[0..idx];
+    return endsWithSqlKeyword(before, "is") or
+        endsWithSqlKeyword(before, "in") or
+        endsWithSqlKeyword(before, "like") or
+        endsWithSqlKeyword(before, "ilike");
+}
+
+fn endsWithSqlKeyword(value: []const u8, keyword: []const u8) bool {
+    if (value.len < keyword.len) return false;
+    const start = value.len - keyword.len;
+    if (!std.mem.eql(u8, value[start..], keyword)) return false;
+    return keywordBoundaryAt(value, start, keyword.len);
 }
 
 fn keywordAt(s: []const u8, keyword: []const u8, pos: usize) bool {
@@ -1617,6 +1738,27 @@ test "sql scanner extracts raw select projection and predicate columns" {
     try expectHasColumn(ref.columns.items, "deleted_at");
 }
 
+test "sql scanner tracks joined raw sql table references" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"SELECT users.email, orders.total FROM users JOIN orders ON users.id = orders.user_id WHERE orders.status = $1\")",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("orders", scanner.refs.items[1].table);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "email");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "total");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "id");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "status");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "user_id");
+}
+
 test "sql scanner extracts raw insert update delete columns" {
     const allocator = std.testing.allocator;
     var scanner = CodebaseScanner.init(allocator);
@@ -1639,6 +1781,21 @@ test "sql scanner extracts raw insert update delete columns" {
 
     try expectHasColumn(scanner.refs.items[2].columns.items, "id");
     try expectHasColumn(scanner.refs.items[2].columns.items, "archived_at");
+}
+
+test "sql scanner tracks update from and delete using sources" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "sqlx::query(\"UPDATE orders SET status = $1 FROM users WHERE users.id = orders.user_id\")");
+    try scanner.scanLine("test.rs", 2, "sqlx::query(\"DELETE FROM order_items USING orders WHERE orders.id = order_items.order_id\")");
+
+    try std.testing.expectEqual(@as(usize, 4), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("orders", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[1].table);
+    try std.testing.expectEqualStrings("order_items", scanner.refs.items[2].table);
+    try std.testing.expectEqualStrings("orders", scanner.refs.items[3].table);
 }
 
 test "isSourceFile" {
