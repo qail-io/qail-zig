@@ -91,7 +91,11 @@ pub const MigrationImpact = struct {
         defer table_ref_counts.deinit();
 
         var column_ref_counts = std.StringHashMap(usize).init(allocator);
-        defer column_ref_counts.deinit();
+        defer {
+            var key_it = column_ref_counts.keyIterator();
+            while (key_it.next()) |key| allocator.free(key.*);
+            column_ref_counts.deinit();
+        }
 
         // Count references per table and column
         for (code_refs) |ref| {
@@ -99,10 +103,14 @@ pub const MigrationImpact = struct {
             try table_ref_counts.put(ref.table, current + 1);
 
             for (ref.columns.items) |col| {
-                var key_buf: [256]u8 = undefined;
-                const key = try std.fmt.bufPrint(&key_buf, "{s}.{s}", .{ ref.table, col });
-                const col_current = column_ref_counts.get(key) orelse 0;
-                try column_ref_counts.put(key, col_current + 1);
+                const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ ref.table, col });
+                errdefer allocator.free(key);
+                if (column_ref_counts.getPtr(key)) |count| {
+                    count.* += 1;
+                    allocator.free(key);
+                } else {
+                    try column_ref_counts.put(key, 1);
+                }
             }
         }
 
@@ -278,4 +286,37 @@ test "impact safe when no references" {
 
     try std.testing.expect(impact.safe_to_run);
     try std.testing.expectEqual(@as(usize, 0), impact.breaking_changes.items.len);
+}
+
+test "impact analyze detects dropped column referenced from raw sql" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "report.rs",
+        .data = "fn report() { sqlx::query(\"SELECT email FROM public.users WHERE id = $1\"); }",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "report.rs", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "public.users",
+        .action = .drop_column,
+        .column = .{
+            .name = "email",
+            .typ = "text",
+        },
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+    try std.testing.expectEqualStrings("email", impact.breaking_changes.items[0].dropped_column.column);
 }

@@ -317,7 +317,18 @@ pub const CodebaseScanner = struct {
         const select_pos = findKeyword(lower, "select", 0) orelse return;
         const from_pos = findKeyword(lower, "from", select_pos + "select".len) orelse return;
         const table_start = skipSqlWs(lower, from_pos + "from".len);
-        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        try appendSqlProjectionColumns(&columns, self.allocator, line[select_pos + "select".len .. from_pos]);
+        if (findKeyword(lower, "where", table_end)) |where_pos| {
+            try appendSqlPredicateColumns(&columns, self.allocator, line[where_pos + "where".len ..]);
+        }
+        try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
     }
 
     /// Find SQL INSERT pattern
@@ -329,7 +340,15 @@ pub const CodebaseScanner = struct {
         const insert_pos = findKeyword(lower, "insert", 0) orelse return;
         const into_pos = findKeyword(lower, "into", insert_pos + "insert".len) orelse return;
         const table_start = skipSqlWs(lower, into_pos + "into".len);
-        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        try appendSqlInsertColumns(&columns, self.allocator, line, lower, table_end);
+        try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
     }
 
     /// Find SQL UPDATE pattern
@@ -339,9 +358,20 @@ pub const CodebaseScanner = struct {
         defer self.allocator.free(lower);
 
         const update_pos = findKeyword(lower, "update", 0) orelse return;
-        if (findKeyword(lower, "set", update_pos + "update".len) == null) return;
+        const set_pos = findKeyword(lower, "set", update_pos + "update".len) orelse return;
         const table_start = skipSqlWs(lower, update_pos + "update".len);
-        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        try appendSqlUpdateColumns(&columns, self.allocator, line, lower, set_pos);
+        if (findKeyword(lower, "where", set_pos + "set".len)) |where_pos| {
+            try appendSqlPredicateColumns(&columns, self.allocator, line[where_pos + "where".len ..]);
+        }
+        try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
     }
 
     /// Find SQL DELETE pattern
@@ -353,7 +383,17 @@ pub const CodebaseScanner = struct {
         const delete_pos = findKeyword(lower, "delete", 0) orelse return;
         const from_pos = findKeyword(lower, "from", delete_pos + "delete".len) orelse return;
         const table_start = skipSqlWs(lower, from_pos + "from".len);
-        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        if (findKeyword(lower, "where", table_end)) |where_pos| {
+            try appendSqlPredicateColumns(&columns, self.allocator, line[where_pos + "where".len ..]);
+        }
+        try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
     }
 
     fn appendRawSqlTableRef(
@@ -363,15 +403,22 @@ pub const CodebaseScanner = struct {
         line: []const u8,
         table_start: usize,
         lower_scan_line: []const u8,
+        raw_columns: []const []const u8,
     ) !void {
         const table_end = findSqlIdentifierEnd(lower_scan_line, table_start);
         if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        errdefer freeStringList(self.allocator, &columns);
+        for (raw_columns) |col| {
+            try appendUniqueOwned(&columns, self.allocator, col);
+        }
 
         try self.refs.append(self.allocator, .{
             .file = try self.allocator.dupe(u8, file_path),
             .line = line_num,
             .table = try self.allocator.dupe(u8, line[table_start..table_end]),
-            .columns = .empty,
+            .columns = columns,
             .query_type = .raw_sql,
             .snippet = try self.allocator.dupe(u8, trimSnippet(line)),
             .allocator = self.allocator,
@@ -579,6 +626,272 @@ fn findSqlIdentifierEnd(s: []const u8, start: usize) usize {
     }
 
     return if (part_start) start else i;
+}
+
+fn freeStringList(allocator: std.mem.Allocator, list: *std.ArrayList([]const u8)) void {
+    for (list.items) |item| allocator.free(item);
+    list.deinit(allocator);
+}
+
+fn appendSqlProjectionColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    projection: []const u8,
+) !void {
+    var start: usize = 0;
+    while (start < projection.len) {
+        const comma = findTopLevelComma(projection, start) orelse projection.len;
+        try appendSqlProjectionExpr(columns, allocator, projection[start..comma]);
+        start = comma + 1;
+    }
+}
+
+fn appendSqlProjectionExpr(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr_raw: []const u8,
+) !void {
+    var expr = std.mem.trim(u8, expr_raw, " \t\r\n;\"')");
+    if (expr.len == 0) return;
+
+    const lower = try toLowerAlloc(allocator, expr);
+    defer allocator.free(lower);
+
+    if (std.mem.startsWith(u8, lower, "distinct ") and keywordBoundaryAt(lower, 0, "distinct".len)) {
+        expr = std.mem.trim(u8, expr["distinct".len..], " \t\r\n");
+    }
+
+    const lower_expr = try toLowerAlloc(allocator, expr);
+    defer allocator.free(lower_expr);
+
+    if (findKeyword(lower_expr, "as", 0)) |as_pos| {
+        expr = std.mem.trim(u8, expr[0..as_pos], " \t\r\n");
+    } else {
+        const ident_end = findSqlIdentifierEnd(lower_expr, 0);
+        if (ident_end > 0 and ident_end < expr.len) {
+            const rest = std.mem.trim(u8, expr[ident_end..], " \t\r\n");
+            if (isIdentifier(rest)) {
+                expr = expr[0..ident_end];
+            }
+        }
+    }
+
+    if (expr.len == 0 or std.mem.eql(u8, expr, "*") or std.mem.endsWith(u8, expr, ".*")) return;
+    if (containsSqlExpressionByte(expr)) return;
+
+    try appendSqlColumnIdentifier(columns, allocator, expr);
+}
+
+fn appendSqlInsertColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    lower: []const u8,
+    table_end: usize,
+) !void {
+    const open = skipSqlWs(lower, table_end);
+    if (open >= lower.len or lower[open] != '(') return;
+    const close = findMatchingParen(lower, open) orelse return;
+    try appendSqlColumnList(columns, allocator, line[open + 1 .. close]);
+}
+
+fn appendSqlUpdateColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    lower: []const u8,
+    set_pos: usize,
+) !void {
+    const set_start = set_pos + "set".len;
+    const set_end = minKeywordPos(lower, set_start, &.{ "from", "where", "returning" }) orelse lower.len;
+    var start = set_start;
+    while (start < set_end) {
+        const comma = findTopLevelComma(line[0..set_end], start) orelse set_end;
+        const assignment = line[start..comma];
+        if (findTopLevelScalar(assignment, '=')) |eq| {
+            try appendSqlColumnIdentifier(columns, allocator, assignment[0..eq]);
+        }
+        start = comma + 1;
+    }
+}
+
+fn appendSqlPredicateColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    predicate: []const u8,
+) !void {
+    const lower = try toLowerAlloc(allocator, predicate);
+    defer allocator.free(lower);
+
+    var i: usize = 0;
+    while (i < lower.len) {
+        if (!isSqlIdentifierStart(lower[i])) {
+            i += 1;
+            continue;
+        }
+        const ident_end = findSqlIdentifierEnd(lower, i);
+        if (ident_end <= i) {
+            i += 1;
+            continue;
+        }
+
+        const ident = predicate[i..ident_end];
+        const next = skipSqlWs(lower, ident_end);
+        if (next < lower.len and isSqlPredicateOperatorAt(lower, next)) {
+            try appendSqlColumnIdentifier(columns, allocator, ident);
+        }
+        i = ident_end;
+    }
+}
+
+fn appendSqlReturningColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    lower: []const u8,
+    start: usize,
+) !void {
+    const returning_pos = findKeyword(lower, "returning", start) orelse return;
+    try appendSqlProjectionColumns(columns, allocator, line[returning_pos + "returning".len ..]);
+}
+
+fn appendSqlColumnList(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !void {
+    var start: usize = 0;
+    while (start < raw.len) {
+        const comma = findTopLevelComma(raw, start) orelse raw.len;
+        try appendSqlColumnIdentifier(columns, allocator, raw[start..comma]);
+        start = comma + 1;
+    }
+}
+
+fn appendSqlColumnIdentifier(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !void {
+    var ident = std.mem.trim(u8, raw, " \t\r\n,;()");
+    if (ident.len == 0) return;
+
+    if (std.mem.lastIndexOfScalar(u8, ident, '.')) |dot| {
+        ident = ident[dot + 1 ..];
+    }
+    ident = std.mem.trim(u8, ident, " \t\r\n\"`");
+    if (ident.len == 0) return;
+    if (isSqlReservedWord(ident)) return;
+
+    const lower = try toLowerAlloc(allocator, ident);
+    defer allocator.free(lower);
+    if (findSqlIdentifierEnd(lower, 0) != lower.len) return;
+
+    try appendUniqueOwned(columns, allocator, ident);
+}
+
+fn containsSqlExpressionByte(expr: []const u8) bool {
+    for (expr) |c| {
+        switch (c) {
+            '*', '(', ')', '\'', '"', '+', '-', '/', '%', '|', '&', '?', ':', '$', '[', ']' => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn isSqlPredicateOperatorAt(lower: []const u8, pos: usize) bool {
+    if (pos >= lower.len) return false;
+    switch (lower[pos]) {
+        '=', '<', '>', '!' => return true,
+        else => {},
+    }
+    return keywordAt(lower, "is", pos) or
+        keywordAt(lower, "in", pos) or
+        keywordAt(lower, "like", pos) or
+        keywordAt(lower, "ilike", pos) or
+        keywordAt(lower, "between", pos);
+}
+
+fn keywordAt(s: []const u8, keyword: []const u8, pos: usize) bool {
+    if (pos + keyword.len > s.len) return false;
+    if (!std.mem.eql(u8, s[pos .. pos + keyword.len], keyword)) return false;
+    return keywordBoundaryAt(s, pos, keyword.len);
+}
+
+fn minKeywordPos(s: []const u8, start: usize, comptime keywords: []const []const u8) ?usize {
+    var best: ?usize = null;
+    inline for (keywords) |keyword| {
+        if (findKeyword(s, keyword, start)) |pos| {
+            if (best == null or pos < best.?) best = pos;
+        }
+    }
+    return best;
+}
+
+fn findTopLevelComma(s: []const u8, start: usize) ?usize {
+    return findTopLevelByte(s, start, ',');
+}
+
+fn findTopLevelScalar(s: []const u8, target: u8) ?usize {
+    return findTopLevelByte(s, 0, target);
+}
+
+fn findTopLevelByte(s: []const u8, start: usize, target: u8) ?usize {
+    var paren: i32 = 0;
+    var in_single = false;
+    var in_double = false;
+    var i = start;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (in_single) {
+            if (c == '\'' and i + 1 < s.len and s[i + 1] == '\'') {
+                i += 1;
+            } else if (c == '\'') {
+                in_single = false;
+            }
+            continue;
+        }
+        if (in_double) {
+            if (c == '"' and i + 1 < s.len and s[i + 1] == '"') {
+                i += 1;
+            } else if (c == '"') {
+                in_double = false;
+            }
+            continue;
+        }
+
+        switch (c) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => paren += 1,
+            ')' => {
+                if (paren > 0) paren -= 1;
+            },
+            else => {
+                if (c == target and paren == 0) return i;
+            },
+        }
+    }
+    return null;
+}
+
+fn isSqlReservedWord(s: []const u8) bool {
+    const words = [_][]const u8{
+        "all",   "and",    "as",     "asc",       "avg",    "between",
+        "by",    "case",   "count",  "delete",    "desc",   "distinct",
+        "else",  "end",    "exists", "false",     "from",   "full",
+        "group", "having", "ilike",  "in",        "inner",  "insert",
+        "into",  "is",     "join",   "left",      "like",   "limit",
+        "max",   "min",    "not",    "null",      "offset", "on",
+        "or",    "order",  "outer",  "returning", "right",  "select",
+        "set",   "sum",    "then",   "true",      "update", "values",
+        "when",  "where",
+    };
+    for (words) |word| {
+        if (std.ascii.eqlIgnoreCase(s, word)) return true;
+    }
+    return false;
 }
 
 fn skipWs(s: []const u8, start: usize) usize {
@@ -1214,6 +1527,8 @@ test "find sql select pattern" {
     try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
     try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
     try std.testing.expectEqual(QueryType.raw_sql, scanner.refs.items[0].query_type);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "name");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "id");
 }
 
 test "sql scanner requires keyword boundaries" {
@@ -1284,6 +1599,46 @@ test "sql scanner keeps qualified table references" {
     try std.testing.expectEqualStrings("audit.events", scanner.refs.items[1].table);
     try std.testing.expectEqualStrings("billing.invoices", scanner.refs.items[2].table);
     try std.testing.expectEqualStrings("archive.logs", scanner.refs.items[3].table);
+}
+
+test "sql scanner extracts raw select projection and predicate columns" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "sqlx::query(\"SELECT users.email AS user_email, status FROM public.users WHERE id = $1 AND deleted_at IS NULL\")");
+
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    const ref = scanner.refs.items[0];
+    try std.testing.expectEqualStrings("public.users", ref.table);
+    try expectHasColumn(ref.columns.items, "email");
+    try expectHasColumn(ref.columns.items, "status");
+    try expectHasColumn(ref.columns.items, "id");
+    try expectHasColumn(ref.columns.items, "deleted_at");
+}
+
+test "sql scanner extracts raw insert update delete columns" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "sqlx::query(\"INSERT INTO audit.events(id, event_type) VALUES ($1, $2) RETURNING created_at\")");
+    try scanner.scanLine("test.rs", 2, "sqlx::query(\"UPDATE billing.invoices SET status = $1, total = $2 WHERE id = $3 RETURNING updated_at\")");
+    try scanner.scanLine("test.rs", 3, "sqlx::query(\"DELETE FROM archive.logs WHERE id = $1 AND archived_at IS NOT NULL\")");
+
+    try std.testing.expectEqual(@as(usize, 3), scanner.refs.items.len);
+
+    try expectHasColumn(scanner.refs.items[0].columns.items, "id");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "event_type");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "created_at");
+
+    try expectHasColumn(scanner.refs.items[1].columns.items, "status");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "total");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "id");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "updated_at");
+
+    try expectHasColumn(scanner.refs.items[2].columns.items, "id");
+    try expectHasColumn(scanner.refs.items[2].columns.items, "archived_at");
 }
 
 test "isSourceFile" {
