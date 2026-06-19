@@ -162,6 +162,10 @@ pub const CodebaseScanner = struct {
         try self.findSqlInsert(file_path, line_num, line);
         try self.findSqlUpdate(file_path, line_num, line);
         try self.findSqlDelete(file_path, line_num, line);
+        try self.findSqlTableCommand(file_path, line_num, line, "create", "table");
+        try self.findSqlTableCommand(file_path, line_num, line, "alter", "table");
+        try self.findSqlTableCommand(file_path, line_num, line, "drop", "table");
+        try self.findSqlTableCommand(file_path, line_num, line, "truncate", "table");
     }
 
     /// Find QAIL pattern like "get::users"
@@ -473,6 +477,27 @@ pub const CodebaseScanner = struct {
         }
     }
 
+    fn findSqlTableCommand(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        first_keyword: []const u8,
+        second_keyword: []const u8,
+    ) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
+        defer self.allocator.free(lower);
+
+        const first_pos = findKeyword(lower, first_keyword, 0) orelse return;
+        const second_pos = findKeyword(lower, second_keyword, first_pos + first_keyword.len) orelse return;
+        var table_start = skipSqlWs(lower, second_pos + second_keyword.len);
+        table_start = skipSqlIfExists(lower, table_start);
+        if (table_start >= lower.len or lower[table_start] == '(') return;
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
+    }
+
     fn appendRawSqlTableRef(
         self: *CodebaseScanner,
         file_path: []const u8,
@@ -668,6 +693,17 @@ fn skipSqlWs(s: []const u8, start: usize) usize {
     var i = start;
     while (i < s.len and std.ascii.isWhitespace(s[i])) : (i += 1) {}
     return i;
+}
+
+fn skipSqlIfExists(s: []const u8, start: usize) usize {
+    var idx = skipSqlWs(s, start);
+    if (!keywordAt(s, "if", idx)) return idx;
+    idx = skipSqlWs(s, idx + "if".len);
+    if (keywordAt(s, "not", idx)) {
+        idx = skipSqlWs(s, idx + "not".len);
+    }
+    if (!keywordAt(s, "exists", idx)) return start;
+    return skipSqlWs(s, idx + "exists".len);
 }
 
 fn isSqlIdentifierStart(c: u8) bool {
@@ -1820,6 +1856,23 @@ test "sql scanner tracks update from and delete using sources" {
     try std.testing.expectEqualStrings("users", scanner.refs.items[1].table);
     try std.testing.expectEqualStrings("order_items", scanner.refs.items[2].table);
     try std.testing.expectEqualStrings("orders", scanner.refs.items[3].table);
+}
+
+test "sql scanner tracks raw ddl table references" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "sqlx::query(\"ALTER TABLE users ADD COLUMN risk_score integer\")");
+    try scanner.scanLine("test.rs", 2, "sqlx::query(\"DROP TABLE IF EXISTS archive.logs\")");
+    try scanner.scanLine("test.rs", 3, "sqlx::query(\"CREATE TABLE IF NOT EXISTS audit.events(id uuid)\")");
+    try scanner.scanLine("test.rs", 4, "sqlx::query(\"TRUNCATE TABLE sessions\")");
+
+    try std.testing.expectEqual(@as(usize, 4), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("archive.logs", scanner.refs.items[1].table);
+    try std.testing.expectEqualStrings("audit.events", scanner.refs.items[2].table);
+    try std.testing.expectEqualStrings("sessions", scanner.refs.items[3].table);
 }
 
 test "isSourceFile" {
