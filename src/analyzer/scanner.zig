@@ -166,6 +166,8 @@ pub const CodebaseScanner = struct {
         try self.findSqlTableCommand(file_path, line_num, line, "alter", "table");
         try self.findSqlTableCommand(file_path, line_num, line, "drop", "table");
         try self.findSqlTableCommand(file_path, line_num, line, "truncate", "table");
+        try self.findSqlPrivilegeCommand(file_path, line_num, line, "grant");
+        try self.findSqlPrivilegeCommand(file_path, line_num, line, "revoke");
     }
 
     /// Find QAIL pattern like "get::users"
@@ -498,6 +500,34 @@ pub const CodebaseScanner = struct {
         try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
     }
 
+    fn findSqlPrivilegeCommand(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        command_keyword: []const u8,
+    ) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
+        defer self.allocator.free(lower);
+
+        const command_pos = findKeyword(lower, command_keyword, 0) orelse return;
+        const on_pos = findKeyword(lower, "on", command_pos + command_keyword.len) orelse return;
+        var table_start = skipSqlWs(lower, on_pos + "on".len);
+        const object_type_end = findSqlIdentifierEnd(lower, table_start);
+        if (object_type_end <= table_start) return;
+
+        const object_type = lower[table_start..object_type_end];
+        if (std.ascii.eqlIgnoreCase(object_type, "table")) {
+            table_start = skipSqlWs(lower, object_type_end);
+        } else if (isNonTablePrivilegeTarget(object_type)) {
+            return;
+        }
+
+        if (table_start >= lower.len or lower[table_start] == '(') return;
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
+    }
+
     fn appendRawSqlTableRef(
         self: *CodebaseScanner,
         file_path: []const u8,
@@ -704,6 +734,16 @@ fn skipSqlIfExists(s: []const u8, start: usize) usize {
     }
     if (!keywordAt(s, "exists", idx)) return start;
     return skipSqlWs(s, idx + "exists".len);
+}
+
+fn isNonTablePrivilegeTarget(target: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(target, "database") or
+        std.ascii.eqlIgnoreCase(target, "schema") or
+        std.ascii.eqlIgnoreCase(target, "sequence") or
+        std.ascii.eqlIgnoreCase(target, "function") or
+        std.ascii.eqlIgnoreCase(target, "procedure") or
+        std.ascii.eqlIgnoreCase(target, "routine") or
+        std.ascii.eqlIgnoreCase(target, "type");
 }
 
 fn isSqlIdentifierStart(c: u8) bool {
@@ -1873,6 +1913,20 @@ test "sql scanner tracks raw ddl table references" {
     try std.testing.expectEqualStrings("archive.logs", scanner.refs.items[1].table);
     try std.testing.expectEqualStrings("audit.events", scanner.refs.items[2].table);
     try std.testing.expectEqualStrings("sessions", scanner.refs.items[3].table);
+}
+
+test "sql scanner tracks raw table privilege references" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "sqlx::query(\"GRANT SELECT ON users TO app_role\")");
+    try scanner.scanLine("test.rs", 2, "sqlx::query(\"REVOKE UPDATE ON TABLE billing.invoices FROM app_role\")");
+    try scanner.scanLine("test.rs", 3, "sqlx::query(\"GRANT USAGE ON SCHEMA public TO app_role\")");
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("billing.invoices", scanner.refs.items[1].table);
 }
 
 test "isSourceFile" {
