@@ -54,6 +54,86 @@ test "sanitize: long identifier rejected" {
     try std.testing.expectEqualStrings("table", err.field);
 }
 
+test "sanitize: qualified identifier parts are validated independently" {
+    var schema_buf: [63]u8 = undefined;
+    var table_buf: [63]u8 = undefined;
+    @memset(schema_buf[0..], 's');
+    @memset(table_buf[0..], 't');
+
+    var qualified_buf: [127]u8 = undefined;
+    const qualified = try std.fmt.bufPrint(&qualified_buf, "{s}.{s}", .{ schema_buf[0..], table_buf[0..] });
+    try std.testing.expect(validateCmd(&QailCmd.get(qualified)) == null);
+
+    const empty_part_err = validateCmd(&QailCmd.get("public..users")).?;
+    try std.testing.expectEqualStrings("table", empty_part_err.field);
+}
+
+test "sanitize: query and mutation table aliases pass" {
+    try std.testing.expect(validateCmd(&QailCmd.get("public.users u")) == null);
+    try std.testing.expect(validateCmd(&QailCmd.set("public.users AS u")) == null);
+    try std.testing.expect(validateCmd(&QailCmd.del("public.users u")) == null);
+}
+
+test "sanitize: ddl table alias shape is rejected" {
+    const err = validateCmd(&QailCmd.make("public.users u")).?;
+    try std.testing.expectEqualStrings("table", err.field);
+}
+
+test "sanitize: join table reference aliases are validated" {
+    const good_joins = [_]ast.Join{.{
+        .kind = .left,
+        .table = "orders o",
+        .on_left = "users.id",
+        .on_right = "orders.user_id",
+    }};
+    const good = QailCmd.get("users").join(&good_joins);
+    try std.testing.expect(validateCmd(&good) == null);
+
+    const bad_joins = [_]ast.Join{.{
+        .kind = .left,
+        .table = "orders DROP TABLE x",
+        .on_left = "users.id",
+        .on_right = "orders.user_id",
+    }};
+    const bad = QailCmd.get("users").join(&bad_joins);
+    const err = validateCmd(&bad).?;
+    try std.testing.expectEqualStrings("join.table", err.field);
+
+    const incomplete_alias_joins = [_]ast.Join{.{
+        .kind = .left,
+        .table = "orders AS",
+        .on_left = "users.id",
+        .on_right = "orders.user_id",
+    }};
+    const incomplete_alias = QailCmd.get("users").join(&incomplete_alias_joins);
+    const incomplete_err = validateCmd(&incomplete_alias).?;
+    try std.testing.expectEqualStrings("join.table", incomplete_err.field);
+}
+
+test "sanitize: update from and delete using aliases pass" {
+    var update = QailCmd.set("orders");
+    update.assignments = &[_]ast.Assignment{.{ .column = "status", .value = .{ .string = "paid" } }};
+    update.from_tables = &[_][]const u8{"accounts a"};
+    try std.testing.expect(validateCmd(&update) == null);
+
+    var delete = QailCmd.del("orders");
+    delete.using_tables = &[_][]const u8{"accounts AS a"};
+    try std.testing.expect(validateCmd(&delete) == null);
+}
+
+test "sanitize: malformed update from and delete using aliases rejected" {
+    var update = QailCmd.set("orders");
+    update.assignments = &[_]ast.Assignment{.{ .column = "status", .value = .{ .string = "paid" } }};
+    update.from_tables = &[_][]const u8{"accounts DROP TABLE x"};
+    const update_err = validateCmd(&update).?;
+    try std.testing.expectEqualStrings("from_tables", update_err.field);
+
+    var delete = QailCmd.del("orders");
+    delete.using_tables = &[_][]const u8{"accounts; DROP TABLE accounts"};
+    const delete_err = validateCmd(&delete).?;
+    try std.testing.expectEqualStrings("using_tables", delete_err.field);
+}
+
 test "sanitize: typed source query passes" {
     const source = QailCmd.get("users").select(&.{Expr.col("id")});
     const cmd = QailCmd.createViewFromQuery("user_ids", &source);
@@ -295,6 +375,45 @@ test "sanitize: alter add constraint checks payload fragment" {
     const unsafe = QailCmd.alterAddConstraint("users", "users_active_check", "active); DROP TABLE users; --");
     const err = validateCmd(&unsafe).?;
     try std.testing.expectEqualStrings("payload", err.field);
+}
+
+test "sanitize: merge inline source alias passes" {
+    const on = [_]ast.Condition{.{
+        .left = Expr.col("orders.id"),
+        .op = .eq,
+        .value = ast.Value.fromColumn("s.order_id"),
+    }};
+    const clauses = [_]ast.MergeClause{.{
+        .match_kind = .matched,
+        .action = .do_nothing,
+    }};
+    const merge = ast.Merge{
+        .source = ast.MergeSource.fromTable("stage_orders s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("orders").withMerge(merge);
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: malformed merge source table reference rejected" {
+    const on = [_]ast.Condition{.{
+        .left = Expr.col("orders.id"),
+        .op = .eq,
+        .value = ast.Value.fromColumn("stage_orders.order_id"),
+    }};
+    const clauses = [_]ast.MergeClause{.{
+        .match_kind = .matched,
+        .action = .do_nothing,
+    }};
+    const merge = ast.Merge{
+        .source = ast.MergeSource.fromTable("stage_orders DROP TABLE x"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("orders").withMerge(merge);
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("merge.source.table", err.field);
 }
 
 test "sanitize: merge validates source and action expressions" {

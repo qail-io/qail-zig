@@ -24,12 +24,19 @@ const MAX_IDENT_LEN: usize = 63; // Postgres NAMEDATALEN - 1
 const MAX_RAW_FUNCTION_LEN: usize = 1024;
 
 fn isSafeIdent(s: []const u8) bool {
-    if (s.len == 0 or s.len > MAX_IDENT_LEN) return false;
-    for (s) |c| {
-        const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_' or c == '.';
-        if (!ok) return false;
+    if (s.len == 0) return false;
+
+    var parts = std.mem.splitScalar(u8, s, '.');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        count += 1;
+        if (part.len == 0 or part.len > MAX_IDENT_LEN) return false;
+        for (part) |c| {
+            const ok = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+            if (!ok) return false;
+        }
     }
-    return true;
+    return count > 0;
 }
 
 fn isSafeParam(s: []const u8) bool {
@@ -50,7 +57,15 @@ fn identError(field: []const u8, value: []const u8) SanitizeError {
     return .{
         .field = field,
         .value = shortValue(value),
-        .reason = "identifiers must match [a-zA-Z0-9_.] and be <= 63 chars",
+        .reason = "identifier parts must match [a-zA-Z0-9_] and be <= 63 chars",
+    };
+}
+
+fn tableRefError(field: []const u8, value: []const u8) SanitizeError {
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "table references must be identifier or identifier [AS] alias",
     };
 }
 
@@ -81,6 +96,31 @@ fn insertTargetError(value: []const u8) SanitizeError {
 fn checkIdent(field: []const u8, value: []const u8) ?SanitizeError {
     if (!isSafeIdent(value)) return identError(field, value);
     return null;
+}
+
+fn checkTableRef(field: []const u8, value: []const u8) ?SanitizeError {
+    var parts = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    const table = parts.next() orelse return tableRefError(field, value);
+    const second = parts.next();
+    const third = parts.next();
+    if (parts.next() != null) return tableRefError(field, value);
+
+    if (checkIdent(field, table)) |err| return err;
+
+    if (second == null) return null;
+    if (third == null) {
+        if (std.ascii.eqlIgnoreCase(second.?, "as")) return tableRefError(field, value);
+        return checkIdent(field, second.?);
+    }
+    if (!std.ascii.eqlIgnoreCase(second.?, "as")) return tableRefError(field, value);
+    return checkIdent(field, third.?);
+}
+
+fn actionAllowsTableAlias(kind: ast.CmdKind) bool {
+    return switch (kind) {
+        .get, .cnt, .set, .del, .search, .over, .with, .explain, .explain_analyze => true,
+        else => false,
+    };
 }
 
 fn checkParam(field: []const u8, value: []const u8) ?SanitizeError {
@@ -509,9 +549,11 @@ fn checkMerge(merge: *const ast.Merge) ?SanitizeError {
 
     switch (merge.source) {
         .table => |table| {
-            if (checkIdent("merge.source.table", table.name)) |err| return err;
             if (table.alias) |alias| {
+                if (checkIdent("merge.source.table", table.name)) |err| return err;
                 if (checkIdent("merge.source.alias", alias)) |err| return err;
+            } else {
+                if (checkTableRef("merge.source.table", table.name)) |err| return err;
             }
         },
         .query => |query| {
@@ -599,7 +641,11 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     }
 
     if (cmd.table.len != 0) {
-        if (checkIdent("table", cmd.table)) |err| return err;
+        if (actionAllowsTableAlias(cmd.kind)) {
+            if (checkTableRef("table", cmd.table)) |err| return err;
+        } else {
+            if (checkIdent("table", cmd.table)) |err| return err;
+        }
     }
     if (cmd.table_alias) |alias| {
         if (checkIdent("table_alias", alias)) |err| return err;
@@ -637,9 +683,11 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     }
 
     for (cmd.joins) |join| {
-        if (checkIdent("join.table", join.table)) |err| return err;
         if (join.alias) |alias| {
+            if (checkIdent("join.table", join.table)) |err| return err;
             if (checkIdent("join.alias", alias)) |err| return err;
+        } else {
+            if (checkTableRef("join.table", join.table)) |err| return err;
         }
         if (checkIdent("join.on_left", join.on_left)) |err| return err;
         if (checkIdent("join.on_right", join.on_right)) |err| return err;
@@ -700,10 +748,10 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     }
 
     for (cmd.from_tables) |t| {
-        if (checkIdent("from_tables", t)) |err| return err;
+        if (checkTableRef("from_tables", t)) |err| return err;
     }
     for (cmd.using_tables) |t| {
-        if (checkIdent("using_tables", t)) |err| return err;
+        if (checkTableRef("using_tables", t)) |err| return err;
     }
 
     if (cmd.policy_def) |*p| {
