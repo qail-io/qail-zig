@@ -29,6 +29,13 @@ const FrontendMessage = wire.FrontendMessage;
 const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 const max_wire_message_len: usize = std.math.maxInt(i32);
 
+const INVALID_EXISTS_CONDITION =
+    "FALSE /* ERROR: EXISTS condition requires subquery value */";
+const INVALID_IN_CONDITION =
+    "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */";
+const INVALID_BETWEEN_CONDITION =
+    "FALSE /* ERROR: BETWEEN condition requires exactly two array values */";
+
 /// AST-to-Wire encoder
 /// Directly encodes QailCmd AST to PostgreSQL Extended Query Protocol bytes
 pub const AstEncoder = struct {
@@ -1473,12 +1480,14 @@ fn writeWhereCondition(writer: anytype, clause: ast.cmd.WhereClause) !void {
 }
 
 fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
-    if (condition.column.len != 0) {
-        try writer.writeAll(condition.column);
-    } else {
-        var left = condition.left;
-        try writeExpr(writer, &left);
+    switch (condition.op) {
+        .in, .not_in => return writeInCondition(writer, condition),
+        .between, .not_between => return writeBetweenCondition(writer, condition),
+        .exists, .not_exists => return writer.writeAll(INVALID_EXISTS_CONDITION),
+        else => {},
     }
+
+    try writeConditionLeft(writer, condition);
 
     switch (condition.op) {
         .is_null, .is_not_null => try writer.print(" {s}", .{condition.op.toSql()}),
@@ -1486,6 +1495,57 @@ fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
             try writer.print(" {s} ", .{condition.op.toSql()});
             try writeValue(writer, &condition.value);
         },
+    }
+}
+
+fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition) !void {
+    if (condition.column.len != 0) {
+        try writer.writeAll(condition.column);
+    } else {
+        var left = condition.left;
+        try writeExpr(writer, &left);
+    }
+}
+
+fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+    switch (condition.value) {
+        .array => |values| {
+            if (values.len == 0) return writer.writeAll(INVALID_IN_CONDITION);
+
+            try writeConditionLeft(writer, condition);
+            try writer.print(" {s} (", .{condition.op.toSql()});
+            for (values, 0..) |value, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeValue(writer, &value);
+            }
+            try writer.writeByte(')');
+        },
+        .param, .named_param => {
+            try writeConditionLeft(writer, condition);
+            try writer.writeAll(if (condition.op == .in) " = ANY(" else " != ALL(");
+            try writeValue(writer, &condition.value);
+            try writer.writeByte(')');
+        },
+        else => try writer.writeAll(INVALID_IN_CONDITION),
+    }
+}
+
+fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+    switch (condition.value) {
+        .range => |range| {
+            try writeConditionLeft(writer, condition);
+            try writer.print(" {s} {d} AND {d}", .{ condition.op.toSql(), range.low, range.high });
+        },
+        .array => |values| {
+            if (values.len != 2) return writer.writeAll(INVALID_BETWEEN_CONDITION);
+
+            try writeConditionLeft(writer, condition);
+            try writer.print(" {s} ", .{condition.op.toSql()});
+            try writeValue(writer, &values[0]);
+            try writer.writeAll(" AND ");
+            try writeValue(writer, &values[1]);
+        },
+        else => try writer.writeAll(INVALID_BETWEEN_CONDITION),
     }
 }
 
@@ -2435,6 +2495,111 @@ test "ast encoder alter constraint checks expression fragments" {
     var bad_buf: [256]u8 = undefined;
     var bad_writer = io.FixedBufferWriter.init(&bad_buf);
     try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(bad_writer.writer(), &unsafe));
+}
+
+test "ast encoder condition shape operators render safely" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const roles = [_]Value{ Value.fromString("admin"), Value.fromString("user") };
+    const wheres = [_]ast.cmd.WhereClause{
+        .{
+            .condition = .{
+                .column = "role",
+                .op = .in,
+                .value = .{ .array = &roles },
+            },
+        },
+        .{
+            .condition = .{
+                .column = "age",
+                .op = .not_between,
+                .value = .{ .range = .{ .low = 18, .high = 65 } },
+            },
+        },
+    };
+    const cmd = QailCmd.get("users").where(&wheres);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE role IN ('admin', 'user') AND age NOT BETWEEN 18 AND 65",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder in parameters use array operators" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const wheres = [_]ast.cmd.WhereClause{
+        .{
+            .condition = .{
+                .column = "id",
+                .op = .in,
+                .value = .{ .param = 1 },
+            },
+        },
+        .{
+            .condition = .{
+                .column = "role",
+                .op = .not_in,
+                .value = .{ .named_param = "roles" },
+            },
+        },
+    };
+    const cmd = QailCmd.get("users").where(&wheres);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE id = ANY($1) AND role != ALL(:roles)",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder malformed condition shapes fail closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const empty = [_]Value{};
+    const empty_in = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "role",
+            .op = .not_in,
+            .value = .{ .array = &empty },
+        },
+    }};
+    const empty_in_cmd = QailCmd.get("users").where(&empty_in);
+
+    var in_buf: [256]u8 = undefined;
+    var in_writer = io.FixedBufferWriter.init(&in_buf);
+    try encoder.writeAstToSql(in_writer.writer(), &empty_in_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */",
+        in_writer.getWritten(),
+    );
+
+    const bad_exists = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "id",
+            .op = .exists,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const bad_exists_cmd = QailCmd.get("users").where(&bad_exists);
+
+    var exists_buf: [256]u8 = undefined;
+    var exists_writer = io.FixedBufferWriter.init(&exists_buf);
+    try encoder.writeAstToSql(exists_writer.writer(), &bad_exists_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE FALSE /* ERROR: EXISTS condition requires subquery value */",
+        exists_writer.getWritten(),
+    );
 }
 
 test "ast encoder privilege and policy validation" {

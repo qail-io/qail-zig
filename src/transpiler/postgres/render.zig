@@ -9,6 +9,13 @@ const ast = struct {
 const Expr = ast.expr.Expr;
 const Value = ast.values.Value;
 
+const INVALID_EXISTS_CONDITION =
+    "FALSE /* ERROR: EXISTS condition requires subquery value */";
+const INVALID_IN_CONDITION =
+    "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */";
+const INVALID_BETWEEN_CONDITION =
+    "FALSE /* ERROR: BETWEEN condition requires exactly two array values */";
+
 pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
     var has_and = false;
     var has_or = false;
@@ -58,12 +65,14 @@ pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) 
 }
 
 pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
-    if (condition.column.len != 0) {
-        try writer.writeAll(condition.column);
-    } else {
-        var left = condition.left;
-        try writeExpr(writer, &left);
+    switch (condition.op) {
+        .in, .not_in => return writeInCondition(writer, condition),
+        .between, .not_between => return writeBetweenCondition(writer, condition),
+        .exists, .not_exists => return writer.writeAll(INVALID_EXISTS_CONDITION),
+        else => {},
     }
+
+    try writeConditionLeft(writer, condition);
 
     switch (condition.op) {
         .is_null, .is_not_null => try writer.print(" {s}", .{condition.op.toSql()}),
@@ -71,6 +80,57 @@ pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !vo
             try writer.print(" {s} ", .{condition.op.toSql()});
             try writeValue(writer, &condition.value);
         },
+    }
+}
+
+fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition) !void {
+    if (condition.column.len != 0) {
+        try writer.writeAll(condition.column);
+    } else {
+        var left = condition.left;
+        try writeExpr(writer, &left);
+    }
+}
+
+fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+    switch (condition.value) {
+        .array => |values| {
+            if (values.len == 0) return writer.writeAll(INVALID_IN_CONDITION);
+
+            try writeConditionLeft(writer, condition);
+            try writer.print(" {s} (", .{condition.op.toSql()});
+            for (values, 0..) |value, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writeValue(writer, &value);
+            }
+            try writer.writeByte(')');
+        },
+        .param, .named_param => {
+            try writeConditionLeft(writer, condition);
+            try writer.writeAll(if (condition.op == .in) " = ANY(" else " != ALL(");
+            try writeValue(writer, &condition.value);
+            try writer.writeByte(')');
+        },
+        else => try writer.writeAll(INVALID_IN_CONDITION),
+    }
+}
+
+fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+    switch (condition.value) {
+        .range => |range| {
+            try writeConditionLeft(writer, condition);
+            try writer.print(" {s} {d} AND {d}", .{ condition.op.toSql(), range.low, range.high });
+        },
+        .array => |values| {
+            if (values.len != 2) return writer.writeAll(INVALID_BETWEEN_CONDITION);
+
+            try writeConditionLeft(writer, condition);
+            try writer.print(" {s} ", .{condition.op.toSql()});
+            try writeValue(writer, &values[0]);
+            try writer.writeAll(" AND ");
+            try writeValue(writer, &values[1]);
+        },
+        else => try writer.writeAll(INVALID_BETWEEN_CONDITION),
     }
 }
 

@@ -568,6 +568,85 @@ test "transpile string escaping" {
     );
 }
 
+test "transpile condition shape operators" {
+    const roles = [_]ast.Value{ .{ .string = "admin" }, .{ .string = "user" } };
+    const wheres = [_]ast.cmd.WhereClause{
+        .{
+            .condition = .{
+                .column = "role",
+                .op = .in,
+                .value = .{ .array = &roles },
+            },
+        },
+        .{
+            .condition = .{
+                .column = "age",
+                .op = .between,
+                .value = .{ .range = .{ .low = 18, .high = 65 } },
+            },
+        },
+    };
+    const cmd = QailCmd.get("users").where(&wheres);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM users WHERE role IN ('admin', 'user') AND age BETWEEN 18 AND 65",
+        sql,
+    );
+}
+
+test "transpile in parameter uses array operator" {
+    const wheres = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "id",
+            .op = .in,
+            .value = .{ .param = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&wheres);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings("SELECT * FROM users WHERE id = ANY($1)", sql);
+}
+
+test "public transpiler rejects malformed condition shapes" {
+    const empty = [_]ast.Value{};
+    const empty_in = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "role",
+            .op = .not_in,
+            .value = .{ .array = &empty },
+        },
+    }};
+    const empty_in_cmd = QailCmd.get("users").where(&empty_in);
+    try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &empty_in_cmd));
+
+    const one = [_]ast.Value{.{ .int = 18 }};
+    const bad_between = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "age",
+            .op = .between,
+            .value = .{ .array = &one },
+        },
+    }};
+    const bad_between_cmd = QailCmd.get("users").where(&bad_between);
+    try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &bad_between_cmd));
+
+    const bad_exists = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "id",
+            .op = .exists,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const bad_exists_cmd = QailCmd.get("users").where(&bad_exists);
+    try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &bad_exists_cmd));
+}
+
 test "public transpiler rejects unsafe ast" {
     const unsafe_table = QailCmd.get("users; DROP TABLE users");
     try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &unsafe_table));

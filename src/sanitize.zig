@@ -62,6 +62,14 @@ fn rawError(field: []const u8) SanitizeError {
     };
 }
 
+fn conditionShapeError(reason: []const u8) SanitizeError {
+    return .{
+        .field = "condition.value",
+        .value = "",
+        .reason = reason,
+    };
+}
+
 fn checkIdent(field: []const u8, value: []const u8) ?SanitizeError {
     if (!isSafeIdent(value)) return identError(field, value);
     return null;
@@ -174,7 +182,44 @@ fn checkCondition(cond: *const Condition) ?SanitizeError {
     } else {
         if (checkExpr("condition.left", &cond.left)) |err| return err;
     }
+    if (checkConditionShape(cond)) |err| return err;
     if (checkValue("condition.value", &cond.value)) |err| return err;
+    return null;
+}
+
+fn checkConditionShape(cond: *const Condition) ?SanitizeError {
+    switch (cond.op) {
+        .in, .not_in => switch (cond.value) {
+            .array => |values| {
+                if (values.len == 0) {
+                    return conditionShapeError(
+                        "IN conditions require a non-empty array or array parameter",
+                    );
+                }
+            },
+            .param, .named_param => {},
+            else => return conditionShapeError(
+                "IN conditions require a non-empty array or array parameter",
+            ),
+        },
+        .between, .not_between => switch (cond.value) {
+            .range => {},
+            .array => |values| {
+                if (values.len != 2) {
+                    return conditionShapeError(
+                        "BETWEEN conditions require a range or exactly two array values",
+                    );
+                }
+            },
+            else => return conditionShapeError(
+                "BETWEEN conditions require a range or exactly two array values",
+            ),
+        },
+        .exists, .not_exists => return conditionShapeError(
+            "EXISTS conditions require a typed subquery value",
+        ),
+        else => {},
+    }
     return null;
 }
 

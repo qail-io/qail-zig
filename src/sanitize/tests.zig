@@ -157,6 +157,80 @@ test "sanitize: safe raw function value passes" {
     try std.testing.expect(validateCmd(&cmd) == null);
 }
 
+test "sanitize: valid condition operator shapes pass" {
+    const ids = [_]ast.Value{ .{ .int = 1 }, .{ .int = 2 } };
+    const wheres = [_]ast.WhereClause{
+        .{
+            .condition = .{
+                .column = "id",
+                .op = .in,
+                .value = .{ .array = &ids },
+            },
+        },
+        .{
+            .condition = .{
+                .column = "age",
+                .op = .between,
+                .value = .{ .range = .{ .low = 18, .high = 65 } },
+            },
+        },
+        .{
+            .condition = .{
+                .column = "tenant_id",
+                .op = .in,
+                .value = .{ .param = 1 },
+            },
+        },
+    };
+    const cmd = QailCmd.get("users").where(&wheres);
+
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: empty in condition rejected" {
+    const empty = [_]ast.Value{};
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .column = "role",
+            .op = .in,
+            .value = .{ .array = &empty },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("condition.value", err.field);
+}
+
+test "sanitize: malformed between condition rejected" {
+    const one = [_]ast.Value{.{ .int = 18 }};
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .column = "age",
+            .op = .between,
+            .value = .{ .array = &one },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("condition.value", err.field);
+}
+
+test "sanitize: exists operator shape rejected" {
+    const where = [_]ast.WhereClause{.{
+        .condition = .{
+            .column = "id",
+            .op = .exists,
+            .value = .{ .int = 1 },
+        },
+    }};
+    const cmd = QailCmd.get("users").where(&where);
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("condition.value", err.field);
+}
+
 test "sanitize: alter add constraint checks payload fragment" {
     const safe = QailCmd.alterAddConstraint("events", "events_kind_check", "kind <> 'semi;inside'");
     try std.testing.expect(validateCmd(&safe) == null);
