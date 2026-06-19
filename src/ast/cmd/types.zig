@@ -25,6 +25,8 @@ pub const CmdKind = enum {
     drop, // DROP TABLE
     mod, // ALTER TABLE (general modification)
     alter, // ALTER TABLE ADD COLUMN
+    alter_add_constraint, // ALTER TABLE ADD CONSTRAINT
+    alter_drop_constraint, // ALTER TABLE DROP CONSTRAINT
     alter_drop, // ALTER TABLE DROP COLUMN
     alter_type, // ALTER TABLE ALTER COLUMN TYPE
     drop_col, // DROP COLUMN
@@ -38,6 +40,7 @@ pub const CmdKind = enum {
     // Advanced query features
     over, // Window functions / UPSERT
     with, // CTE (Common Table Expression)
+    merge, // PostgreSQL MERGE
     json_table, // JSON_TABLE
 
     // View operations
@@ -230,6 +233,69 @@ pub const OnConflict = struct {
     columns: []const []const u8 = &.{},
     action: ConflictAction = .do_nothing,
     update_columns: []const Assignment = &.{},
+};
+
+/// PostgreSQL MERGE USING source.
+pub const MergeSource = union(enum) {
+    table: struct {
+        name: []const u8,
+        alias: ?[]const u8 = null,
+    },
+    query: struct {
+        query: *const QailCmd,
+        alias: ?[]const u8 = null,
+    },
+
+    pub fn fromTable(name: []const u8) MergeSource {
+        return .{ .table = .{ .name = name } };
+    }
+
+    pub fn fromTableAs(name: []const u8, alias: []const u8) MergeSource {
+        return .{ .table = .{ .name = name, .alias = alias } };
+    }
+
+    pub fn fromQueryAs(query: *const QailCmd, alias: []const u8) MergeSource {
+        return .{ .query = .{ .query = query, .alias = alias } };
+    }
+};
+
+/// PostgreSQL MERGE WHEN match class.
+pub const MergeMatchKind = enum {
+    matched,
+    not_matched_by_target,
+    not_matched_by_source,
+};
+
+/// Column = expression assignment for MERGE UPDATE.
+pub const MergeAssignment = struct {
+    column: []const u8,
+    expr: Expr,
+};
+
+/// PostgreSQL MERGE THEN action.
+pub const MergeAction = union(enum) {
+    update: []const MergeAssignment,
+    insert: struct {
+        columns: []const []const u8 = &.{},
+        values: []const Expr = &.{},
+    },
+    delete,
+    do_nothing,
+};
+
+/// One PostgreSQL MERGE WHEN clause.
+pub const MergeClause = struct {
+    match_kind: MergeMatchKind,
+    condition: []const Condition = &.{},
+    action: MergeAction,
+};
+
+/// PostgreSQL MERGE specification.
+pub const Merge = struct {
+    target_alias: ?[]const u8 = null,
+    source: MergeSource = .{ .table = .{ .name = "" } },
+    on: []const Condition = &.{},
+    clauses: []const MergeClause = &.{},
 };
 
 /// Set operation for combining queries

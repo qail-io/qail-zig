@@ -76,6 +76,64 @@ fn checkParam(field: []const u8, value: []const u8) ?SanitizeError {
     return null;
 }
 
+fn containsUnquotedStatementDelimiter(value: []const u8) bool {
+    var i: usize = 0;
+    var in_single = false;
+    var in_double = false;
+
+    while (i < value.len) {
+        const b = value[i];
+        if (b == 0) return true;
+
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < value.len and value[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (in_double) {
+            if (b == '"') {
+                if (i + 1 < value.len and value[i + 1] == '"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        switch (b) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ';' => return true,
+            '-' => if (i + 1 < value.len and value[i + 1] == '-') return true,
+            '/' => if (i + 1 < value.len and value[i + 1] == '*') return true,
+            '*' => if (i + 1 < value.len and value[i + 1] == '/') return true,
+            else => {},
+        }
+        i += 1;
+    }
+
+    return false;
+}
+
+fn checkSqlExprFragment(field: []const u8, value: []const u8) ?SanitizeError {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len != 0 and !containsUnquotedStatementDelimiter(trimmed)) return null;
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "SQL expression fragments cannot be empty or contain unquoted NUL, statement separators, or comments",
+    };
+}
+
 fn checkValue(field: []const u8, value: *const Value) ?SanitizeError {
     return switch (value.*) {
         .column => |c| checkIdent(field, c),
@@ -287,6 +345,58 @@ fn checkPolicy(policy: *const PolicyDef) ?SanitizeError {
     return null;
 }
 
+fn checkMerge(merge: *const ast.Merge) ?SanitizeError {
+    if (merge.target_alias) |alias| {
+        if (checkIdent("merge.target_alias", alias)) |err| return err;
+    }
+
+    switch (merge.source) {
+        .table => |table| {
+            if (checkIdent("merge.source.table", table.name)) |err| return err;
+            if (table.alias) |alias| {
+                if (checkIdent("merge.source.alias", alias)) |err| return err;
+            }
+        },
+        .query => |query| {
+            if (validateCmd(query.query)) |err| return err;
+            if (query.alias) |alias| {
+                if (checkIdent("merge.source.alias", alias)) |err| return err;
+            }
+        },
+    }
+
+    for (merge.on) |*cond| {
+        if (checkCondition(cond)) |err| return err;
+    }
+
+    for (merge.clauses) |clause| {
+        for (clause.condition) |*cond| {
+            if (checkCondition(cond)) |err| return err;
+        }
+
+        switch (clause.action) {
+            .update => |assignments| {
+                for (assignments) |assignment| {
+                    if (checkIdent("merge.update.column", assignment.column)) |err| return err;
+                    var expr = assignment.expr;
+                    if (checkExpr("merge.update.expr", &expr)) |err| return err;
+                }
+            },
+            .insert => |insert| {
+                for (insert.columns) |column| {
+                    if (checkIdent("merge.insert.column", column)) |err| return err;
+                }
+                for (insert.values) |*value| {
+                    if (checkExpr("merge.insert.expr", value)) |err| return err;
+                }
+            },
+            .delete, .do_nothing => {},
+        }
+    }
+
+    return null;
+}
+
 fn checkConstraint(constraint: TableConstraint) ?SanitizeError {
     return switch (constraint) {
         .unique => |cols| blk: {
@@ -389,6 +499,10 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
         }
     }
 
+    if (cmd.merge) |*merge| {
+        if (checkMerge(merge)) |err| return err;
+    }
+
     for (cmd.ctes) |cte| {
         if (checkIdent("cte.name", cte.name)) |err| return err;
         for (cte.columns) |c| {
@@ -438,7 +552,10 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     }
 
     if (cmd.channel) |ch| {
-        if (checkIdent("channel", ch)) |err| return err;
+        switch (cmd.kind) {
+            .alter_add_constraint, .alter_drop_constraint => {},
+            else => if (checkIdent("channel", ch)) |err| return err,
+        }
     }
     if (cmd.savepoint_name) |name| {
         if (checkIdent("savepoint", name)) |err| return err;
@@ -451,6 +568,17 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
     if (cmd.payload) |payload| {
         switch (cmd.kind) {
             .notify, .comment_on, .alter_enum_add_value => {},
+            .alter_add_constraint => {
+                if (cmd.channel == null) {
+                    return .{
+                        .field = "channel",
+                        .value = "",
+                        .reason = "constraint actions require a constraint name",
+                    };
+                }
+                if (checkIdent("channel", cmd.channel.?)) |err| return err;
+                if (checkSqlExprFragment("payload", payload)) |err| return err;
+            },
             .grant, .revoke => {
                 if (checkIdent("role", payload)) |err| return err;
             },
@@ -465,6 +593,29 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
             },
             else => return rawError("payload"),
         }
+    }
+
+    switch (cmd.kind) {
+        .alter_add_constraint => {
+            if (cmd.payload == null) {
+                return .{
+                    .field = "payload",
+                    .value = "",
+                    .reason = "add constraint requires a check expression",
+                };
+            }
+        },
+        .alter_drop_constraint => {
+            const name = cmd.channel orelse {
+                return .{
+                    .field = "channel",
+                    .value = "",
+                    .reason = "constraint actions require a constraint name",
+                };
+            };
+            if (checkIdent("channel", name)) |err| return err;
+        },
+        else => {},
     }
 
     if (cmd.vector_name) |name| {

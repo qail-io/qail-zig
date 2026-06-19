@@ -33,6 +33,41 @@ fn conditionHasTrustedOnlyEscapeHatch(cond: *const Condition) bool {
     return exprHasTrustedOnlyEscapeHatch(&cond.left) or valueHasTrustedOnlyEscapeHatch(&cond.value);
 }
 
+fn mergeHasTrustedOnlyEscapeHatch(merge: *const ast.Merge) bool {
+    switch (merge.source) {
+        .table => {},
+        .query => |query| {
+            if (cmdHasTrustedOnlyEscapeHatch(query.query)) return true;
+        },
+    }
+
+    for (merge.on) |*condition| {
+        if (conditionHasTrustedOnlyEscapeHatch(condition)) return true;
+    }
+
+    for (merge.clauses) |clause| {
+        for (clause.condition) |*condition| {
+            if (conditionHasTrustedOnlyEscapeHatch(condition)) return true;
+        }
+
+        switch (clause.action) {
+            .update => |assignments| {
+                for (assignments) |*assignment| {
+                    if (exprHasTrustedOnlyEscapeHatch(&assignment.expr)) return true;
+                }
+            },
+            .insert => |insert| {
+                for (insert.values) |*value| {
+                    if (exprHasTrustedOnlyEscapeHatch(value)) return true;
+                }
+            },
+            .delete, .do_nothing => {},
+        }
+    }
+
+    return false;
+}
+
 fn constraintHasTrustedOnlyEscapeHatch(constraint: Constraint) bool {
     return switch (constraint) {
         .default, .check, .references, .generated => true,
@@ -134,6 +169,7 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
     if (cmd.payload != null) {
         switch (cmd.kind) {
             .alter_enum_add_value,
+            .alter_add_constraint,
             .comment_on,
             .drop_policy,
             .drop_trigger,
@@ -178,6 +214,9 @@ fn cmdHasTrustedOnlyEscapeHatch(cmd: *const QailCmd) bool {
         for (oc.update_columns) |assignment| {
             if (valueHasTrustedOnlyEscapeHatch(&assignment.value)) return true;
         }
+    }
+    if (cmd.merge) |*merge| {
+        if (mergeHasTrustedOnlyEscapeHatch(merge)) return true;
     }
 
     for (cmd.ctes) |cte| {
@@ -451,6 +490,38 @@ test "raw policy rejects raw ddl payloads in public ast commands" {
     var lock_cmd = QailCmd.lockTable("users");
     lock_cmd.payload = "ACCESS EXCLUSIVE";
     try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&lock_cmd));
+}
+
+test "raw policy allows checked alter constraint payload" {
+    const cmd = QailCmd.alterAddConstraint("events", "events_kind_check", "kind <> 'semi;inside'");
+    try rejectPublicRuntimeCmd(&cmd);
+
+    const unsafe = QailCmd.alterAddConstraint("users", "users_active_check", "active); DROP TABLE users; --");
+    try std.testing.expectError(error.UnsafeIdentifier, rejectPublicRuntimeCmd(&unsafe));
+}
+
+test "raw policy rejects raw expression nested in merge" {
+    const on = [_]ast.Condition{.{
+        .left = Expr.col("users.id"),
+        .op = .eq,
+        .value = Value.fromColumn("s.id"),
+    }};
+    const assignments = [_]ast.MergeAssignment{.{
+        .column = "name",
+        .expr = .{ .raw = "pg_sleep(1)" },
+    }};
+    const clauses = [_]ast.MergeClause{.{
+        .match_kind = .matched,
+        .action = .{ .update = &assignments },
+    }};
+    const merge = ast.Merge{
+        .source = ast.MergeSource.fromTableAs("staging_users", "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("users").withMerge(merge);
+
+    try std.testing.expectError(error.RawSqlForbidden, rejectPublicRuntimeCmd(&cmd));
 }
 
 test "raw policy allows typed lock table mode" {

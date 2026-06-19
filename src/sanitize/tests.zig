@@ -116,3 +116,52 @@ test "sanitize: raw default payload rejected" {
     const err = validateCmd(&cmd).?;
     try std.testing.expectEqualStrings("payload", err.field);
 }
+
+test "sanitize: alter add constraint checks payload fragment" {
+    const safe = QailCmd.alterAddConstraint("events", "events_kind_check", "kind <> 'semi;inside'");
+    try std.testing.expect(validateCmd(&safe) == null);
+
+    const unsafe = QailCmd.alterAddConstraint("users", "users_active_check", "active); DROP TABLE users; --");
+    const err = validateCmd(&unsafe).?;
+    try std.testing.expectEqualStrings("payload", err.field);
+}
+
+test "sanitize: merge validates source and action expressions" {
+    const on = [_]ast.Condition{.{
+        .left = Expr.col("users.id"),
+        .op = .eq,
+        .value = ast.Value.fromColumn("s.id"),
+    }};
+    const assignments = [_]ast.MergeAssignment{.{
+        .column = "name",
+        .expr = Expr.col("s.name"),
+    }};
+    const clauses = [_]ast.MergeClause{.{
+        .match_kind = .matched,
+        .action = .{ .update = &assignments },
+    }};
+    const merge = ast.Merge{
+        .source = ast.MergeSource.fromTableAs("staging_users", "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("users").withMerge(merge);
+    try std.testing.expect(validateCmd(&cmd) == null);
+
+    const bad_assignments = [_]ast.MergeAssignment{.{
+        .column = "name",
+        .expr = .{ .raw = "pg_sleep(1)" },
+    }};
+    const bad_clauses = [_]ast.MergeClause{.{
+        .match_kind = .matched,
+        .action = .{ .update = &bad_assignments },
+    }};
+    const bad_merge = ast.Merge{
+        .source = ast.MergeSource.fromTableAs("staging_users", "s"),
+        .on = &on,
+        .clauses = &bad_clauses,
+    };
+    const bad_cmd = QailCmd.mergeInto("users").withMerge(bad_merge);
+    const err = validateCmd(&bad_cmd).?;
+    try std.testing.expectEqualStrings("expr.raw", err.field);
+}

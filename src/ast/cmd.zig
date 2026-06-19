@@ -20,6 +20,12 @@ pub const Assignment = cmd_types.Assignment;
 pub const CTEDef = cmd_types.CTEDef;
 pub const ConflictAction = cmd_types.ConflictAction;
 pub const OnConflict = cmd_types.OnConflict;
+pub const MergeSource = cmd_types.MergeSource;
+pub const MergeMatchKind = cmd_types.MergeMatchKind;
+pub const MergeAssignment = cmd_types.MergeAssignment;
+pub const MergeAction = cmd_types.MergeAction;
+pub const MergeClause = cmd_types.MergeClause;
+pub const Merge = cmd_types.Merge;
 pub const SetOp = cmd_types.SetOp;
 pub const SetOpDef = cmd_types.SetOpDef;
 pub const IndexDef = cmd_types.IndexDef;
@@ -56,6 +62,7 @@ pub const QailCmd = struct {
     distinct_on: []const Expr = &.{}, // DISTINCT ON (Postgres-specific)
     group_by_mode: GroupByMode = .simple, // ROLLUP/CUBE support
     on_conflict: ?OnConflict = null, // Upsert ON CONFLICT clause
+    merge: ?Merge = null, // PostgreSQL MERGE
     ctes: []const CTEDef = &.{}, // CTE definitions
 
     // DDL fields
@@ -157,6 +164,11 @@ pub const QailCmd = struct {
     /// Create a PUT (UPSERT) command
     pub fn put(table: []const u8) QailCmd {
         return .{ .kind = .put, .table = table };
+    }
+
+    /// Create a MERGE command
+    pub fn mergeInto(table: []const u8) QailCmd {
+        return .{ .kind = .merge, .table = table };
     }
 
     /// Create a TRUNCATE command
@@ -366,6 +378,25 @@ pub const QailCmd = struct {
     /// General table modification
     pub fn modify(table: []const u8) QailCmd {
         return .{ .kind = .mod, .table = table };
+    }
+
+    /// ALTER TABLE ADD CONSTRAINT
+    pub fn alterAddConstraint(table: []const u8, name: []const u8, check_expr: []const u8) QailCmd {
+        return .{
+            .kind = .alter_add_constraint,
+            .table = table,
+            .channel = name,
+            .payload = check_expr,
+        };
+    }
+
+    /// ALTER TABLE DROP CONSTRAINT
+    pub fn alterDropConstraint(table: []const u8, name: []const u8) QailCmd {
+        return .{
+            .kind = .alter_drop_constraint,
+            .table = table,
+            .channel = name,
+        };
     }
 
     // ==================== Builder Methods ====================
@@ -628,6 +659,13 @@ pub const QailCmd = struct {
     pub fn onConflictDo(self: QailCmd, conflict: OnConflict) QailCmd {
         var cmd = self;
         cmd.on_conflict = conflict;
+        return cmd;
+    }
+
+    /// Set PostgreSQL MERGE specification
+    pub fn withMerge(self: QailCmd, merge_spec: Merge) QailCmd {
+        var cmd = self;
+        cmd.merge = merge_spec;
         return cmd;
     }
 

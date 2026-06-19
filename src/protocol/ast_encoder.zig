@@ -362,6 +362,7 @@ pub const AstEncoder = struct {
             },
             .add => try writeInsertCmd(writer, cmd, false),
             .put, .upsert => try writeInsertCmd(writer, cmd, true),
+            .merge => try writeMerge(writer, cmd),
             .truncate => {
                 try writer.writeAll("TRUNCATE ");
                 try writer.writeAll(cmd.table);
@@ -427,6 +428,26 @@ pub const AstEncoder = struct {
                     try writer.writeAll(" ADD COLUMN ");
                     try writeExpr(writer, &col);
                 }
+            },
+            .alter_add_constraint => {
+                const name = cmd.channel orelse return error.MissingConstraintName;
+                const expr = cmd.payload orelse return error.MissingConstraintExpression;
+                if (!isSafeSqlExprFragment(expr)) return error.UnsafeSqlFragment;
+
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" ADD CONSTRAINT ");
+                try writer.writeAll(name);
+                try writer.writeAll(" CHECK (");
+                try writer.writeAll(std.mem.trim(u8, expr, " \t\r\n"));
+                try writer.writeByte(')');
+            },
+            .alter_drop_constraint => {
+                const name = cmd.channel orelse return error.MissingConstraintName;
+                try writer.writeAll("ALTER TABLE ");
+                try writer.writeAll(cmd.table);
+                try writer.writeAll(" DROP CONSTRAINT ");
+                try writer.writeAll(name);
             },
             .alter_drop => {
                 // ALTER TABLE DROP COLUMN
@@ -1003,6 +1024,116 @@ fn writeNestedQueryableCmd(writer: anytype, cmd: *const QailCmd) anyerror!void {
     };
 }
 
+fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
+    const merge = cmd.merge orelse return error.MissingMergeSpec;
+    try validateMergeShape(&merge);
+
+    try writeCtePrefix(writer, cmd);
+
+    try writer.writeAll("MERGE INTO ");
+    try writer.writeAll(cmd.table);
+
+    if (merge.target_alias) |alias| {
+        try writer.writeAll(" AS ");
+        try writer.writeAll(alias);
+    }
+
+    try writer.writeAll(" USING ");
+    try writeMergeSource(writer, &merge.source);
+
+    try writer.writeAll(" ON ");
+    try writeConditions(writer, merge.on);
+
+    for (merge.clauses) |clause| {
+        try writer.writeAll(" WHEN ");
+        switch (clause.match_kind) {
+            .matched => try writer.writeAll("MATCHED"),
+            .not_matched_by_target => try writer.writeAll("NOT MATCHED BY TARGET"),
+            .not_matched_by_source => try writer.writeAll("NOT MATCHED BY SOURCE"),
+        }
+
+        if (clause.condition.len > 0) {
+            try writer.writeAll(" AND ");
+            try writeConditions(writer, clause.condition);
+        }
+
+        try writer.writeAll(" THEN ");
+        try writeMergeAction(writer, &clause.action);
+    }
+
+    if (cmd.returning.len > 0) {
+        try writer.writeAll(" RETURNING ");
+        for (cmd.returning, 0..) |col, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeExpr(writer, &col);
+        }
+    }
+}
+
+fn writeMergeSource(writer: anytype, source: *const ast.cmd.MergeSource) !void {
+    switch (source.*) {
+        .table => |table| {
+            try writer.writeAll(table.name);
+            if (table.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+        .query => |query| {
+            try writer.writeByte('(');
+            try writeNestedQueryableCmd(writer, query.query);
+            try writer.writeByte(')');
+            if (query.alias) |alias| {
+                try writer.writeAll(" AS ");
+                try writer.writeAll(alias);
+            }
+        },
+    }
+}
+
+fn writeConditions(writer: anytype, conditions: []const ast.expr.Condition) !void {
+    if (conditions.len == 0) return error.MissingMergeCondition;
+    for (conditions, 0..) |*condition, i| {
+        if (i > 0) try writer.writeAll(" AND ");
+        try writeCondition(writer, condition);
+    }
+}
+
+fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
+    switch (action.*) {
+        .update => |assignments| {
+            try writer.writeAll("UPDATE SET ");
+            for (assignments, 0..) |assignment, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.writeAll(assignment.column);
+                try writer.writeAll(" = ");
+                var expr = assignment.expr;
+                try writeExpr(writer, &expr);
+            }
+        },
+        .insert => |insert| {
+            try writer.writeAll("INSERT");
+            if (insert.columns.len > 0) {
+                try writer.writeAll(" (");
+                for (insert.columns, 0..) |column, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(column);
+                }
+                try writer.writeByte(')');
+            }
+            try writer.writeAll(" VALUES (");
+            for (insert.values, 0..) |value, i| {
+                if (i > 0) try writer.writeAll(", ");
+                var expr = value;
+                try writeExpr(writer, &expr);
+            }
+            try writer.writeByte(')');
+        },
+        .delete => try writer.writeAll("DELETE"),
+        .do_nothing => try writer.writeAll("DO NOTHING"),
+    }
+}
+
 fn writeSetOps(writer: anytype, cmd: *const QailCmd) anyerror!void {
     for (cmd.set_ops) |set_op| {
         switch (set_op.op) {
@@ -1067,6 +1198,102 @@ fn writeCtePrefix(writer: anytype, cmd: *const QailCmd) !void {
     }
 
     try writer.writeAll(" ");
+}
+
+fn validateMergeShape(merge: *const ast.cmd.Merge) !void {
+    if (merge.target_alias) |alias| {
+        if (!isBareIdentifier(alias)) return error.InvalidMergeTargetAlias;
+    }
+
+    switch (merge.source) {
+        .table => |table| {
+            if (std.mem.trim(u8, table.name, " \t\r\n").len == 0) return error.MissingMergeSource;
+            if (table.alias) |alias| {
+                if (!isBareIdentifier(alias)) return error.InvalidMergeSourceAlias;
+            }
+        },
+        .query => |query| {
+            if (query.alias) |alias| {
+                if (!isBareIdentifier(alias)) return error.InvalidMergeSourceAlias;
+            }
+            if (!isReadOnlyMergeSource(query.query)) return error.InvalidMergeSourceQuery;
+        },
+    }
+
+    if (merge.on.len == 0) return error.MissingMergeCondition;
+    if (merge.clauses.len == 0) return error.MissingMergeClause;
+
+    for (merge.clauses) |clause| {
+        switch (clause.action) {
+            .insert => |insert| {
+                if (clause.match_kind == .matched) return error.InvalidMergeActionShape;
+                if (clause.match_kind == .not_matched_by_source) return error.InvalidMergeActionShape;
+                if (insert.values.len == 0) return error.MissingMergeInsertValues;
+                if (insert.columns.len > 0 and insert.columns.len != insert.values.len) return error.InvalidMergeInsertShape;
+                try validateMergeWriteTargets(insert.columns);
+            },
+            .update => |assignments| {
+                if (clause.match_kind == .not_matched_by_target) return error.InvalidMergeActionShape;
+                if (assignments.len == 0) return error.MissingMergeUpdateAssignments;
+                try validateMergeAssignments(assignments);
+            },
+            .delete => {
+                if (clause.match_kind == .not_matched_by_target) return error.InvalidMergeActionShape;
+            },
+            .do_nothing => {},
+        }
+    }
+}
+
+fn validateMergeAssignments(assignments: []const ast.cmd.MergeAssignment) !void {
+    for (assignments, 0..) |assignment, i| {
+        if (!isBareIdentifier(assignment.column)) return error.InvalidMergeWriteTarget;
+        for (assignments[0..i]) |prev| {
+            if (std.ascii.eqlIgnoreCase(prev.column, assignment.column)) return error.DuplicateMergeWriteTarget;
+        }
+    }
+}
+
+fn validateMergeWriteTargets(columns: []const []const u8) !void {
+    for (columns, 0..) |column, i| {
+        if (!isBareIdentifier(column)) return error.InvalidMergeWriteTarget;
+        for (columns[0..i]) |prev| {
+            if (std.ascii.eqlIgnoreCase(prev, column)) return error.DuplicateMergeWriteTarget;
+        }
+    }
+}
+
+fn isReadOnlyMergeSource(cmd: *const QailCmd) bool {
+    switch (cmd.kind) {
+        .get, .with, .cnt, .search, .over => {},
+        else => return false,
+    }
+
+    for (cmd.ctes) |cte| {
+        if (cte.base_query) |query| {
+            if (!isReadOnlyMergeSource(query)) return false;
+        }
+        if (cte.recursive_query) |query| {
+            if (!isReadOnlyMergeSource(query)) return false;
+        }
+    }
+    for (cmd.set_ops) |set_op| {
+        if (set_op.query) |query| {
+            if (!isReadOnlyMergeSource(query)) return false;
+        }
+    }
+
+    return true;
+}
+
+fn isBareIdentifier(value: []const u8) bool {
+    if (value.len == 0) return false;
+    const first = value[0];
+    if (!std.ascii.isAlphabetic(first) and first != '_') return false;
+    for (value[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    }
+    return true;
 }
 
 fn firstColumnName(cmd: *const QailCmd) ?[]const u8 {
@@ -1242,9 +1469,24 @@ fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !voi
 }
 
 fn writeWhereCondition(writer: anytype, clause: ast.cmd.WhereClause) !void {
-    try writer.writeAll(clause.condition.column);
-    try writer.print(" {s} ", .{clause.condition.op.toSql()});
-    try writeValue(writer, &clause.condition.value);
+    try writeCondition(writer, &clause.condition);
+}
+
+fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+    if (condition.column.len != 0) {
+        try writer.writeAll(condition.column);
+    } else {
+        var left = condition.left;
+        try writeExpr(writer, &left);
+    }
+
+    switch (condition.op) {
+        .is_null, .is_not_null => try writer.print(" {s}", .{condition.op.toSql()}),
+        else => {
+            try writer.print(" {s} ", .{condition.op.toSql()});
+            try writeValue(writer, &condition.value);
+        },
+    }
 }
 
 fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
@@ -1255,6 +1497,59 @@ fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
             try writer.writeByte(c);
         }
     }
+}
+
+fn containsUnquotedStatementDelimiter(value: []const u8) bool {
+    var i: usize = 0;
+    var in_single = false;
+    var in_double = false;
+
+    while (i < value.len) {
+        const b = value[i];
+        if (b == 0) return true;
+
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < value.len and value[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (in_double) {
+            if (b == '"') {
+                if (i + 1 < value.len and value[i + 1] == '"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        switch (b) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ';' => return true,
+            '-' => if (i + 1 < value.len and value[i + 1] == '-') return true,
+            '/' => if (i + 1 < value.len and value[i + 1] == '*') return true,
+            '*' => if (i + 1 < value.len and value[i + 1] == '/') return true,
+            else => {},
+        }
+        i += 1;
+    }
+
+    return false;
+}
+
+fn isSafeSqlExprFragment(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    return trimmed.len != 0 and !containsUnquotedStatementDelimiter(trimmed);
 }
 
 fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
@@ -1584,25 +1879,7 @@ fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
 }
 
 fn writeValue(writer: anytype, val: *const Value) !void {
-    switch (val.*) {
-        .null => try writer.writeAll("NULL"),
-        .bool => |b| try writer.writeAll(if (b) "true" else "false"),
-        .int => |i| try writer.print("{d}", .{i}),
-        .float => |f| try writer.print("{d}", .{f}),
-        .string => |s| {
-            try writer.writeByte('\'');
-            for (s) |c| {
-                if (c == '\'') {
-                    try writer.writeAll("''");
-                } else {
-                    try writer.writeByte(c);
-                }
-            }
-            try writer.writeByte('\'');
-        },
-        .param => |p| try writer.print("${d}", .{p}),
-        else => {},
-    }
+    try val.format(writer);
 }
 
 // ==================== Tests ====================
@@ -2065,6 +2342,99 @@ test "ast encoder create policy with typed predicates" {
         encoder.getWritten(),
         "CREATE POLICY orders_tenant_isolation ON orders AS RESTRICTIVE FOR ALL TO app_user USING (tenant_id = 42) WITH CHECK (tenant_id = 42)",
     ) != null);
+}
+
+test "ast encoder merge renders update and insert clauses" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const on = [_]ast.expr.Condition{.{
+        .left = Expr.col("u.id"),
+        .op = .eq,
+        .value = Value.fromColumn("s.id"),
+    }};
+    const update_assignments = [_]ast.cmd.MergeAssignment{.{
+        .column = "name",
+        .expr = Expr.col("s.name"),
+    }};
+    const insert_values = [_]Expr{ Expr.col("s.id"), Expr.col("s.name") };
+    const clauses = [_]ast.cmd.MergeClause{
+        .{
+            .match_kind = .matched,
+            .action = .{ .update = &update_assignments },
+        },
+        .{
+            .match_kind = .not_matched_by_target,
+            .action = .{ .insert = .{
+                .columns = &.{ "id", "name" },
+                .values = &insert_values,
+            } },
+        },
+    };
+    const merge = ast.cmd.Merge{
+        .target_alias = "u",
+        .source = ast.cmd.MergeSource.fromTableAs("staging_users", "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("users").withMerge(merge);
+
+    var sql_buf: [1024]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "MERGE INTO users AS u USING staging_users AS s ON u.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED BY TARGET THEN INSERT (id, name) VALUES (s.id, s.name)",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder merge rejects invalid action shape" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const on = [_]ast.expr.Condition{.{
+        .left = Expr.col("users.id"),
+        .op = .eq,
+        .value = Value.fromColumn("s.id"),
+    }};
+    const values = [_]Expr{Expr.col("s.id")};
+    const clauses = [_]ast.cmd.MergeClause{.{
+        .match_kind = .matched,
+        .action = .{ .insert = .{
+            .columns = &.{"id"},
+            .values = &values,
+        } },
+    }};
+    const merge = ast.cmd.Merge{
+        .source = ast.cmd.MergeSource.fromTableAs("staging_users", "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("users").withMerge(merge);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try std.testing.expectError(error.InvalidMergeActionShape, encoder.writeAstToSql(writer.writer(), &cmd));
+}
+
+test "ast encoder alter constraint checks expression fragments" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const safe = QailCmd.alterAddConstraint("events", "events_kind_check", "kind <> 'semi;inside'");
+    var sql_buf: [256]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &safe);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE events ADD CONSTRAINT events_kind_check CHECK (kind <> 'semi;inside')",
+        writer.getWritten(),
+    );
+
+    const unsafe = QailCmd.alterAddConstraint("users", "users_active_check", "active); DROP TABLE users; --");
+    var bad_buf: [256]u8 = undefined;
+    var bad_writer = io.FixedBufferWriter.init(&bad_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(bad_writer.writer(), &unsafe));
 }
 
 test "ast encoder privilege and policy validation" {

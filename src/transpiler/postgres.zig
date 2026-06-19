@@ -49,7 +49,28 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
         .set => try commands.writeUpdate(writer, cmd),
         .del => try commands.writeDelete(writer, cmd),
         .add => try commands.writeInsert(writer, cmd),
+        .merge => try commands.writeMerge(writer, cmd),
         .truncate => try commands.writeTruncate(writer, cmd),
+        .alter_add_constraint => {
+            const name = cmd.channel orelse return error.MissingConstraintName;
+            const expr = cmd.payload orelse return error.MissingConstraintExpression;
+            if (!isSafeSqlExprFragment(expr)) return error.UnsafeSqlFragment;
+
+            try writer.writeAll("ALTER TABLE ");
+            try writer.writeAll(cmd.table);
+            try writer.writeAll(" ADD CONSTRAINT ");
+            try writer.writeAll(name);
+            try writer.writeAll(" CHECK (");
+            try writer.writeAll(std.mem.trim(u8, expr, " \t\r\n"));
+            try writer.writeByte(')');
+        },
+        .alter_drop_constraint => {
+            const name = cmd.channel orelse return error.MissingConstraintName;
+            try writer.writeAll("ALTER TABLE ");
+            try writer.writeAll(cmd.table);
+            try writer.writeAll(" DROP CONSTRAINT ");
+            try writer.writeAll(name);
+        },
         .listen => {
             try writer.writeAll("LISTEN ");
             if (cmd.channel) |ch| try writer.writeAll(ch);
@@ -210,6 +231,59 @@ fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
             try writer.writeByte(c);
         }
     }
+}
+
+fn containsUnquotedStatementDelimiter(value: []const u8) bool {
+    var i: usize = 0;
+    var in_single = false;
+    var in_double = false;
+
+    while (i < value.len) {
+        const b = value[i];
+        if (b == 0) return true;
+
+        if (in_single) {
+            if (b == '\'') {
+                if (i + 1 < value.len and value[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if (in_double) {
+            if (b == '"') {
+                if (i + 1 < value.len and value[i + 1] == '"') {
+                    i += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        switch (b) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            ';' => return true,
+            '-' => if (i + 1 < value.len and value[i + 1] == '-') return true,
+            '/' => if (i + 1 < value.len and value[i + 1] == '*') return true,
+            '*' => if (i + 1 < value.len and value[i + 1] == '/') return true,
+            else => {},
+        }
+        i += 1;
+    }
+
+    return false;
+}
+
+fn isSafeSqlExprFragment(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    return trimmed.len != 0 and !containsUnquotedStatementDelimiter(trimmed);
 }
 
 // ==================== Tests ====================

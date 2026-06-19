@@ -34,7 +34,7 @@ pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) 
             if (wrote_clause) {
                 try writer.writeAll(" AND ");
             }
-            try writeWhereCondition(writer, clause);
+            try writeCondition(writer, &clause.condition);
             wrote_clause = true;
         }
     }
@@ -51,16 +51,27 @@ pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) 
                 try writer.writeAll(" OR ");
             }
             first = false;
-            try writeWhereCondition(writer, clause);
+            try writeCondition(writer, &clause.condition);
         }
         try writer.writeAll(")");
     }
 }
 
-fn writeWhereCondition(writer: anytype, clause: ast.cmd.WhereClause) !void {
-    try writer.writeAll(clause.condition.column);
-    try writer.print(" {s} ", .{clause.condition.op.toSql()});
-    try writeValue(writer, &clause.condition.value);
+pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+    if (condition.column.len != 0) {
+        try writer.writeAll(condition.column);
+    } else {
+        var left = condition.left;
+        try writeExpr(writer, &left);
+    }
+
+    switch (condition.op) {
+        .is_null, .is_not_null => try writer.print(" {s}", .{condition.op.toSql()}),
+        else => {
+            try writer.print(" {s} ", .{condition.op.toSql()});
+            try writeValue(writer, &condition.value);
+        },
+    }
 }
 
 pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
@@ -265,23 +276,5 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
 }
 
 pub fn writeValue(writer: anytype, val: *const Value) !void {
-    switch (val.*) {
-        .null => try writer.writeAll("NULL"),
-        .bool => |b| try writer.writeAll(if (b) "true" else "false"),
-        .int => |i| try writer.print("{d}", .{i}),
-        .float => |f| try writer.print("{d}", .{f}),
-        .string => |s| {
-            try writer.writeByte('\'');
-            for (s) |c| {
-                if (c == '\'') {
-                    try writer.writeAll("''");
-                } else {
-                    try writer.writeByte(c);
-                }
-            }
-            try writer.writeByte('\'');
-        },
-        .param => |p| try writer.print("${d}", .{p}),
-        else => {},
-    }
+    try val.format(writer);
 }
