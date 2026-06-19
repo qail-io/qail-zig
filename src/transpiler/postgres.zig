@@ -57,9 +57,9 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
             if (!isSafeSqlExprFragment(expr)) return error.UnsafeSqlFragment;
 
             try writer.writeAll("ALTER TABLE ");
-            try writer.writeAll(cmd.table);
+            try render.writeIdentifierOrError(writer, cmd.table);
             try writer.writeAll(" ADD CONSTRAINT ");
-            try writer.writeAll(name);
+            try render.writeIdentifierOrError(writer, name);
             try writer.writeAll(" CHECK (");
             try writer.writeAll(std.mem.trim(u8, expr, " \t\r\n"));
             try writer.writeByte(')');
@@ -67,17 +67,17 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
         .alter_drop_constraint => {
             const name = cmd.channel orelse return error.MissingConstraintName;
             try writer.writeAll("ALTER TABLE ");
-            try writer.writeAll(cmd.table);
+            try render.writeIdentifierOrError(writer, cmd.table);
             try writer.writeAll(" DROP CONSTRAINT ");
-            try writer.writeAll(name);
+            try render.writeIdentifierOrError(writer, name);
         },
         .listen => {
             try writer.writeAll("LISTEN ");
-            if (cmd.channel) |ch| try writer.writeAll(ch);
+            if (cmd.channel) |ch| try render.writeSingleIdentifierOrError(writer, ch);
         },
         .notify => {
             try writer.writeAll("NOTIFY ");
-            if (cmd.channel) |ch| try writer.writeAll(ch);
+            if (cmd.channel) |ch| try render.writeSingleIdentifierOrError(writer, ch);
             if (cmd.payload) |p| {
                 try writer.writeAll(", '");
                 try writeEscapedSqlString(writer, p);
@@ -87,7 +87,7 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
         .unlisten => {
             try writer.writeAll("UNLISTEN ");
             if (cmd.channel) |ch| {
-                try writer.writeAll(ch);
+                try render.writeSingleIdentifierOrError(writer, ch);
             } else {
                 try writer.writeByte('*');
             }
@@ -97,23 +97,23 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
         .rollback => try writer.writeAll("ROLLBACK"),
         .savepoint => {
             try writer.writeAll("SAVEPOINT ");
-            if (cmd.savepoint_name) |name| try writer.writeAll(name);
+            if (cmd.savepoint_name) |name| try render.writeSingleIdentifierOrError(writer, name);
         },
         .release => {
             try writer.writeAll("RELEASE SAVEPOINT ");
-            if (cmd.savepoint_name) |name| try writer.writeAll(name);
+            if (cmd.savepoint_name) |name| try render.writeSingleIdentifierOrError(writer, name);
         },
         .rollback_to => {
             try writer.writeAll("ROLLBACK TO SAVEPOINT ");
-            if (cmd.savepoint_name) |name| try writer.writeAll(name);
+            if (cmd.savepoint_name) |name| try render.writeSingleIdentifierOrError(writer, name);
         },
         .create_database => {
             try writer.writeAll("CREATE DATABASE ");
-            try writeIdentifierMaybeQuoted(writer, cmd.table);
+            try render.writeSingleIdentifierOrError(writer, cmd.table);
         },
         .drop_database => {
             try writer.writeAll("DROP DATABASE IF EXISTS ");
-            try writeIdentifierMaybeQuoted(writer, cmd.table);
+            try render.writeSingleIdentifierOrError(writer, cmd.table);
         },
         .grant => {
             const role = cmd.payload orelse return error.MissingGrantRole;
@@ -129,7 +129,7 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
             try writer.writeAll(" ON ");
             try render.writeIdentifierOrError(writer, cmd.table);
             try writer.writeAll(" TO ");
-            try writeIdentifierMaybeQuoted(writer, role);
+            try render.writeSingleIdentifierOrError(writer, role);
         },
         .revoke => {
             const role = cmd.payload orelse return error.MissingRevokeRole;
@@ -145,7 +145,7 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
             try writer.writeAll(" ON ");
             try render.writeIdentifierOrError(writer, cmd.table);
             try writer.writeAll(" FROM ");
-            try writeIdentifierMaybeQuoted(writer, role);
+            try render.writeSingleIdentifierOrError(writer, role);
         },
         .create_policy => {
             const policy = cmd.policy_def orelse return error.MissingPolicyDefinition;
@@ -153,9 +153,9 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
             if (policy.table.len == 0) return error.MissingPolicyTable;
 
             try writer.writeAll("CREATE POLICY ");
-            try writer.writeAll(policy.name);
+            try render.writeSingleIdentifierOrError(writer, policy.name);
             try writer.writeAll(" ON ");
-            try writer.writeAll(policy.table);
+            try render.writeIdentifierOrError(writer, policy.table);
             if (policy.permissiveness == .restrictive) {
                 try writer.writeAll(" AS RESTRICTIVE");
             }
@@ -163,7 +163,7 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
             try writer.writeAll(policy.target.toSql());
             if (policy.role) |role| {
                 try writer.writeAll(" TO ");
-                try writer.writeAll(role);
+                try render.writeSingleIdentifierOrError(writer, role);
             }
             if (policy.using_expr) |using_expr| {
                 try writer.writeAll(" USING (");
@@ -191,9 +191,9 @@ fn writeCmd(writer: anytype, cmd: *const QailCmd) !void {
                 return error.MissingPolicyTable;
 
             try writer.writeAll("DROP POLICY IF EXISTS ");
-            try writer.writeAll(policy_name);
+            try render.writeSingleIdentifierOrError(writer, policy_name);
             try writer.writeAll(" ON ");
-            try writer.writeAll(policy_table);
+            try render.writeIdentifierOrError(writer, policy_table);
         },
         else => {},
     }
@@ -801,6 +801,55 @@ test "public transpiler rejects unsafe ast" {
     );
     const trusted_policy = QailCmd.createPolicy(policy);
     try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &trusted_policy));
+}
+
+test "trusted transpiler quotes command identifiers defensively" {
+    const select_cmd = QailCmd.get("users; DROP TABLE users; --");
+    const select_sql = try toSqlTrusted(std.testing.allocator, &select_cmd);
+    defer std.testing.allocator.free(select_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT * FROM \"users; DROP TABLE users; --\"",
+        select_sql,
+    );
+
+    const notify_cmd = QailCmd.notifyChannel("events; DROP TABLE users; --", "ok");
+    const notify_sql = try toSqlTrusted(std.testing.allocator, &notify_cmd);
+    defer std.testing.allocator.free(notify_sql);
+    try std.testing.expectEqualStrings(
+        "NOTIFY \"events; DROP TABLE users; --\", 'ok'",
+        notify_sql,
+    );
+
+    const savepoint_cmd = QailCmd.savepoint("sp; DROP TABLE users; --");
+    const savepoint_sql = try toSqlTrusted(std.testing.allocator, &savepoint_cmd);
+    defer std.testing.allocator.free(savepoint_sql);
+    try std.testing.expectEqualStrings(
+        "SAVEPOINT \"sp; DROP TABLE users; --\"",
+        savepoint_sql,
+    );
+
+    const left = Expr.col("tenant_id");
+    const right = Expr.int(42);
+    const predicate: Expr = .{
+        .binary = .{
+            .left = &left,
+            .op = .eq,
+            .right = &right,
+        },
+    };
+    const policy = ast.cmd.PolicyDef.create(
+        "tenant; DROP TABLE users; --",
+        "orders; DROP TABLE orders; --",
+    )
+        .toRole("app; DROP ROLE app; --")
+        .usingExpr(predicate);
+    const policy_cmd = QailCmd.createPolicy(policy);
+    const policy_sql = try toSqlTrusted(std.testing.allocator, &policy_cmd);
+    defer std.testing.allocator.free(policy_sql);
+    try std.testing.expectEqualStrings(
+        "CREATE POLICY \"tenant; DROP TABLE users; --\" ON \"orders; DROP TABLE orders; --\" FOR ALL TO \"app; DROP ROLE app; --\" USING (tenant_id = 42)",
+        policy_sql,
+    );
 }
 
 test "transpile grant revoke and policy commands" {

@@ -30,7 +30,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
     } else {
         try writer.writeAll(" FROM ");
     }
-    try writer.writeAll(cmd.table);
+    try render.writeTableReferenceOrError(writer, cmd.table);
 
     if (cmd.sample_method) |method| {
         try writer.print(" TABLESAMPLE {s}(", .{method.toSql()});
@@ -45,20 +45,20 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
 
     if (cmd.table_alias) |alias| {
         try writer.writeAll(" AS ");
-        try writer.writeAll(alias);
+        try render.writeIdentifierOrError(writer, alias);
     }
 
     for (cmd.joins) |join| {
         try writer.print(" {s} ", .{join.kind.toSql()});
-        try writer.writeAll(join.table);
+        try render.writeTableReferenceOrError(writer, join.table);
         if (join.alias) |alias| {
             try writer.writeAll(" AS ");
-            try writer.writeAll(alias);
+            try render.writeIdentifierOrError(writer, alias);
         }
         try writer.writeAll(" ON ");
-        try writer.writeAll(join.on_left);
+        try render.writeIdentifierOrError(writer, join.on_left);
         try writer.writeAll(" = ");
-        try writer.writeAll(join.on_right);
+        try render.writeIdentifierOrError(writer, join.on_right);
     }
 
     try render.writeWhereClauses(writer, cmd.where_clauses);
@@ -67,7 +67,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
         try writer.writeAll(" GROUP BY ");
         for (cmd.group_by, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(col);
+            try render.writeIdentifierOrError(writer, col);
         }
     }
 
@@ -85,7 +85,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
         try writer.writeAll(" ORDER BY ");
         for (cmd.order_by, 0..) |order, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(order.column);
+            try render.writeIdentifierOrError(writer, order.column);
             try writer.print(" {s}", .{order.order.toSql()});
         }
     }
@@ -117,7 +117,7 @@ pub fn writeUpdate(writer: anytype, cmd: *const QailCmd) !void {
     } else {
         try writer.writeAll("UPDATE ");
     }
-    try writer.writeAll(cmd.table);
+    try render.writeTableReferenceOrError(writer, cmd.table);
     try writer.writeAll(" SET ");
 
     for (cmd.assignments, 0..) |assign, i| {
@@ -144,7 +144,7 @@ pub fn writeDelete(writer: anytype, cmd: *const QailCmd) !void {
     } else {
         try writer.writeAll("DELETE FROM ");
     }
-    try writer.writeAll(cmd.table);
+    try render.writeTableReferenceOrError(writer, cmd.table);
 
     try render.writeWhereClauses(writer, cmd.where_clauses);
 
@@ -159,7 +159,7 @@ pub fn writeDelete(writer: anytype, cmd: *const QailCmd) !void {
 
 pub fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
     try writer.writeAll("INSERT INTO ");
-    try writer.writeAll(cmd.table);
+    try render.writeIdentifierOrError(writer, cmd.table);
 
     if (!cmd.default_values and cmd.assignments.len > 0) {
         try writer.writeAll(" (");
@@ -196,7 +196,7 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
 
 pub fn writeTruncate(writer: anytype, cmd: *const QailCmd) !void {
     try writer.writeAll("TRUNCATE ");
-    try writer.writeAll(cmd.table);
+    try render.writeIdentifierOrError(writer, cmd.table);
 }
 
 pub fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
@@ -204,11 +204,11 @@ pub fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
     try validateMergeShape(&merge);
 
     try writer.writeAll("MERGE INTO ");
-    try writer.writeAll(cmd.table);
+    try render.writeTableReferenceOrError(writer, cmd.table);
 
     if (merge.target_alias) |alias| {
         try writer.writeAll(" AS ");
-        try writer.writeAll(alias);
+        try render.writeIdentifierOrError(writer, alias);
     }
 
     try writer.writeAll(" USING ");
@@ -246,10 +246,10 @@ pub fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
 fn writeMergeSource(writer: anytype, source: *const ast.cmd.MergeSource) !void {
     switch (source.*) {
         .table => |table| {
-            try writer.writeAll(table.name);
+            try render.writeTableReferenceOrError(writer, table.name);
             if (table.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try render.writeIdentifierOrError(writer, alias);
             }
         },
         .query => |query| {
@@ -258,7 +258,7 @@ fn writeMergeSource(writer: anytype, source: *const ast.cmd.MergeSource) !void {
             try writer.writeByte(')');
             if (query.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try render.writeIdentifierOrError(writer, alias);
             }
         },
     }

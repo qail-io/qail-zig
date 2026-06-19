@@ -399,6 +399,57 @@ pub fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
     }
 }
 
+pub fn writeSingleIdentifierOrError(writer: anytype, value: []const u8) !void {
+    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) {
+        try writer.writeAll(INVALID_IDENTIFIER);
+        return;
+    }
+    try writeIdentifierMaybeQuoted(writer, value);
+}
+
+const TableReference = struct {
+    table: []const u8,
+    alias: ?[]const u8 = null,
+    explicit_as: bool = false,
+};
+
+fn splitTableReference(value: []const u8) ?TableReference {
+    var parts = std.mem.tokenizeAny(u8, value, " \t\r\n");
+    const table = parts.next() orelse return null;
+    const second = parts.next();
+    const third = parts.next();
+    if (parts.next() != null) return null;
+
+    if (second == null) {
+        return .{ .table = table };
+    }
+
+    if (third == null) {
+        if (std.ascii.eqlIgnoreCase(second.?, "as")) return null;
+        return .{ .table = table, .alias = second.? };
+    }
+
+    if (!std.ascii.eqlIgnoreCase(second.?, "as")) return null;
+    return .{ .table = table, .alias = third.?, .explicit_as = true };
+}
+
+pub fn writeTableReferenceOrError(writer: anytype, value: []const u8) !void {
+    const ref = splitTableReference(value) orelse {
+        try writeIdentifierOrError(writer, value);
+        return;
+    };
+
+    try writeIdentifierOrError(writer, ref.table);
+    if (ref.alias) |alias| {
+        if (ref.explicit_as) {
+            try writer.writeAll(" AS ");
+        } else {
+            try writer.writeByte(' ');
+        }
+        try writeIdentifierOrError(writer, alias);
+    }
+}
+
 pub fn writeInsertTargetColumn(writer: anytype, ex: *const Expr) !void {
     switch (ex.*) {
         .named => |name| try writeIdentifierOrError(writer, name),
