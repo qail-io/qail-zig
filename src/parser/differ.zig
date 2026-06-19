@@ -30,6 +30,51 @@ fn columnChecksEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) 
     return checkExpressionsEquivalent(old_col.check.?, new_col.check.?);
 }
 
+fn optionalTextEquivalent(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null and right == null) return true;
+    if (left == null or right == null) return false;
+    return eqlIgnoreAsciiWhitespace(left.?, right.?);
+}
+
+fn optionalTrimmedTextEquivalent(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null and right == null) return true;
+    if (left == null or right == null) return false;
+    return std.mem.eql(
+        u8,
+        std.mem.trim(u8, left.?, " \t\r\n"),
+        std.mem.trim(u8, right.?, " \t\r\n"),
+    );
+}
+
+fn columnReferencesEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
+    return optionalTextEquivalent(old_col.references, new_col.references);
+}
+
+fn columnDefaultsEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
+    return optionalTrimmedTextEquivalent(old_col.default_value, new_col.default_value);
+}
+
+fn validateExistingColumnConstraintDrift(old_col: *const ColumnDef, new_col: *const ColumnDef) !void {
+    if (old_col.primary_key != new_col.primary_key) return error.UnsupportedPrimaryKeyConstraintDrift;
+    if (old_col.unique != new_col.unique) return error.UnsupportedUniqueConstraintDrift;
+    if (old_col.nullable != new_col.nullable and !old_col.primary_key and !new_col.primary_key) {
+        return error.UnsupportedNullabilityConstraintDrift;
+    }
+    if (!columnReferencesEquivalent(old_col, new_col)) return error.UnsupportedReferenceConstraintDrift;
+    if (!columnDefaultsEquivalent(old_col, new_col)) return error.UnsupportedDefaultConstraintDrift;
+    if (!columnChecksEquivalent(old_col, new_col)) return error.UnsupportedCheckConstraintDrift;
+}
+
+fn validateNewExistingTableColumn(column: *const ColumnDef) !void {
+    if (column.primary_key) return error.UnsupportedPrimaryKeyColumnBackfill;
+    if (!column.nullable and column.default_value == null) return error.UnsupportedRequiredColumnBackfill;
+    if (column.unique and column.default_value != null) return error.UnsupportedUniqueColumnBackfill;
+    if (column.references != null and column.default_value != null) return error.UnsupportedReferenceColumnBackfill;
+    if (column.check != null and (!column.nullable or column.default_value != null)) {
+        return error.UnsupportedCheckColumnBackfill;
+    }
+}
+
 fn checkExpressionsEquivalent(left: []const u8, right: []const u8) bool {
     const normalized_left = stripRedundantOuterParens(std.mem.trim(u8, left, " \t\r\n"));
     const normalized_right = stripRedundantOuterParens(std.mem.trim(u8, right, " \t\r\n"));
@@ -157,6 +202,7 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
             // New columns
             for (new_table.columns.items) |new_col| {
                 if (old_table.findColumn(new_col.name) == null) {
+                    try validateNewExistingTableColumn(&new_col);
                     try cmds.append(allocator, MigrationCmd{
                         .action = .add_column,
                         .table = new_table.name,
@@ -186,9 +232,7 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
                             .column = new_col,
                         });
                     }
-                    if (!columnChecksEquivalent(old_col, &new_col)) {
-                        return error.UnsupportedCheckConstraintDrift;
-                    }
+                    try validateExistingColumnConstraintDrift(old_col, &new_col);
                 }
             }
         }
@@ -428,7 +472,7 @@ test "diff new column" {
     const new_input =
         \\table users (
         \\    id uuid primary_key,
-        \\    email text not null
+        \\    email text
         \\)
     ;
     var new = try Schema.parse(allocator, new_input);
@@ -535,6 +579,252 @@ test "diff existing column check ignores redundant parentheses and whitespace" {
     defer cmds.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
+test "diff new required column without default fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table users (
+        \\    id uuid primary_key,
+        \\    email text not null
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedRequiredColumnBackfill, diffSchemas(allocator, &old, &new));
+}
+
+test "diff new required column with default remains explicit in SQL" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table users (
+        \\    id uuid primary_key,
+        \\    status text not null default 'active'
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.add_column, cmds.items[0].action);
+
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE users ADD COLUMN status text NOT NULL DEFAULT 'active'",
+        sql,
+    );
+}
+
+test "diff new primary key column on existing table fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table api_keys (
+        \\    label text
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table api_keys (
+        \\    label text,
+        \\    key text primary_key
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedPrimaryKeyColumnBackfill, diffSchemas(allocator, &old, &new));
+}
+
+test "diff new unique column with default fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table users (
+        \\    id uuid primary_key,
+        \\    invite_code text unique default 'pending'
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedUniqueColumnBackfill, diffSchemas(allocator, &old, &new));
+}
+
+test "diff new nullable unique column preserves unique constraint" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table users (
+        \\    id uuid primary_key,
+        \\    invite_code text unique
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE users ADD COLUMN invite_code text UNIQUE",
+        sql,
+    );
+}
+
+test "diff new reference column with default fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid references tenants(id) default '00000000-0000-0000-0000-000000000000'
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedReferenceColumnBackfill, diffSchemas(allocator, &old, &new));
+}
+
+test "diff new nullable reference column preserves reference constraint" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid references tenants(id)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE orders ADD COLUMN tenant_id uuid REFERENCES tenants(id)",
+        sql,
+    );
+}
+
+test "diff existing column constraint drift fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table users (
+        \\    email text
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const unique_input =
+        \\table users (
+        \\    email text unique
+        \\)
+    ;
+    var with_unique = try Schema.parse(allocator, unique_input);
+    defer with_unique.deinit();
+    try std.testing.expectError(error.UnsupportedUniqueConstraintDrift, diffSchemas(allocator, &old, &with_unique));
+
+    const not_null_input =
+        \\table users (
+        \\    email text not null
+        \\)
+    ;
+    var with_not_null = try Schema.parse(allocator, not_null_input);
+    defer with_not_null.deinit();
+    try std.testing.expectError(error.UnsupportedNullabilityConstraintDrift, diffSchemas(allocator, &old, &with_not_null));
+
+    const default_input =
+        \\table users (
+        \\    email text default 'active'
+        \\)
+    ;
+    var with_default = try Schema.parse(allocator, default_input);
+    defer with_default.deinit();
+    try std.testing.expectError(error.UnsupportedDefaultConstraintDrift, diffSchemas(allocator, &old, &with_default));
+
+    const reference_old_input =
+        \\table orders (
+        \\    tenant_id uuid
+        \\)
+    ;
+    var reference_old = try Schema.parse(allocator, reference_old_input);
+    defer reference_old.deinit();
+
+    const reference_new_input =
+        \\table orders (
+        \\    tenant_id uuid references tenants(id)
+        \\)
+    ;
+    var reference_new = try Schema.parse(allocator, reference_new_input);
+    defer reference_new.deinit();
+    try std.testing.expectError(error.UnsupportedReferenceConstraintDrift, diffSchemas(allocator, &reference_old, &reference_new));
 }
 
 test "diff new column preserves full type in SQL and AST" {

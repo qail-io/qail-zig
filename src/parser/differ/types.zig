@@ -279,8 +279,14 @@ pub const MigrationCmd = struct {
                     if (!col.nullable) {
                         try w.writeAll(" NOT NULL");
                     }
+                    if (col.unique and !col.primary_key) {
+                        try w.writeAll(" UNIQUE");
+                    }
                     if (col.default_value) |def| {
                         try w.print(" DEFAULT {s}", .{def});
+                    }
+                    if (col.references) |ref| {
+                        try w.print(" REFERENCES {s}", .{ref});
                     }
                     if (col.check) |check| {
                         try writeCheckConstraint(w, check);
