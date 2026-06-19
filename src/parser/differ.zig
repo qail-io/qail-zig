@@ -24,6 +24,87 @@ fn columnTypesEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) b
     return typeParamsEquivalent(old_col.type_params, new_col.type_params);
 }
 
+fn isSafeColumnTypeChange(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
+    if (columnTypesEquivalent(old_col, new_col)) return true;
+    if (old_col.is_serial or new_col.is_serial) return false;
+    if (old_col.is_array != new_col.is_array) return false;
+
+    const old_kind = normalizedTypeKind(old_col.typ);
+    const new_kind = normalizedTypeKind(new_col.typ);
+
+    if (old_kind == .smallint and (new_kind == .integer or new_kind == .bigint)) return true;
+    if (old_kind == .integer and new_kind == .bigint) return true;
+
+    if (isUnboundedCharacterType(new_kind, new_col.type_params) and isCharacterKind(old_kind)) return true;
+    if (old_kind == .varchar and new_kind == .varchar) {
+        return varcharWidening(old_col.type_params, new_col.type_params);
+    }
+
+    return false;
+}
+
+const TypeKind = enum {
+    smallint,
+    integer,
+    bigint,
+    text,
+    varchar,
+    other,
+};
+
+fn normalizedTypeKind(typ: []const u8) TypeKind {
+    const trimmed = std.mem.trim(u8, typ, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "i16") or
+        std.ascii.eqlIgnoreCase(trimmed, "smallint") or
+        std.ascii.eqlIgnoreCase(trimmed, "int2"))
+    {
+        return .smallint;
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "i32") or
+        std.ascii.eqlIgnoreCase(trimmed, "int") or
+        std.ascii.eqlIgnoreCase(trimmed, "integer") or
+        std.ascii.eqlIgnoreCase(trimmed, "int4"))
+    {
+        return .integer;
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "i64") or
+        std.ascii.eqlIgnoreCase(trimmed, "bigint") or
+        std.ascii.eqlIgnoreCase(trimmed, "int8"))
+    {
+        return .bigint;
+    }
+    if (std.ascii.eqlIgnoreCase(trimmed, "text")) return .text;
+    if (std.ascii.eqlIgnoreCase(trimmed, "varchar") or
+        std.ascii.eqlIgnoreCase(trimmed, "character varying"))
+    {
+        return .varchar;
+    }
+    return .other;
+}
+
+fn isCharacterKind(kind: TypeKind) bool {
+    return kind == .text or kind == .varchar;
+}
+
+fn isUnboundedCharacterType(kind: TypeKind, params: ?[]const u8) bool {
+    return kind == .text or (kind == .varchar and params == null);
+}
+
+fn varcharWidening(old_params: ?[]const u8, new_params: ?[]const u8) bool {
+    if (new_params == null) return true;
+    if (old_params == null) return false;
+
+    const old_len = parseSingleTypeParam(old_params.?) orelse return false;
+    const new_len = parseSingleTypeParam(new_params.?) orelse return false;
+    return new_len >= old_len;
+}
+
+fn parseSingleTypeParam(params: []const u8) ?u64 {
+    const trimmed = std.mem.trim(u8, params, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.indexOfScalar(u8, trimmed, ',') != null) return null;
+    return std.fmt.parseInt(u64, trimmed, 10) catch null;
+}
+
 fn columnChecksEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
     if (old_col.check == null and new_col.check == null) return true;
     if (old_col.check == null or new_col.check == null) return false;
@@ -226,6 +307,9 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
             for (new_table.columns.items) |new_col| {
                 if (old_table.findColumn(new_col.name)) |old_col| {
                     if (!columnTypesEquivalent(old_col, &new_col)) {
+                        if (!isSafeColumnTypeChange(old_col, &new_col)) {
+                            return error.UnsupportedColumnTypeDrift;
+                        }
                         try cmds.append(allocator, MigrationCmd{
                             .action = .alter_column,
                             .table = new_table.name,
@@ -960,6 +1044,50 @@ test "diff type params change" {
     try std.testing.expectEqualStrings("varchar(255)", qail_cmd.columns[0].column_def.data_type);
 }
 
+test "diff unsafe type change fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table events (
+        \\    external_id text
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table events (
+        \\    external_id uuid
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedColumnTypeDrift, diffSchemas(allocator, &old, &new));
+}
+
+test "diff varchar narrowing fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table users (
+        \\    display_name varchar(255)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table users (
+        \\    display_name varchar(64)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedColumnTypeDrift, diffSchemas(allocator, &old, &new));
+}
+
 test "diff type params ignore whitespace only drift" {
     const allocator = std.testing.allocator;
 
@@ -1004,18 +1132,7 @@ test "diff array type suffix change" {
     var new = try Schema.parse(allocator, new_input);
     defer new.deinit();
 
-    var cmds = try diffSchemas(allocator, &old, &new);
-    defer cmds.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
-    try std.testing.expectEqual(MigrationCmd.Action.alter_column, cmds.items[0].action);
-
-    const sql = try cmds.items[0].toSql(allocator);
-    defer allocator.free(sql);
-    try std.testing.expectEqualStrings(
-        "ALTER TABLE articles ALTER COLUMN tags TYPE text[]",
-        sql,
-    );
+    try std.testing.expectError(error.UnsupportedColumnTypeDrift, diffSchemas(allocator, &old, &new));
 }
 
 test "generate sql" {
