@@ -88,6 +88,9 @@ pub const TableDef = struct {
             if (col.check) |check_expr| {
                 try writer.print(" CHECK({s})", .{check_expr});
             }
+            for (col.extra_checks) |check_expr| {
+                try writer.print(" CHECK({s})", .{check_expr});
+            }
 
             if (i < self.columns.items.len - 1) {
                 try writer.writeAll(",");
@@ -112,6 +115,7 @@ pub const ColumnDef = struct {
     references: ?[]const u8 = null,
     default_value: ?[]const u8 = null,
     check: ?[]const u8 = null,
+    extra_checks: []const []const u8 = &.{},
 
     pub fn deinit(self: *ColumnDef, allocator: Allocator) void {
         allocator.free(self.name);
@@ -120,5 +124,21 @@ pub const ColumnDef = struct {
         if (self.references) |r| allocator.free(r);
         if (self.default_value) |d| allocator.free(d);
         if (self.check) |c| allocator.free(c);
+        for (self.extra_checks) |check_expr| allocator.free(check_expr);
+        if (self.extra_checks.len > 0) allocator.free(self.extra_checks);
+    }
+
+    pub fn checkCount(self: *const ColumnDef) usize {
+        var count = self.extra_checks.len;
+        if (self.check != null) count += 1;
+        return count;
+    }
+
+    pub fn checkAt(self: *const ColumnDef, index: usize) []const u8 {
+        if (self.check) |check_expr| {
+            if (index == 0) return check_expr;
+            return self.extra_checks[index - 1];
+        }
+        return self.extra_checks[index];
     }
 };

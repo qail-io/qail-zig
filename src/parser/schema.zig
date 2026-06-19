@@ -598,11 +598,28 @@ const Parser = struct {
         references: ?[]const u8 = null,
         default_value: ?[]const u8 = null,
         check: ?[]const u8 = null,
+        extra_checks: []const []const u8 = &.{},
 
         fn deinit(self: *ConstraintResult, allocator: Allocator) void {
             if (self.references) |refs| allocator.free(refs);
             if (self.default_value) |default_value| allocator.free(default_value);
             if (self.check) |check| allocator.free(check);
+            for (self.extra_checks) |check| allocator.free(check);
+            if (self.extra_checks.len > 0) allocator.free(self.extra_checks);
+        }
+
+        fn appendCheck(self: *ConstraintResult, allocator: Allocator, check: []const u8) !void {
+            if (self.check == null) {
+                self.check = check;
+                return;
+            }
+
+            const next = try allocator.alloc([]const u8, self.extra_checks.len + 1);
+            errdefer allocator.free(next);
+            @memcpy(next[0..self.extra_checks.len], self.extra_checks);
+            next[self.extra_checks.len] = check;
+            if (self.extra_checks.len > 0) allocator.free(self.extra_checks);
+            self.extra_checks = next;
         }
     };
 
@@ -615,7 +632,6 @@ const Parser = struct {
         var seen_unique = false;
         var seen_references = false;
         var seen_default = false;
-        var seen_check = false;
 
         // Parse constraint keywords until we hit , or ) or } or newline
         while (true) {
@@ -719,8 +735,6 @@ const Parser = struct {
                 if (default_value.len == 0) return error.InvalidColumnConstraint;
                 result.default_value = try self.allocator.dupe(u8, default_value);
             } else if (self.matchKeyword("check")) {
-                if (seen_check) return error.DuplicateColumnConstraint;
-                seen_check = true;
                 try self.expectChar('(');
                 const check_start = self.pos;
                 var depth: usize = 1;
@@ -746,7 +760,11 @@ const Parser = struct {
                 if (self.current() != ')') return error.UnterminatedExpression;
                 const check_expr = std.mem.trim(u8, self.input[check_start..self.pos], " \t\r\n");
                 if (check_expr.len == 0) return error.InvalidColumnConstraint;
-                result.check = try self.allocator.dupe(u8, check_expr);
+                const owned_check = try self.allocator.dupe(u8, check_expr);
+                var moved_check = false;
+                errdefer if (!moved_check) self.allocator.free(owned_check);
+                try result.appendCheck(self.allocator, owned_check);
+                moved_check = true;
                 self.advance(); // skip closing )
             } else {
                 return error.InvalidColumnConstraint;
@@ -778,6 +796,7 @@ const Parser = struct {
             .references = constraints.references,
             .default_value = constraints.default_value,
             .check = constraints.check,
+            .extra_checks = constraints.extra_checks,
         };
     }
 
@@ -973,6 +992,9 @@ fn isUnsupportedPrimaryKeyType(typ: []const u8) bool {
 fn validateTableCheckReferences(table: *const TableDef) !void {
     for (table.columns.items) |col| {
         if (col.check) |expr| {
+            try validateCheckColumnReferences(table, expr);
+        }
+        for (col.extra_checks) |expr| {
             try validateCheckColumnReferences(table, expr);
         }
     }
@@ -2061,10 +2083,6 @@ test "schema parser rejects duplicate and contradictory column constraints" {
         \\)
         ,
         \\table users (
-        \\    id uuid check (id > 0) check (id < 10)
-        \\)
-        ,
-        \\table users (
         \\    id uuid primary_key null
         \\)
         ,
@@ -2195,6 +2213,26 @@ test "schema parser keeps constraint keywords inside quoted expressions" {
     try std.testing.expect(!guarded.unique);
 }
 
+test "schema parser preserves multiple column checks" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table products (
+        \\    score integer check (score >= 0) check (score <= 100)
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const products = schema.tables.items[0];
+    const score = products.findColumn("score").?;
+    try std.testing.expectEqual(@as(usize, 2), score.checkCount());
+    try std.testing.expectEqualStrings("score >= 0", score.check.?);
+    try std.testing.expectEqual(@as(usize, 1), score.extra_checks.len);
+    try std.testing.expectEqualStrings("score <= 100", score.extra_checks[0]);
+}
+
 test "schema parser validates column check references" {
     const invalid_input =
         \\table orders (
@@ -2202,6 +2240,13 @@ test "schema parser validates column check references" {
         \\)
     ;
     try expectSchemaParseFailure(invalid_input);
+
+    const invalid_extra_input =
+        \\table orders (
+        \\    status text check (status = 'paid') check (missing_status = 'paid')
+        \\)
+    ;
+    try expectSchemaParseFailure(invalid_extra_input);
 
     const allocator = std.testing.allocator;
     const valid_input =

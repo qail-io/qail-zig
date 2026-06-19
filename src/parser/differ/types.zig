@@ -58,11 +58,14 @@ pub const MigrationCmd = struct {
     }
 
     fn allocColumnConstraints(allocator: Allocator, col: ColumnDef) ![]const Constraint {
-        if (col.check == null) return &.{};
+        const check_count = col.checkCount();
+        if (check_count == 0) return &.{};
 
-        const check_values = try allocator.alloc([]const u8, 1);
+        const check_values = try allocator.alloc([]const u8, check_count);
         errdefer allocator.free(check_values);
-        check_values[0] = col.check.?;
+        for (0..check_count) |i| {
+            check_values[i] = col.checkAt(i);
+        }
 
         const constraints = try allocator.alloc(Constraint, 1);
         constraints[0] = .{ .check = check_values };
@@ -259,9 +262,7 @@ pub const MigrationCmd = struct {
                         if (col.references) |ref| {
                             try w.print(" REFERENCES {s}", .{ref});
                         }
-                        if (col.check) |check| {
-                            try writeCheckConstraint(w, check);
-                        }
+                        try writeColumnCheckConstraints(w, col);
                     }
                     try w.writeAll("\n)");
                 }
@@ -288,9 +289,7 @@ pub const MigrationCmd = struct {
                     if (col.references) |ref| {
                         try w.print(" REFERENCES {s}", .{ref});
                     }
-                    if (col.check) |check| {
-                        try writeCheckConstraint(w, check);
-                    }
+                    try writeColumnCheckConstraints(w, col);
                 }
             },
             .drop_column => {
@@ -480,6 +479,13 @@ pub const MigrationCmd = struct {
 fn writeCheckConstraint(writer: anytype, expr: []const u8) !void {
     const trimmed = checkedSqlExprFragment(expr) orelse return error.UnsafeSqlFragment;
     try writer.print(" CHECK ({s})", .{trimmed});
+}
+
+fn writeColumnCheckConstraints(writer: anytype, col: ColumnDef) !void {
+    const check_count = col.checkCount();
+    for (0..check_count) |i| {
+        try writeCheckConstraint(writer, col.checkAt(i));
+    }
 }
 
 fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {

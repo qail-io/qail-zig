@@ -240,6 +240,9 @@ fn renderTable(writer: anytype, table: *const parser.TableDef) !void {
         if (col.check) |check_expr| {
             try writer.print(" check ({s})", .{check_expr});
         }
+        for (col.extra_checks) |check_expr| {
+            try writer.print(" check ({s})", .{check_expr});
+        }
         try writer.writeAll("\n");
     }
     try writer.writeAll(")\n\n");

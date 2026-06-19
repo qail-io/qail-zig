@@ -159,9 +159,13 @@ fn parseDecimalTypeParams(params: []const u8) ?DecimalTypeParams {
 }
 
 fn columnChecksEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
-    if (old_col.check == null and new_col.check == null) return true;
-    if (old_col.check == null or new_col.check == null) return false;
-    return checkExpressionsEquivalent(old_col.check.?, new_col.check.?);
+    const old_count = old_col.checkCount();
+    const new_count = new_col.checkCount();
+    if (old_count != new_count) return false;
+    for (0..old_count) |i| {
+        if (!checkExpressionsEquivalent(old_col.checkAt(i), new_col.checkAt(i))) return false;
+    }
+    return true;
 }
 
 fn optionalTextEquivalent(left: ?[]const u8, right: ?[]const u8) bool {
@@ -204,7 +208,7 @@ fn validateNewExistingTableColumn(column: *const ColumnDef) !void {
     if (!column.nullable and column.default_value == null) return error.UnsupportedRequiredColumnBackfill;
     if (column.unique and column.default_value != null) return error.UnsupportedUniqueColumnBackfill;
     if (column.references != null and column.default_value != null) return error.UnsupportedReferenceColumnBackfill;
-    if (column.check != null and (!column.nullable or column.default_value != null)) {
+    if (column.checkCount() > 0 and (!column.nullable or column.default_value != null)) {
         return error.UnsupportedCheckColumnBackfill;
     }
 }
@@ -566,6 +570,56 @@ test "diff new table preserves column check constraint" {
     );
 }
 
+test "diff new table preserves multiple column check constraints" {
+    const allocator = std.testing.allocator;
+
+    const old_input = "";
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check (quantity >= 0) check (quantity <= 100)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) {
+                allocator.free(cmd.table_columns);
+            }
+        }
+        cmds.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.create_table, cmds.items[0].action);
+
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "CHECK (quantity >= 0)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "CHECK (quantity <= 100)") != null);
+
+    const qail_cmd = try cmds.items[0].toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+    try std.testing.expectEqual(@as(usize, 2), qail_cmd.columns[0].column_def.constraints[0].check.len);
+    try std.testing.expectEqualStrings("quantity >= 0", qail_cmd.columns[0].column_def.constraints[0].check[0]);
+    try std.testing.expectEqualStrings("quantity <= 100", qail_cmd.columns[0].column_def.constraints[0].check[1]);
+
+    const AstEncoder = @import("../protocol/ast_encoder.zig").AstEncoder;
+    var encoder = AstEncoder.init(allocator);
+    defer encoder.deinit();
+    const encoded_sql = try encoder.toSqlOwned(allocator, &qail_cmd);
+    defer allocator.free(encoded_sql);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS inventory (quantity integer CHECK (quantity >= 0) CHECK (quantity <= 100))",
+        encoded_sql,
+    );
+}
+
 test "diff dropped table" {
     const allocator = std.testing.allocator;
 
@@ -671,6 +725,54 @@ test "diff new column preserves column check constraint" {
     );
 }
 
+test "diff new column preserves multiple check constraints" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table players (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table players (
+        \\    id uuid primary_key,
+        \\    score integer check (score >= 0) check (score <= 100)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.add_column, cmds.items[0].action);
+
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE players ADD COLUMN score integer CHECK (score >= 0) CHECK (score <= 100)",
+        sql,
+    );
+
+    const qail_cmd = try cmds.items[0].toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+    try std.testing.expectEqual(@as(usize, 2), qail_cmd.columns[0].column_def.constraints[0].check.len);
+
+    const AstEncoder = @import("../protocol/ast_encoder.zig").AstEncoder;
+    var encoder = AstEncoder.init(allocator);
+    defer encoder.deinit();
+    const encoded_sql = try encoder.toSqlOwned(allocator, &qail_cmd);
+    defer allocator.free(encoded_sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE players ADD COLUMN score integer CHECK (score >= 0) CHECK (score <= 100)",
+        encoded_sql,
+    );
+}
+
 test "diff existing column check drift fails closed" {
     const allocator = std.testing.allocator;
 
@@ -691,6 +793,56 @@ test "diff existing column check drift fails closed" {
     defer new.deinit();
 
     try std.testing.expectError(error.UnsupportedCheckConstraintDrift, diffSchemas(allocator, &old, &new));
+}
+
+test "diff existing column multiple checks stay equivalent" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table inventory (
+        \\    quantity integer check (((quantity >= 0))) check (quantity <= 100)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check ( quantity>=0 ) check ((quantity <= 100))
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
+}
+
+test "diff existing column extra check drift fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table inventory (
+        \\    quantity integer check (quantity >= 0)
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check (quantity >= 0) check (quantity <= 100)
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedCheckConstraintDrift,
+        diffSchemas(allocator, &old, &new),
+    );
 }
 
 test "diff existing column check ignores redundant parentheses and whitespace" {
