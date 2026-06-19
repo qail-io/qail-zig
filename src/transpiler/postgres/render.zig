@@ -15,6 +15,9 @@ const INVALID_IN_CONDITION =
     "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */";
 const INVALID_BETWEEN_CONDITION =
     "FALSE /* ERROR: BETWEEN condition requires exactly two array values */";
+const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
+const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
+const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
 
 pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
     var has_and = false;
@@ -64,7 +67,7 @@ pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) 
     }
 }
 
-pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
+pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) anyerror!void {
     switch (condition.op) {
         .in, .not_in => return writeInCondition(writer, condition),
         .between, .not_between => return writeBetweenCondition(writer, condition),
@@ -83,7 +86,7 @@ pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) !vo
     }
 }
 
-fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition) !void {
+fn writeConditionLeft(writer: anytype, condition: *const ast.expr.Condition) anyerror!void {
     if (condition.column.len != 0) {
         try writer.writeAll(condition.column);
     } else {
@@ -134,14 +137,14 @@ fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition) 
     }
 }
 
-pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
+pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
     switch (ex.*) {
         .star => try writer.writeAll("*"),
         .named => |name| try writer.writeAll(name),
         .aliased => |a| {
             try writer.writeAll(a.name);
             try writer.writeAll(" AS ");
-            try writer.writeAll(a.alias);
+            try writeIdentifierMaybeQuoted(writer, a.alias);
         },
         .aggregate => |agg| {
             try writer.writeAll(agg.func.toSql());
@@ -151,7 +154,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeAll(")");
             if (agg.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .literal => |val| try writeValue(writer, &val),
@@ -166,10 +169,14 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             }
             if (b.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .func_call => |fc| {
+            if (!isSafeFunctionName(fc.name)) {
+                try writer.writeAll(INVALID_FUNCTION_NAME);
+                return;
+            }
             try writer.writeAll(fc.name);
             try writer.writeAll("(");
             for (fc.args, 0..) |arg, i| {
@@ -179,25 +186,14 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeAll(")");
             if (fc.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .case_expr => |c| {
             try writer.writeAll("CASE");
             for (c.when_clauses) |when_clause| {
                 try writer.writeAll(" WHEN ");
-                if (when_clause.condition.column.len != 0) {
-                    try writer.writeAll(when_clause.condition.column);
-                } else {
-                    try writeExpr(writer, &when_clause.condition.left);
-                }
-                switch (when_clause.condition.op) {
-                    .is_null, .is_not_null => try writer.print(" {s}", .{when_clause.condition.op.toSql()}),
-                    else => {
-                        try writer.print(" {s} ", .{when_clause.condition.op.toSql()});
-                        try writeValue(writer, &when_clause.condition.value);
-                    },
-                }
+                try writeCondition(writer, &when_clause.condition);
                 try writer.writeAll(" THEN ");
                 try writeExpr(writer, &when_clause.result);
             }
@@ -208,7 +204,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeAll(" END");
             if (c.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .subquery => |sq| {
@@ -217,7 +213,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeByte(')');
             if (sq.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .coalesce => |c| {
@@ -229,16 +225,20 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeAll(")");
             if (c.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .cast => |c| {
+            const target_type = checkedSqlTypeFragment(c.target_type) orelse {
+                try writer.writeAll(INVALID_CAST_TARGET);
+                return;
+            };
             try writeExpr(writer, c.expr);
             try writer.writeAll("::");
-            try writer.writeAll(c.target_type);
+            try writer.writeAll(target_type);
             if (c.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .json_access => |ja| {
@@ -249,12 +249,12 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
                 } else {
                     try writer.writeAll("->'");
                 }
-                try writer.writeAll(seg.key);
-                try writer.writeAll("'");
+                try writeEscapedSqlString(writer, seg.key);
+                try writer.writeByte('\'');
             }
             if (ja.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .array_constructor => |a| {
@@ -266,7 +266,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeByte(']');
             if (a.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .row_constructor => |r| {
@@ -278,7 +278,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeByte(')');
             if (r.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .subscript => |s| {
@@ -288,26 +288,26 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeByte(']');
             if (s.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .collate => |c| {
             try writeExpr(writer, c.expr);
             try writer.writeAll(" COLLATE ");
-            try writer.writeAll(c.collation);
+            try writeIdentifierOrError(writer, c.collation);
             if (c.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .field_access => |f| {
             try writer.writeByte('(');
             try writeExpr(writer, f.expr);
             try writer.writeAll(").");
-            try writer.writeAll(f.field);
+            try writeIdentifierOrError(writer, f.field);
             if (f.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .exists_subquery => |sq| {
@@ -320,7 +320,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
             try writer.writeByte(')');
             if (sq.alias) |alias| {
                 try writer.writeAll(" AS ");
-                try writer.writeAll(alias);
+                try writeIdentifierMaybeQuoted(writer, alias);
             }
         },
         .unary => |u| {
@@ -332,6 +332,96 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) !void {
         },
         .raw => |raw| try writer.writeAll(raw),
         else => {},
+    }
+}
+
+fn isSafeFunctionName(name: []const u8) bool {
+    if (name.len == 0 or std.mem.indexOfScalar(u8, name, 0) != null) return false;
+
+    var parts = std.mem.splitScalar(u8, name, '.');
+    while (parts.next()) |part| {
+        if (part.len == 0) return false;
+        for (part) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+        }
+    }
+
+    return true;
+}
+
+fn checkedSqlTypeFragment(fragment: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, fragment, " \t\r\n");
+    if (trimmed.len == 0 or
+        std.mem.indexOfScalar(u8, trimmed, 0) != null or
+        std.mem.indexOfScalar(u8, trimmed, ';') != null or
+        std.mem.indexOfScalar(u8, trimmed, '\'') != null or
+        std.mem.indexOfScalar(u8, trimmed, '"') != null or
+        std.mem.indexOf(u8, trimmed, "--") != null or
+        std.mem.indexOf(u8, trimmed, "/*") != null or
+        std.mem.indexOf(u8, trimmed, "*/") != null)
+    {
+        return null;
+    }
+
+    for (trimmed) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or
+            c == '_' or c == '.' or c == ' ' or c == '(' or c == ')' or
+            c == ',' or c == '[' or c == ']' or c == '%' or c == '+' or c == '-';
+        if (!ok) return null;
+    }
+    return trimmed;
+}
+
+fn isValidQualifiedIdentifier(value: []const u8) bool {
+    return value.len != 0 and
+        std.mem.indexOfScalar(u8, value, 0) == null and
+        !std.mem.startsWith(u8, value, ".") and
+        !std.mem.endsWith(u8, value, ".") and
+        std.mem.indexOf(u8, value, "..") == null;
+}
+
+fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
+    if (!isValidQualifiedIdentifier(value)) {
+        try writer.writeAll(INVALID_IDENTIFIER);
+        return;
+    }
+    try writeIdentifierMaybeQuoted(writer, value);
+}
+
+fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
+    var needs_quotes = ident.len == 0 or std.ascii.isDigit(ident[0]);
+    if (!needs_quotes) {
+        for (ident) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '_') {
+                needs_quotes = true;
+                break;
+            }
+        }
+    }
+
+    if (!needs_quotes) {
+        try writer.writeAll(ident);
+        return;
+    }
+
+    try writer.writeByte('"');
+    for (ident) |c| {
+        if (c == '"') {
+            try writer.writeAll("\"\"");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeByte('"');
+}
+
+fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
+    for (value) |c| {
+        if (c == '\'') {
+            try writer.writeAll("''");
+        } else {
+            try writer.writeByte(c);
+        }
     }
 }
 

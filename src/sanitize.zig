@@ -161,6 +161,51 @@ fn checkSqlExprFragment(field: []const u8, value: []const u8) ?SanitizeError {
     };
 }
 
+fn isSafeSqlTypeFragment(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0 or
+        std.mem.indexOfScalar(u8, trimmed, 0) != null or
+        std.mem.indexOfScalar(u8, trimmed, ';') != null or
+        std.mem.indexOfScalar(u8, trimmed, '\'') != null or
+        std.mem.indexOfScalar(u8, trimmed, '"') != null or
+        std.mem.indexOf(u8, trimmed, "--") != null or
+        std.mem.indexOf(u8, trimmed, "/*") != null or
+        std.mem.indexOf(u8, trimmed, "*/") != null)
+    {
+        return false;
+    }
+
+    for (trimmed) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or
+            c == '_' or c == '.' or c == ' ' or c == '(' or c == ')' or
+            c == ',' or c == '[' or c == ']' or c == '%' or c == '+' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+fn checkSqlTypeFragment(field: []const u8, value: []const u8) ?SanitizeError {
+    if (isSafeSqlTypeFragment(value)) return null;
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "SQL type fragments cannot contain quotes, NUL, statement separators, comments, or unsafe characters",
+    };
+}
+
+fn checkSqlKeyword(field: []const u8, value: []const u8) ?SanitizeError {
+    if (value.len != 0 and std.mem.indexOfScalar(u8, value, 0) == null) {
+        for (value) |c| {
+            if (!std.ascii.isAlphabetic(c) and c != '_') break;
+        } else return null;
+    }
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "SQL function keywords must match [a-zA-Z_]+",
+    };
+}
+
 fn checkValue(field: []const u8, value: *const Value) ?SanitizeError {
     return switch (value.*) {
         .column => |c| checkIdent("value.column", c),
@@ -303,7 +348,7 @@ fn checkExpr(field: []const u8, expr: *const Expr) ?SanitizeError {
         },
         .cast => |c| blk: {
             if (checkExpr(field, c.expr)) |err| break :blk err;
-            if (checkIdent("expr.cast_type", c.target_type)) |err| break :blk err;
+            if (checkSqlTypeFragment("expr.cast_type", c.target_type)) |err| break :blk err;
             if (c.alias) |alias| {
                 if (checkIdent("expr.alias", alias)) |err| break :blk err;
             }
@@ -336,7 +381,7 @@ fn checkExpr(field: []const u8, expr: *const Expr) ?SanitizeError {
             if (checkIdent("expr.special_func", s.name)) |err| break :blk err;
             for (s.args) |arg| {
                 if (arg.keyword) |kw| {
-                    if (checkIdent("expr.special_func_kw", kw)) |err| break :blk err;
+                    if (checkSqlKeyword("expr.special_func_kw", kw)) |err| break :blk err;
                 }
                 if (checkExpr("expr.special_func_arg", arg.expr)) |err| break :blk err;
             }

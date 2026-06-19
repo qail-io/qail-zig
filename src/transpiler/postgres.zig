@@ -647,6 +647,61 @@ test "public transpiler rejects malformed condition shapes" {
     try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &bad_exists_cmd));
 }
 
+test "trusted transpiler expression fragments fail closed" {
+    const name = Expr.col("name");
+    const bad_function_cols = [_]Expr{.{ .func_call = .{
+        .name = "lower); DROP TABLE users; --",
+        .args = &[_]Expr{name},
+    } }};
+    const bad_function_cmd = QailCmd.get("users").select(&bad_function_cols);
+    const bad_function_sql = try toSqlTrusted(std.testing.allocator, &bad_function_cmd);
+    defer std.testing.allocator.free(bad_function_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT /* ERROR: Invalid function name */ FROM users",
+        bad_function_sql,
+    );
+
+    const bad_cast_cols = [_]Expr{.{ .cast = .{
+        .expr = &name,
+        .target_type = "text); DROP TABLE users; --",
+    } }};
+    const bad_cast_cmd = QailCmd.get("users").select(&bad_cast_cols);
+    const bad_cast_sql = try toSqlTrusted(std.testing.allocator, &bad_cast_cmd);
+    defer std.testing.allocator.free(bad_cast_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT /* ERROR: Invalid cast target type */ FROM users",
+        bad_cast_sql,
+    );
+}
+
+test "trusted transpiler quotes expression identifiers and escapes json paths" {
+    const name = Expr.col("name");
+    const profile = Expr.col("profile");
+    const cols = [_]Expr{
+        .{ .json_access = .{
+            .column = "data",
+            .path = &[_]ast.expr.JsonPathSegment{.{ .key = "a' || pg_sleep(1) --", .as_text = true }},
+        } },
+        .{ .collate = .{
+            .expr = &name,
+            .collation = "C\"; DROP TABLE users; --",
+        } },
+        .{ .field_access = .{
+            .expr = &profile,
+            .field = "field; DROP TABLE users; --",
+        } },
+    };
+    const cmd = QailCmd.get("users").select(&cols);
+    const sql = try toSqlTrusted(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expect(std.mem.indexOf(u8, sql, "data->>'a'' || pg_sleep(1) --'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "COLLATE \"C\"\"; DROP TABLE users; --\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, ").\"field; DROP TABLE users; --\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "COLLATE \"C\"; DROP") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, ").field; DROP") == null);
+}
+
 test "public transpiler rejects unsafe ast" {
     const unsafe_table = QailCmd.get("users; DROP TABLE users");
     try std.testing.expectError(error.UnsafeAst, toSql(std.testing.allocator, &unsafe_table));

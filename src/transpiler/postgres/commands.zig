@@ -77,9 +77,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
             if (i > 0) {
                 try writer.print(" {s} ", .{clause.logical_op.toSql()});
             }
-            try writer.writeAll(clause.condition.column);
-            try writer.print(" {s} ", .{clause.condition.op.toSql()});
-            try render.writeValue(writer, &clause.condition.value);
+            try render.writeCondition(writer, &clause.condition);
         }
     }
 

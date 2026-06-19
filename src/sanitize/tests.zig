@@ -231,6 +231,41 @@ test "sanitize: exists operator shape rejected" {
     try std.testing.expectEqualStrings("condition.value", err.field);
 }
 
+test "sanitize: cast type fragments allow safe postgres types" {
+    const amount = Expr.col("amount");
+    const cols = [_]Expr{.{ .cast = .{
+        .expr = &amount,
+        .target_type = "numeric(10, 2)",
+    } }};
+    const cmd = QailCmd.get("orders").select(&cols);
+
+    try std.testing.expect(validateCmd(&cmd) == null);
+}
+
+test "sanitize: cast type fragments reject statement content" {
+    const name = Expr.col("name");
+    const cols = [_]Expr{.{ .cast = .{
+        .expr = &name,
+        .target_type = "text); DROP TABLE users; --",
+    } }};
+    const cmd = QailCmd.get("users").select(&cols);
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("expr.cast_type", err.field);
+}
+
+test "sanitize: special function keyword fragments rejected" {
+    const created_at = Expr.col("created_at");
+    const cols = [_]Expr{.{ .special_func = .{
+        .name = "EXTRACT",
+        .args = &[_]ast.expr.SpecialFuncArg{.{ .keyword = "FROM; DROP", .expr = &created_at }},
+    } }};
+    const cmd = QailCmd.get("users").select(&cols);
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("expr.special_func_kw", err.field);
+}
+
 test "sanitize: alter add constraint checks payload fragment" {
     const safe = QailCmd.alterAddConstraint("events", "events_kind_check", "kind <> 'semi;inside'");
     try std.testing.expect(validateCmd(&safe) == null);
