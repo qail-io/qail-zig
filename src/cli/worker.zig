@@ -4,7 +4,9 @@
 //! syncing rows to Qdrant over REST.
 
 const std = @import("std");
+const identifier_safety = @import("identifier_safety.zig");
 const io_compat = @import("../runtime/io.zig");
+const qdrant_safety = @import("qdrant_safety.zig");
 const ast = @import("../ast/mod.zig");
 const process = @import("../runtime/process.zig");
 
@@ -336,6 +338,11 @@ fn flushCurrentSyncRule(
     if (rule.source_table == null or rule.target_collection == null) {
         return error.InvalidConfig;
     }
+    if (!identifier_safety.isValidQualifiedIdentifier(rule.source_table.?)) return error.InvalidConfig;
+    if (rule.trigger_column) |column| {
+        if (!identifier_safety.isValidBareIdentifier(column)) return error.InvalidConfig;
+    }
+    try qdrant_safety.validatePathSegment(rule.target_collection.?);
 
     try config.sync_rules.append(allocator, .{
         .source_table = rule.source_table.?,
@@ -492,36 +499,26 @@ fn qdrantRequest(
     };
 }
 
-fn writeJsonString(writer: anytype, value: []const u8) !void {
-    try std.json.Stringify.value(value, .{}, writer);
-}
-
-fn writePointId(writer: anytype, ref_id: []const u8) !void {
-    if (std.fmt.parseInt(i64, ref_id, 10)) |num| {
-        try writer.print("{d}", .{num});
-        return;
-    } else |_| {}
-    try writeJsonString(writer, ref_id);
-}
-
 fn buildDeletePayload(allocator: Allocator, ref_id: []const u8) ![]u8 {
     var out = io_compat.AllocatingWriter.init(allocator);
     defer out.deinit();
     const writer = out.writer();
 
     try writer.writeAll("{\"points\":[");
-    try writePointId(writer, ref_id);
+    try qdrant_safety.writePointId(writer, ref_id);
     try writer.writeAll("]}");
     return try out.toOwnedSlice();
 }
 
 fn buildUpsertPayload(allocator: Allocator, ref_id: []const u8, vector: []const f32) ![]u8 {
+    try qdrant_safety.validateVector(vector);
+
     var out = io_compat.AllocatingWriter.init(allocator);
     defer out.deinit();
     const writer = out.writer();
 
     try writer.writeAll("{\"points\":[{\"id\":");
-    try writePointId(writer, ref_id);
+    try qdrant_safety.writePointId(writer, ref_id);
     try writer.writeAll(",\"vector\":[");
     for (vector, 0..) |value, i| {
         if (i > 0) try writer.writeAll(",");
@@ -532,6 +529,8 @@ fn buildUpsertPayload(allocator: Allocator, ref_id: []const u8, vector: []const 
 }
 
 fn getCollectionVectorSize(allocator: Allocator, qdrant_url: []const u8, collection: []const u8) !usize {
+    try qdrant_safety.validatePathSegment(collection);
+
     const base = trimBaseUrl(qdrant_url);
     const endpoint = try std.fmt.allocPrint(allocator, "{s}/collections/{s}", .{ base, collection });
     defer allocator.free(endpoint);
@@ -561,7 +560,7 @@ fn getCollectionVectorSize(allocator: Allocator, qdrant_url: []const u8, collect
         if (vectors.object.get("size")) |size_value| {
             switch (size_value) {
                 .integer => |v| if (v > 0) return @intCast(v),
-                .float => |v| if (v > 0) return @intFromFloat(v),
+                .float => |v| if (qdrantVectorSizeFloat(v)) |size| return size,
                 else => {},
             }
         }
@@ -572,7 +571,7 @@ fn getCollectionVectorSize(allocator: Allocator, qdrant_url: []const u8, collect
             if (entry.value_ptr.object.get("size")) |named_size| {
                 switch (named_size) {
                     .integer => |v| if (v > 0) return @intCast(v),
-                    .float => |v| if (v > 0) return @intFromFloat(v),
+                    .float => |v| if (qdrantVectorSizeFloat(v)) |size| return size,
                     else => {},
                 }
             }
@@ -582,7 +581,16 @@ fn getCollectionVectorSize(allocator: Allocator, qdrant_url: []const u8, collect
     return error.InvalidQdrantResponse;
 }
 
+fn qdrantVectorSizeFloat(value: f64) ?usize {
+    if (!std.math.isFinite(value) or value <= 0) return null;
+    if (@floor(value) != value) return null;
+    if (value > @as(f64, @floatFromInt(std.math.maxInt(usize)))) return null;
+    return @intFromFloat(value);
+}
+
 fn hashEmbedding(allocator: Allocator, text: []const u8, dim: usize) ![]f32 {
+    if (dim == 0) return error.InvalidQdrantVector;
+
     const vector = try allocator.alloc(f32, dim);
     const hash_seed = std.hash.Wyhash.hash(0, text);
     for (vector, 0..) |*slot, idx| {
@@ -594,6 +602,8 @@ fn hashEmbedding(allocator: Allocator, text: []const u8, dim: usize) ![]f32 {
 }
 
 fn qdrantDeletePoint(allocator: Allocator, qdrant_url: []const u8, collection: []const u8, ref_id: []const u8) !void {
+    try qdrant_safety.validatePathSegment(collection);
+
     const base = trimBaseUrl(qdrant_url);
     const endpoint = try std.fmt.allocPrint(allocator, "{s}/collections/{s}/points/delete?wait=true", .{ base, collection });
     defer allocator.free(endpoint);
@@ -616,6 +626,8 @@ fn qdrantUpsertPoint(
     ref_id: []const u8,
     vector: []const f32,
 ) !void {
+    try qdrant_safety.validatePathSegment(collection);
+
     const base = trimBaseUrl(qdrant_url);
     const endpoint = try std.fmt.allocPrint(allocator, "{s}/collections/{s}/points?wait=true", .{ base, collection });
     defer allocator.free(endpoint);
@@ -1071,6 +1083,60 @@ test "load worker config parses hybrid urls and sync rules" {
     try std.testing.expectEqualStrings("products_search", config.sync_rules.items[0].target_collection);
 
     config.deinit(allocator);
+}
+
+test "worker config rejects unsafe qdrant collection path segment" {
+    const allocator = std.testing.allocator;
+    var config = WorkerConfig{};
+    defer config.deinit(allocator);
+
+    var current_sync: ?SyncRuleBuilder = .{
+        .source_table = try allocator.dupe(u8, "products"),
+        .target_collection = try allocator.dupe(u8, "products/delete?wait=false"),
+        .trigger_column = null,
+    };
+
+    try std.testing.expectError(
+        error.InvalidQdrantPathSegment,
+        flushCurrentSyncRule(allocator, &config, &current_sync),
+    );
+    if (current_sync) |*rule| rule.deinit(allocator);
+}
+
+test "worker config rejects unsafe generated qail identifiers" {
+    const allocator = std.testing.allocator;
+    var config = WorkerConfig{};
+    defer config.deinit(allocator);
+
+    var bad_table: ?SyncRuleBuilder = .{
+        .source_table = try allocator.dupe(u8, "products; drop table users"),
+        .target_collection = try allocator.dupe(u8, "products_search"),
+        .trigger_column = null,
+    };
+    try std.testing.expectError(error.InvalidConfig, flushCurrentSyncRule(allocator, &config, &bad_table));
+    if (bad_table) |*rule| rule.deinit(allocator);
+
+    var bad_column: ?SyncRuleBuilder = .{
+        .source_table = try allocator.dupe(u8, "products"),
+        .target_collection = try allocator.dupe(u8, "products_search"),
+        .trigger_column = try allocator.dupe(u8, "description; drop table users"),
+    };
+    try std.testing.expectError(error.InvalidConfig, flushCurrentSyncRule(allocator, &config, &bad_column));
+    if (bad_column) |*rule| rule.deinit(allocator);
+}
+
+test "worker qdrant payloads reject unsafe point ids and vectors" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidQdrantPointId, buildDeletePayload(allocator, ""));
+    try std.testing.expectError(error.InvalidQdrantPointId, buildDeletePayload(allocator, "-1"));
+    try std.testing.expectError(
+        error.InvalidQdrantVector,
+        buildUpsertPayload(allocator, "42", &[_]f32{std.math.inf(f32)}),
+    );
+
+    const payload = try buildUpsertPayload(allocator, "42", &[_]f32{ 0.1, -0.2 });
+    defer allocator.free(payload);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"id\":42") != null);
 }
 
 test "redactUrlAlloc masks password in authority" {

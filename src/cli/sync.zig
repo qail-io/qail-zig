@@ -3,7 +3,9 @@
 //! Implements `sync generate|list` for `[[sync]]` config in `qail.toml`.
 
 const std = @import("std");
+const identifier_safety = @import("identifier_safety.zig");
 const io_compat = @import("../runtime/io.zig");
+const qdrant_safety = @import("qdrant_safety.zig");
 
 const Allocator = std.mem.Allocator;
 const print = std.debug.print;
@@ -309,6 +311,11 @@ fn flushCurrentSyncRule(
 
     if (rule.source_table == null or rule.target_collection == null) {
         return error.InvalidConfig;
+    }
+    if (!identifier_safety.isValidQualifiedIdentifier(rule.source_table.?)) return error.InvalidConfig;
+    try qdrant_safety.validatePathSegment(rule.target_collection.?);
+    if (rule.trigger_column) |column| {
+        if (!identifier_safety.isValidBareIdentifier(column)) return error.InvalidConfig;
     }
 
     try config.sync_rules.append(allocator, .{
@@ -739,16 +746,19 @@ test "parse qail.toml keeps hash inside quoted strings" {
         \\mode = "hybrid"
         \\
         \\[[sync]]
-        \\source_table = "catalog#2026"
-        \\target_collection = "catalog#prod"
+        \\source_table = "catalog"
+        \\target_collection = "catalog_prod"
+        \\embedding_model = "catalog#prod"
     ;
 
     var cfg = try parseQailToml(allocator, raw);
     defer cfg.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), cfg.sync_rules.items.len);
-    try std.testing.expectEqualStrings("catalog#2026", cfg.sync_rules.items[0].source_table);
-    try std.testing.expectEqualStrings("catalog#prod", cfg.sync_rules.items[0].target_collection);
+    try std.testing.expectEqualStrings("catalog", cfg.sync_rules.items[0].source_table);
+    try std.testing.expectEqualStrings("catalog_prod", cfg.sync_rules.items[0].target_collection);
+    try std.testing.expect(cfg.sync_rules.items[0].embedding_model != null);
+    try std.testing.expectEqualStrings("catalog#prod", cfg.sync_rules.items[0].embedding_model.?);
 }
 
 test "find next migration sequence from existing files" {
@@ -867,4 +877,38 @@ test "generate sync triggers rejects non-hybrid project mode" {
         error.InvalidProjectMode,
         generateSyncTriggersAt(std.testing.allocator, root),
     );
+}
+
+test "sync config rejects unsafe generated qail identifiers and qdrant collection names" {
+    const allocator = std.testing.allocator;
+    const bad_table =
+        \\[project]
+        \\mode = "hybrid"
+        \\
+        \\[[sync]]
+        \\source_table = "products; drop table users"
+        \\target_collection = "products_search"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseQailToml(allocator, bad_table));
+
+    const bad_column =
+        \\[project]
+        \\mode = "hybrid"
+        \\
+        \\[[sync]]
+        \\source_table = "products"
+        \\trigger_column = "description; drop table users"
+        \\target_collection = "products_search"
+    ;
+    try std.testing.expectError(error.InvalidConfig, parseQailToml(allocator, bad_column));
+
+    const bad_collection =
+        \\[project]
+        \\mode = "hybrid"
+        \\
+        \\[[sync]]
+        \\source_table = "products"
+        \\target_collection = "products/delete?wait=false"
+    ;
+    try std.testing.expectError(error.InvalidQdrantPathSegment, parseQailToml(allocator, bad_collection));
 }

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const io_compat = @import("../runtime/io.zig");
+const qdrant_safety = @import("qdrant_safety.zig");
 
 const Allocator = std.mem.Allocator;
 const print = std.debug.print;
@@ -100,6 +101,9 @@ fn createCollection(
     distance: []const u8,
     url: []const u8,
 ) !void {
+    try qdrant_safety.validatePathSegment(collection);
+    if (size == 0) return error.InvalidArgument;
+
     const distance_wire = try normalizeDistance(distance);
     const base = trimBaseUrl(url);
 
@@ -135,6 +139,8 @@ fn createCollection(
 }
 
 fn dropCollection(allocator: Allocator, collection: []const u8, url: []const u8) !void {
+    try qdrant_safety.validatePathSegment(collection);
+
     const base = trimBaseUrl(url);
     print("→ Dropping collection: {s}\n", .{collection});
     print("  URL: {s}\n", .{base});
@@ -157,6 +163,8 @@ fn dropCollection(allocator: Allocator, collection: []const u8, url: []const u8)
 }
 
 fn createSnapshot(allocator: Allocator, collection: []const u8, url: []const u8) ![]u8 {
+    try qdrant_safety.validatePathSegment(collection);
+
     const base = trimBaseUrl(url);
     const endpoint = try std.fmt.allocPrint(allocator, "{s}/collections/{s}/snapshots", .{ base, collection });
     defer allocator.free(endpoint);
@@ -193,6 +201,9 @@ fn downloadSnapshot(
     output_path: []const u8,
     url: []const u8,
 ) !void {
+    try qdrant_safety.validatePathSegment(collection);
+    try qdrant_safety.validatePathSegment(snapshot_name);
+
     const base = trimBaseUrl(url);
     print("→ Downloading snapshot to '{s}'...\n", .{output_path});
     const endpoint = try std.fmt.allocPrint(
@@ -226,6 +237,8 @@ fn backupCollection(
     output: ?[]const u8,
     url: []const u8,
 ) !void {
+    try qdrant_safety.validatePathSegment(collection);
+
     const snapshot_name = try createSnapshot(allocator, collection, url);
     defer allocator.free(snapshot_name);
     if (output) |path| {
@@ -239,6 +252,8 @@ fn restoreSnapshot(
     snapshot_location: []const u8,
     url: []const u8,
 ) !void {
+    try qdrant_safety.validatePathSegment(collection);
+
     const base = trimBaseUrl(url);
     print("→ Restoring '{s}' from snapshot...\n", .{collection});
     print("  Location: {s}\n", .{snapshot_location});
@@ -272,6 +287,8 @@ fn restoreSnapshot(
 }
 
 fn listSnapshots(allocator: Allocator, collection: []const u8, url: []const u8) !void {
+    try qdrant_safety.validatePathSegment(collection);
+
     const base = trimBaseUrl(url);
     const endpoint = try std.fmt.allocPrint(allocator, "{s}/collections/{s}/snapshots", .{ base, collection });
     defer allocator.free(endpoint);
@@ -337,4 +354,19 @@ test "trim base url removes trailing slash but preserves root" {
     try std.testing.expectEqualStrings("http://localhost:6333", trimBaseUrl("http://localhost:6333/"));
     try std.testing.expectEqualStrings("http://localhost:6333", trimBaseUrl(" http://localhost:6333  "));
     try std.testing.expectEqualStrings("/", trimBaseUrl("/"));
+}
+
+test "vector cli rejects unsafe qdrant path inputs before request construction" {
+    try std.testing.expectError(
+        error.InvalidQdrantPathSegment,
+        dropCollection(std.testing.allocator, "products/delete?wait=false", "http://127.0.0.1:1"),
+    );
+    try std.testing.expectError(
+        error.InvalidQdrantPathSegment,
+        downloadSnapshot(std.testing.allocator, "products", "../backup", "out.snapshot", "http://127.0.0.1:1"),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        createCollection(std.testing.allocator, "products", 0, "cosine", "http://127.0.0.1:1"),
+    );
 }
