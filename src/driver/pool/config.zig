@@ -43,16 +43,15 @@ pub fn parseUri(uri: []const u8) !PoolConfig {
     }
 
     var host_port = authority;
-    if (std.mem.indexOfScalar(u8, authority, '@')) |at_pos| {
+    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at_pos| {
         const auth = authority[0..at_pos];
         host_port = authority[at_pos + 1 ..];
-        if (auth.len != 0) {
-            if (std.mem.indexOfScalar(u8, auth, ':')) |colon_pos| {
-                user = auth[0..colon_pos];
-                password = auth[colon_pos + 1 ..];
-            } else {
-                user = auth;
-            }
+        if (auth.len == 0) return error.InvalidUriOption;
+        if (std.mem.indexOfScalar(u8, auth, ':')) |colon_pos| {
+            user = auth[0..colon_pos];
+            password = auth[colon_pos + 1 ..];
+        } else {
+            user = auth;
         }
     }
 
@@ -275,6 +274,26 @@ test "parseUri parses user host port database" {
     try std.testing.expectEqualStrings("db.example", config.host);
     try std.testing.expectEqual(@as(u16, 6543), config.port);
     try std.testing.expectEqualStrings("app", config.database);
+}
+
+test "parseUri splits credentials at final at sign" {
+    const config = try parseUri("postgresql://alice:sec@ret@db.example:6543/app");
+    try std.testing.expectEqualStrings("alice", config.user);
+    try std.testing.expectEqualStrings("sec@ret", config.password.?);
+    try std.testing.expectEqualStrings("db.example", config.host);
+    try std.testing.expectEqual(@as(u16, 6543), config.port);
+    try std.testing.expectEqualStrings("app", config.database);
+}
+
+test "parseUri rejects explicit empty user" {
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://@db.example/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://:secret@db.example/app"),
+    );
 }
 
 test "parseUri parses host port database without auth section" {
