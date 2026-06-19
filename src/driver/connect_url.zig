@@ -365,12 +365,10 @@ fn percentDecodeAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
-        if (text[i] == '%' and i + 2 < text.len) {
+        if (text[i] == '%') {
+            if (i + 2 >= text.len) return error.InvalidDatabaseUrlPercentEncoding;
             const hex = text[i + 1 .. i + 3];
-            const decoded = std.fmt.parseInt(u8, hex, 16) catch {
-                try out.append(allocator, text[i]);
-                continue;
-            };
+            const decoded = std.fmt.parseInt(u8, hex, 16) catch return error.InvalidDatabaseUrlPercentEncoding;
             try out.append(allocator, decoded);
             i += 2;
             continue;
@@ -411,4 +409,30 @@ test "parse connect timeout milliseconds" {
     try std.testing.expectEqual(@as(?i32, null), try parseConnectTimeoutMs("0"));
     try std.testing.expectEqual(@as(?i32, 5000), try parseConnectTimeoutMs("5"));
     try std.testing.expectError(error.InvalidConnectTimeout, parseConnectTimeoutMs("-1"));
+}
+
+test "percent decode rejects malformed escapes" {
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        percentDecodeAlloc(std.testing.allocator, "bad%XX"),
+    );
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        percentDecodeAlloc(std.testing.allocator, "bad%"),
+    );
+}
+
+test "parse connection url rejects malformed percent escapes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        parseConnectionUrl(allocator, "postgres://user:bad%XX@localhost/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        parseConnectionUrl(allocator, "postgres://user:bad%@localhost/app"),
+    );
 }
