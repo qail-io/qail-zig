@@ -329,10 +329,13 @@ pub const AstEncoder = struct {
     fn writeAstToSql(self: *AstEncoder, writer: anytype, cmd: *const QailCmd) !void {
         _ = self;
 
-        // First check for raw_sql (used for pre-generated DDL)
+        // First check for raw_sql (used for pre-generated DDL). Commands
+        // that use raw_sql as a nested source fragment handle it below.
         if (cmd.raw_sql) |raw| {
-            try writer.writeAll(raw);
-            return;
+            if (cmd.kind != .create_view and cmd.kind != .create_materialized_view) {
+                try writer.writeAll(raw);
+                return;
+            }
         }
 
         switch (cmd.kind) {
@@ -479,16 +482,17 @@ pub const AstEncoder = struct {
             .mod, .alter_type => {
                 // ALTER TABLE ALTER COLUMN TYPE
                 try writer.writeAll("ALTER TABLE ");
-                try writer.writeAll(cmd.table);
+                try writeIdentifierOrError(writer, cmd.table);
                 for (cmd.columns) |col| {
                     try writer.writeAll(" ALTER COLUMN ");
                     // Write column name only (not full def)
                     if (col == .column_def) {
-                        try writer.writeAll(col.column_def.name);
+                        try writeIdentifierOrError(writer, col.column_def.name);
                         try writer.writeAll(" TYPE ");
-                        try writer.writeAll(col.column_def.data_type);
+                        const data_type = checkedSqlTypeFragment(col.column_def.data_type) orelse "TEXT";
+                        try writer.writeAll(data_type);
                     } else if (col == .named) {
-                        try writer.writeAll(col.named);
+                        try writeIdentifierOrError(writer, col.named);
                     }
                 }
             },
@@ -522,7 +526,8 @@ pub const AstEncoder = struct {
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
                 } else if (cmd.raw_sql) |raw| {
-                    try writer.writeAll(raw);
+                    const query = checkedSqlExprFragment(raw) orelse "SELECT NULL WHERE FALSE";
+                    try writer.writeAll(query);
                 } else {
                     return error.MissingViewSourceQuery;
                 }
@@ -538,7 +543,8 @@ pub const AstEncoder = struct {
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
                 } else if (cmd.raw_sql) |raw| {
-                    try writer.writeAll(raw);
+                    const query = checkedSqlExprFragment(raw) orelse "SELECT NULL WHERE FALSE";
+                    try writer.writeAll(query);
                 } else {
                     return error.MissingMaterializedViewSourceQuery;
                 }
@@ -760,7 +766,11 @@ pub const AstEncoder = struct {
                 try writer.writeAll(" ALTER COLUMN ");
                 try writer.writeAll(col_name);
                 try writer.writeAll(" SET DEFAULT ");
-                try writer.writeAll(cmd.payload orelse "NULL");
+                const default_expr = if (cmd.payload) |payload|
+                    checkedSqlExprFragment(payload) orelse "NULL"
+                else
+                    "NULL";
+                try writer.writeAll(default_expr);
             },
             .alter_drop_default => {
                 const col_name = firstColumnName(cmd) orelse return error.MissingColumnName;
@@ -2534,6 +2544,109 @@ test "ast encoder column definition fragments fail closed" {
     try std.testing.expectEqualStrings(
         "CREATE TABLE IF NOT EXISTS events (user_id uuid REFERENCES /* ERROR: Invalid column definition fragment */)",
         ref_writer.getWritten(),
+    );
+}
+
+test "ast encoder view payload fragments fail closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var safe_view = QailCmd.createView("notes_view");
+    safe_view.raw_sql = "SELECT 'semi;inside' AS note";
+    var safe_buf: [256]u8 = undefined;
+    var safe_writer = io.FixedBufferWriter.init(&safe_buf);
+    try encoder.writeAstToSql(safe_writer.writer(), &safe_view);
+    try std.testing.expectEqualStrings(
+        "CREATE VIEW notes_view AS SELECT 'semi;inside' AS note",
+        safe_writer.getWritten(),
+    );
+
+    var unsafe_view = QailCmd.createView("active_users");
+    unsafe_view.raw_sql = "SELECT id FROM users; DROP TABLE users; --";
+    var unsafe_buf: [256]u8 = undefined;
+    var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
+    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_view);
+    try std.testing.expectEqualStrings(
+        "CREATE VIEW active_users AS SELECT NULL WHERE FALSE",
+        unsafe_writer.getWritten(),
+    );
+
+    var unsafe_materialized = QailCmd.createMaterializedView("booking_stats");
+    unsafe_materialized.raw_sql = "SELECT COUNT(*) FROM bookings; DROP TABLE bookings; --";
+    var materialized_buf: [256]u8 = undefined;
+    var materialized_writer = io.FixedBufferWriter.init(&materialized_buf);
+    try encoder.writeAstToSql(materialized_writer.writer(), &unsafe_materialized);
+    try std.testing.expectEqualStrings(
+        "CREATE MATERIALIZED VIEW booking_stats AS SELECT NULL WHERE FALSE",
+        materialized_writer.getWritten(),
+    );
+}
+
+test "ast encoder alter expression fragments fail closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const safe_cols = [_]Expr{Expr.col("note")};
+    const safe_default = QailCmd{
+        .kind = .alter_set_default,
+        .table = "events",
+        .columns = &safe_cols,
+        .payload = "'semi;inside'",
+    };
+    var safe_buf: [256]u8 = undefined;
+    var safe_writer = io.FixedBufferWriter.init(&safe_buf);
+    try encoder.writeAstToSql(safe_writer.writer(), &safe_default);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE events ALTER COLUMN note SET DEFAULT 'semi;inside'",
+        safe_writer.getWritten(),
+    );
+
+    const unsafe_cols = [_]Expr{Expr.col("score")};
+    const unsafe_default = QailCmd{
+        .kind = .alter_set_default,
+        .table = "events",
+        .columns = &unsafe_cols,
+        .payload = "0; DROP TABLE events; --",
+    };
+    var unsafe_buf: [256]u8 = undefined;
+    var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
+    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_default);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE events ALTER COLUMN score SET DEFAULT NULL",
+        unsafe_writer.getWritten(),
+    );
+}
+
+test "ast encoder alter type fragments fail closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const safe_defs = [_]Expr{.{ .column_def = .{ .name = "label", .data_type = "public.citext" } }};
+    const safe_cmd = QailCmd{
+        .kind = .alter_type,
+        .table = "events",
+        .columns = &safe_defs,
+    };
+    var safe_buf: [256]u8 = undefined;
+    var safe_writer = io.FixedBufferWriter.init(&safe_buf);
+    try encoder.writeAstToSql(safe_writer.writer(), &safe_cmd);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE events ALTER COLUMN label TYPE public.citext",
+        safe_writer.getWritten(),
+    );
+
+    const unsafe_defs = [_]Expr{.{ .column_def = .{ .name = "unsafe_type", .data_type = "text); DROP TABLE users; --" } }};
+    const unsafe_cmd = QailCmd{
+        .kind = .alter_type,
+        .table = "events",
+        .columns = &unsafe_defs,
+    };
+    var unsafe_buf: [256]u8 = undefined;
+    var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
+    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_cmd);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE events ALTER COLUMN unsafe_type TYPE TEXT",
+        unsafe_writer.getWritten(),
     );
 }
 
