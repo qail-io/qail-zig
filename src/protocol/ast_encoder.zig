@@ -564,10 +564,11 @@ pub const AstEncoder = struct {
                 if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 } else if (cmd.payload) |definition| {
+                    const checked_definition = checkedFunctionDefinitionPayload(definition) orelse return error.UnsafeSqlFragment;
                     try writer.writeAll("CREATE FUNCTION ");
                     try writeIdentifierOrError(writer, cmd.table);
                     try writer.writeAll(" ");
-                    try writer.writeAll(definition);
+                    try writer.writeAll(checked_definition);
                 } else {
                     return error.MissingFunctionDefinition;
                 }
@@ -585,10 +586,11 @@ pub const AstEncoder = struct {
                 if (cmd.raw_sql) |raw| {
                     try writer.writeAll(raw);
                 } else if (cmd.payload) |definition| {
+                    const checked_definition = checkedTriggerDefinitionPayload(definition) orelse return error.UnsafeSqlFragment;
                     try writer.writeAll("CREATE TRIGGER ");
                     try writeIdentifierOrError(writer, cmd.table);
                     try writer.writeByte(' ');
-                    try writer.writeAll(definition);
+                    try writer.writeAll(checked_definition);
                 } else {
                     return error.MissingTriggerDefinition;
                 }
@@ -2052,6 +2054,172 @@ fn functionArgsAreSafe(args: []const u8) bool {
     return tail.len != 0 and checkedSqlTypeFragment(tail) != null;
 }
 
+const HeaderKeywordMatch = struct {
+    start: usize = 0,
+    end: usize = 0,
+    count: usize = 0,
+};
+
+fn findHeaderKeyword(header: []const u8, keyword: []const u8) ?HeaderKeywordMatch {
+    var result = HeaderKeywordMatch{};
+    var depth: usize = 0;
+    var idx: usize = 0;
+
+    while (idx < header.len) {
+        while (idx < header.len and std.ascii.isWhitespace(header[idx])) : (idx += 1) {}
+        if (idx >= header.len) break;
+
+        const start = idx;
+        const token_depth = depth;
+        while (idx < header.len and !std.ascii.isWhitespace(header[idx])) : (idx += 1) {
+            switch (header[idx]) {
+                '(' => depth += 1,
+                ')' => {
+                    if (depth == 0) return null;
+                    depth -= 1;
+                },
+                else => {},
+            }
+        }
+
+        if (token_depth == 0 and std.ascii.eqlIgnoreCase(header[start..idx], keyword)) {
+            if (result.count == 0) {
+                result.start = start;
+                result.end = idx;
+            }
+            result.count += 1;
+        }
+    }
+
+    if (depth != 0) return null;
+    return result;
+}
+
+fn readHeaderToken(header: []const u8, start_idx: usize) ?struct { token: []const u8, end: usize } {
+    var idx = start_idx;
+    while (idx < header.len and std.ascii.isWhitespace(header[idx])) : (idx += 1) {}
+    if (idx >= header.len) return null;
+    const start = idx;
+    while (idx < header.len and !std.ascii.isWhitespace(header[idx])) : (idx += 1) {}
+    return .{ .token = header[start..idx], .end = idx };
+}
+
+fn isSafeNativeIdentifier(value: []const u8) bool {
+    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) return false;
+    if (!std.ascii.isAlphabetic(value[0]) and value[0] != '_') return false;
+    for (value[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+    return true;
+}
+
+fn isVolatilityKeyword(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(value, "IMMUTABLE") or
+        std.ascii.eqlIgnoreCase(value, "STABLE") or
+        std.ascii.eqlIgnoreCase(value, "VOLATILE");
+}
+
+fn functionHeaderIsSafe(header: []const u8) bool {
+    const trimmed = std.mem.trim(u8, header, " \t\r\n");
+    if (containsRawDelimiter(trimmed)) return false;
+
+    const returns = findHeaderKeyword(trimmed, "RETURNS") orelse return false;
+    const language = findHeaderKeyword(trimmed, "LANGUAGE") orelse return false;
+    if (returns.count != 1 or language.count != 1) return false;
+    if (returns.start != 0 or returns.end >= language.start) return false;
+
+    const returns_type = std.mem.trim(u8, trimmed[returns.end..language.start], " \t\r\n");
+    if (checkedSqlTypeFragment(returns_type) == null) return false;
+
+    const language_token = readHeaderToken(trimmed, language.end) orelse return false;
+    if (!isSafeNativeIdentifier(language_token.token)) return false;
+
+    const rest = std.mem.trim(u8, trimmed[language_token.end..], " \t\r\n");
+    if (rest.len == 0) return true;
+    const volatility = readHeaderToken(rest, 0) orelse return false;
+    if (!isVolatilityKeyword(volatility.token)) return false;
+    return std.mem.trim(u8, rest[volatility.end..], " \t\r\n").len == 0;
+}
+
+fn findMatchingFunctionArgParen(value: []const u8) ?usize {
+    if (value.len == 0 or value[0] != '(') return null;
+    var depth: usize = 1;
+    var idx: usize = 1;
+    while (idx < value.len) : (idx += 1) {
+        switch (value[idx]) {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return idx;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn isDollarQuotedBlock(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len < 4 or trimmed[0] != '$') return false;
+    const close_tag_rel = std.mem.indexOfScalar(u8, trimmed[1..], '$') orelse return false;
+    const delimiter = trimmed[0 .. close_tag_rel + 2];
+    for (delimiter[1 .. delimiter.len - 1]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+
+    const after_open = trimmed[delimiter.len..];
+    const close_rel = std.mem.lastIndexOf(u8, after_open, delimiter) orelse return false;
+    const tail = std.mem.trim(u8, after_open[close_rel + delimiter.len ..], " \t\r\n");
+    return tail.len == 0;
+}
+
+fn findDollarQuoteStart(value: []const u8) ?usize {
+    var idx: usize = 0;
+    while (idx < value.len) : (idx += 1) {
+        if (value[idx] != '$') continue;
+        const close_tag_rel = std.mem.indexOfScalar(u8, value[idx + 1 ..], '$') orelse continue;
+        const delimiter = value[idx .. idx + close_tag_rel + 2];
+        var valid = true;
+        for (delimiter[1 .. delimiter.len - 1]) |ch| {
+            if (!std.ascii.isAlphanumeric(ch) and ch != '_') {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) return idx;
+    }
+    return null;
+}
+
+fn checkedFunctionDefinitionPayload(payload: []const u8) ?[]const u8 {
+    const trimmed = trimTrailingSemicolon(payload);
+    if (trimmed.len == 0 or std.mem.indexOfScalar(u8, trimmed, 0) != null) return null;
+    if (trimmed[0] != '(') return null;
+
+    const close_args = findMatchingFunctionArgParen(trimmed) orelse return null;
+    const args = trimmed[1..close_args];
+    if (!functionArgsAreSafe(args)) return null;
+
+    const after_args = std.mem.trim(u8, trimmed[close_args + 1 ..], " \t\r\n");
+    const dollar_start = findDollarQuoteStart(after_args) orelse return null;
+    const header_and_as = std.mem.trim(u8, after_args[0..dollar_start], " \t\r\n");
+    const as_match = findHeaderKeyword(header_and_as, "AS") orelse return null;
+    if (as_match.count != 1) return null;
+
+    const header = header_and_as[0..as_match.start];
+    if (!functionHeaderIsSafe(header)) return null;
+
+    const body = after_args[dollar_start..];
+    if (!isDollarQuotedBlock(body)) return null;
+    return trimmed;
+}
+
+fn checkedTriggerDefinitionPayload(payload: []const u8) ?[]const u8 {
+    const trimmed = trimTrailingSemicolon(payload);
+    if (containsRawDelimiter(trimmed)) return null;
+    return trimmed;
+}
+
 fn writeFunctionArgs(writer: anytype, args: []const u8) !void {
     const trimmed = std.mem.trim(u8, args, " \t\r\n");
     if (trimmed.len == 0) return;
@@ -3451,6 +3619,55 @@ test "ast encoder function signatures and session settings are sanitized" {
     var reset_writer = io.FixedBufferWriter.init(&reset_buf);
     try encoder.writeAstToSql(reset_writer.writer(), &session_reset);
     try std.testing.expectEqualStrings("RESET app.\"current; DROP TABLE users; --\"", reset_writer.getWritten());
+}
+
+test "ast encoder validates trusted function and trigger payloads" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var function_cmd = QailCmd.createFunction("touch_users");
+    function_cmd.payload = "() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM 1 AS one; END; $$";
+    var function_buf: [512]u8 = undefined;
+    var function_writer = io.FixedBufferWriter.init(&function_buf);
+    try encoder.writeAstToSql(function_writer.writer(), &function_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE FUNCTION touch_users () RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM 1 AS one; END; $$",
+        function_writer.getWritten(),
+    );
+
+    var bad_language = QailCmd.createFunction("touch_users");
+    bad_language.payload = "() RETURNS void LANGUAGE bad-lang AS $$ BEGIN NULL; END; $$";
+    var bad_language_buf: [512]u8 = undefined;
+    var bad_language_writer = io.FixedBufferWriter.init(&bad_language_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(bad_language_writer.writer(), &bad_language));
+
+    var duplicate_language = QailCmd.createFunction("touch_users");
+    duplicate_language.payload = "() RETURNS void LANGUAGE sql LANGUAGE plpgsql AS $$ SELECT 1 $$";
+    var duplicate_language_buf: [512]u8 = undefined;
+    var duplicate_language_writer = io.FixedBufferWriter.init(&duplicate_language_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(duplicate_language_writer.writer(), &duplicate_language));
+
+    var trailing_function = QailCmd.createFunction("touch_users");
+    trailing_function.payload = "() RETURNS void LANGUAGE sql AS $$ SELECT 1 $$ DROP TABLE users";
+    var trailing_function_buf: [512]u8 = undefined;
+    var trailing_function_writer = io.FixedBufferWriter.init(&trailing_function_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(trailing_function_writer.writer(), &trailing_function));
+
+    var trigger_cmd = QailCmd.createTrigger("touch_users_updated");
+    trigger_cmd.payload = "BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION touch_users()";
+    var trigger_buf: [512]u8 = undefined;
+    var trigger_writer = io.FixedBufferWriter.init(&trigger_buf);
+    try encoder.writeAstToSql(trigger_writer.writer(), &trigger_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE TRIGGER touch_users_updated BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION touch_users()",
+        trigger_writer.getWritten(),
+    );
+
+    var unsafe_trigger = QailCmd.createTrigger("touch_users_updated");
+    unsafe_trigger.payload = "BEFORE UPDATE ON users; DROP TABLE users; --";
+    var unsafe_trigger_buf: [512]u8 = undefined;
+    var unsafe_trigger_writer = io.FixedBufferWriter.init(&unsafe_trigger_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(unsafe_trigger_writer.writer(), &unsafe_trigger));
 }
 
 test "ast encoder explain analyze" {
