@@ -263,6 +263,19 @@ test "sanitize: cast type fragments reject statement content" {
     try std.testing.expectEqualStrings("expr.cast_type", err.field);
 }
 
+test "sanitize: column definition fragments are validated" {
+    const safe_constraints = [_]ast.Constraint{.{ .default = "'semi;inside'" }};
+    const safe_cols = [_]Expr{Expr.defWithConstraints("note", "text", &safe_constraints)};
+    const safe_cmd = QailCmd.make("events").select(&safe_cols);
+    try std.testing.expect(validateCmd(&safe_cmd) == null);
+
+    const unsafe_constraints = [_]ast.Constraint{.{ .default = "0; DROP TABLE users; --" }};
+    const unsafe_cols = [_]Expr{Expr.defWithConstraints("score", "integer", &unsafe_constraints)};
+    const unsafe_cmd = QailCmd.make("events").select(&unsafe_cols);
+    const err = validateCmd(&unsafe_cmd).?;
+    try std.testing.expectEqualStrings("column_def.default", err.field);
+}
+
 test "sanitize: special function keyword fragments rejected" {
     const created_at = Expr.col("created_at");
     const cols = [_]Expr{.{ .special_func = .{

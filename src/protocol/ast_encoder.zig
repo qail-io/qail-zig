@@ -41,6 +41,8 @@ const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */"
 const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
 const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
 const INVALID_INSERT_COLUMN = "/* ERROR: Invalid insert column */";
+const INVALID_COLUMN_TYPE = "/* ERROR: Invalid column type */";
+const INVALID_COLUMN_FRAGMENT = "/* ERROR: Invalid column definition fragment */";
 
 /// AST-to-Wire encoder
 /// Directly encodes QailCmd AST to PostgreSQL Extended Query Protocol bytes
@@ -1616,6 +1618,12 @@ fn isSafeSqlExprFragment(value: []const u8) bool {
     return trimmed.len != 0 and !containsUnquotedStatementDelimiter(trimmed);
 }
 
+fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0 or containsUnquotedStatementDelimiter(trimmed)) return null;
+    return trimmed;
+}
+
 fn writeIdentifierMaybeQuoted(writer: anytype, ident: []const u8) !void {
     const needs_quotes = blk: {
         if (ident.len == 0) break :blk true;
@@ -1954,9 +1962,13 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
 fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
     const Constraint = @import("../ast/expr.zig").Constraint;
 
-    try writer.writeAll(def.name);
+    try writeIdentifierOrError(writer, def.name);
     try writer.writeAll(" ");
-    try writer.writeAll(def.data_type);
+    const data_type = checkedSqlTypeFragment(def.data_type) orelse {
+        try writer.writeAll(INVALID_COLUMN_TYPE);
+        return;
+    };
+    try writer.writeAll(data_type);
 
     const has_pk = def.is_primary_key or Constraint.hasPrimaryKey(def.constraints);
     const has_unique = def.is_unique or Constraint.hasUnique(def.constraints);
@@ -1977,23 +1989,31 @@ fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
 
     if (def.default_value) |dv| {
         try writer.writeAll(" DEFAULT ");
-        try writer.writeAll(dv);
+        try writeSqlExprFragmentOrError(writer, dv);
     } else if (Constraint.getDefault(def.constraints)) |dv| {
         try writer.writeAll(" DEFAULT ");
-        try writer.writeAll(dv);
+        try writeSqlExprFragmentOrError(writer, dv);
     }
 
     if (def.references) |ref| {
         try writer.writeAll(" REFERENCES ");
-        try writer.writeAll(ref);
+        try writeSqlExprFragmentOrError(writer, ref);
     } else {
         for (def.constraints) |c| {
             if (c == .references) {
                 try writer.writeAll(" REFERENCES ");
-                try writer.writeAll(c.references);
+                try writeSqlExprFragmentOrError(writer, c.references);
             }
         }
     }
+}
+
+fn writeSqlExprFragmentOrError(writer: anytype, fragment: []const u8) !void {
+    const checked = checkedSqlExprFragment(fragment) orelse {
+        try writer.writeAll(INVALID_COLUMN_FRAGMENT);
+        return;
+    };
+    try writer.writeAll(checked);
 }
 
 fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
@@ -2182,6 +2202,50 @@ test "ast encoder create table keeps unspecified columns nullable" {
     try std.testing.expectEqualStrings(
         "CREATE TABLE IF NOT EXISTS users (id serial PRIMARY KEY, nickname text, email text NOT NULL)",
         writer.getWritten(),
+    );
+}
+
+test "ast encoder column definition fragments fail closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const safe_constraints = [_]ast.expr.Constraint{.{ .default = "'semi;inside'" }};
+    const safe_defs = [_]Expr{Expr.defWithConstraints("note", "text", &safe_constraints)};
+    const safe_cmd = QailCmd.make("events").select(&safe_defs);
+
+    var safe_buf: [512]u8 = undefined;
+    var safe_writer = io.FixedBufferWriter.init(&safe_buf);
+    try encoder.writeAstToSql(safe_writer.writer(), &safe_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS events (note text DEFAULT 'semi;inside')",
+        safe_writer.getWritten(),
+    );
+
+    const bad_constraints = [_]ast.expr.Constraint{.{ .default = "0; DROP TABLE users; --" }};
+    const bad_defs = [_]Expr{Expr.defWithConstraints("score", "integer", &bad_constraints)};
+    const bad_cmd = QailCmd.make("events").select(&bad_defs);
+
+    var bad_buf: [512]u8 = undefined;
+    var bad_writer = io.FixedBufferWriter.init(&bad_buf);
+    try encoder.writeAstToSql(bad_writer.writer(), &bad_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS events (score integer DEFAULT /* ERROR: Invalid column definition fragment */)",
+        bad_writer.getWritten(),
+    );
+
+    const ref_defs = [_]Expr{.{ .column_def = .{
+        .name = "user_id",
+        .data_type = "uuid",
+        .references = "users(id); DROP TABLE users; --",
+    } }};
+    const ref_cmd = QailCmd.make("events").select(&ref_defs);
+
+    var ref_buf: [512]u8 = undefined;
+    var ref_writer = io.FixedBufferWriter.init(&ref_buf);
+    try encoder.writeAstToSql(ref_writer.writer(), &ref_cmd);
+    try std.testing.expectEqualStrings(
+        "CREATE TABLE IF NOT EXISTS events (user_id uuid REFERENCES /* ERROR: Invalid column definition fragment */)",
+        ref_writer.getWritten(),
     );
 }
 

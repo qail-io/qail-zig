@@ -214,6 +214,19 @@ fn checkSqlKeyword(field: []const u8, value: []const u8) ?SanitizeError {
     };
 }
 
+fn checkCommentFragment(field: []const u8, value: []const u8) ?SanitizeError {
+    if (std.mem.indexOfScalar(u8, value, 0) != null or
+        std.mem.indexOfScalar(u8, value, ';') != null or
+        std.mem.indexOfScalar(u8, value, '"') != null or
+        std.mem.indexOf(u8, value, "--") != null or
+        std.mem.indexOf(u8, value, "/*") != null or
+        std.mem.indexOf(u8, value, "*/") != null)
+    {
+        return rawError(field);
+    }
+    return null;
+}
+
 fn checkValue(field: []const u8, value: *const Value) ?SanitizeError {
     return switch (value.*) {
         .column => |c| checkIdent("value.column", c),
@@ -364,8 +377,16 @@ fn checkExpr(field: []const u8, expr: *const Expr) ?SanitizeError {
         },
         .column_def => |d| blk: {
             if (checkIdent("column_def.name", d.name)) |err| break :blk err;
-            if (checkIdent("column_def.type", d.data_type)) |err| break :blk err;
-            if (d.default_value != null or d.references != null) break :blk rawError("column_def.raw");
+            if (checkSqlTypeFragment("column_def.type", d.data_type)) |err| break :blk err;
+            if (d.default_value) |value| {
+                if (checkSqlExprFragment("column_def.default", value)) |err| break :blk err;
+            }
+            if (d.references) |target| {
+                if (checkSqlExprFragment("column_def.references", target)) |err| break :blk err;
+            }
+            for (d.constraints) |constraint| {
+                if (checkColumnDefConstraint(constraint)) |err| break :blk err;
+            }
             break :blk null;
         },
         .window => |w| blk: {
@@ -442,6 +463,25 @@ fn checkExpr(field: []const u8, expr: *const Expr) ?SanitizeError {
         },
         .unary => |u| checkExpr(field, u.operand),
         .raw => rawError("expr.raw"),
+    };
+}
+
+fn checkColumnDefConstraint(constraint: ast.Constraint) ?SanitizeError {
+    return switch (constraint) {
+        .primary_key, .nullable, .unique, .not_null => null,
+        .default => |value| checkSqlExprFragment("column_def.default", value),
+        .check => |values| blk: {
+            for (values) |value| {
+                if (checkSqlExprFragment("column_def.check", value)) |err| break :blk err;
+            }
+            break :blk null;
+        },
+        .references => |target| checkSqlExprFragment("column_def.references", target),
+        .comment => |value| checkCommentFragment("column_def.comment", value),
+        .generated => |generation| switch (generation) {
+            .stored => |expr| checkSqlExprFragment("column_def.generated", expr),
+            .virtual => |expr| checkSqlExprFragment("column_def.generated", expr),
+        },
     };
 }
 
