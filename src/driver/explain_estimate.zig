@@ -10,7 +10,8 @@ pub fn parseExplainJson(json: []const u8) ?ExplainEstimate {
     const total_cost = extractJsonNumber(json, "Total Cost") orelse return null;
     const plan_rows_f = extractJsonNumber(json, "Plan Rows") orelse return null;
 
-    if (!std.math.isFinite(total_cost) or !std.math.isFinite(plan_rows_f)) return null;
+    if (!std.math.isFinite(total_cost) or total_cost < 0) return null;
+    if (!std.math.isFinite(plan_rows_f)) return null;
     if (plan_rows_f < 0) return null;
 
     const max_u64_f = @as(f64, @floatFromInt(std.math.maxInt(u64)));
@@ -55,4 +56,13 @@ test "parse explain json invalid" {
     try std.testing.expect(parseExplainJson("not json") == null);
     try std.testing.expect(parseExplainJson("{}") == null);
     try std.testing.expect(parseExplainJson("[]") == null);
+    try std.testing.expect(parseExplainJson(
+        \\[{"Plan":{"Total Cost":1e999,"Plan Rows":5000}}]
+    ) == null);
+    try std.testing.expect(parseExplainJson(
+        \\[{"Plan":{"Total Cost":-1,"Plan Rows":5000}}]
+    ) == null);
+    try std.testing.expect(parseExplainJson(
+        \\[{"Plan":{"Total Cost":100,"Plan Rows":-1}}]
+    ) == null);
 }

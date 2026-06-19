@@ -59,10 +59,12 @@ pub const Numeric = struct {
 
     /// Create from float (approximate)
     pub fn fromFloat(f: f64) Numeric {
-        if (std.math.isNan(f)) {
-            return .{ .sign = .nan, .digits = &.{} };
-        }
+        return Numeric.tryFromFloat(f) catch @panic("non-finite numeric value");
+    }
 
+    /// Fallible float constructor that rejects NaN and Infinity.
+    pub fn tryFromFloat(f: f64) !Numeric {
+        if (!std.math.isFinite(f)) return error.NonFiniteNumeric;
         const sign: Sign = if (f < 0) .negative else .positive;
         const abs = @abs(f);
 
@@ -95,4 +97,10 @@ test "Numeric toFloat" {
 test "Numeric NaN" {
     const num = Numeric{ .sign = .nan, .digits = &.{} };
     try std.testing.expect(std.math.isNan(num.toFloat()));
+}
+
+test "Numeric tryFromFloat rejects non-finite values" {
+    try std.testing.expectError(error.NonFiniteNumeric, Numeric.tryFromFloat(std.math.nan(f64)));
+    try std.testing.expectError(error.NonFiniteNumeric, Numeric.tryFromFloat(std.math.inf(f64)));
+    try std.testing.expectError(error.NonFiniteNumeric, Numeric.tryFromFloat(-std.math.inf(f64)));
 }
