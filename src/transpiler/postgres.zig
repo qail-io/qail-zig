@@ -674,6 +674,29 @@ test "trusted transpiler expression fragments fail closed" {
     );
 }
 
+test "trusted transpiler hardens mutation target identifiers" {
+    const assignments = [_]ast.cmd.Assignment{.{
+        .column = "name; DROP TABLE users; --",
+        .value = .{ .string = "Alice" },
+    }};
+
+    const update_cmd = QailCmd.set("users").values(&assignments);
+    const update_sql = try toSqlTrusted(std.testing.allocator, &update_cmd);
+    defer std.testing.allocator.free(update_sql);
+    try std.testing.expectEqualStrings(
+        "UPDATE users SET \"name; DROP TABLE users; --\" = 'Alice'",
+        update_sql,
+    );
+
+    const insert_cmd = QailCmd.add("users").values(&assignments);
+    const insert_sql = try toSqlTrusted(std.testing.allocator, &insert_cmd);
+    defer std.testing.allocator.free(insert_sql);
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (\"name; DROP TABLE users; --\") VALUES ('Alice')",
+        insert_sql,
+    );
+}
+
 test "trusted transpiler quotes expression identifiers and escapes json paths" {
     const name = Expr.col("name");
     const profile = Expr.col("profile");

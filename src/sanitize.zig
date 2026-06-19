@@ -70,6 +70,14 @@ fn conditionShapeError(reason: []const u8) SanitizeError {
     };
 }
 
+fn insertTargetError(value: []const u8) SanitizeError {
+    return .{
+        .field = "insert.column",
+        .value = shortValue(value),
+        .reason = "insert target columns must be named identifiers",
+    };
+}
+
 fn checkIdent(field: []const u8, value: []const u8) ?SanitizeError {
     if (!isSafeIdent(value)) return identError(field, value);
     return null;
@@ -557,8 +565,22 @@ pub fn validateCmd(cmd: *const QailCmd) ?SanitizeError {
         if (checkIdent("table_alias", alias)) |err| return err;
     }
 
-    for (cmd.columns) |*col| {
-        if (checkExpr("columns", col)) |err| return err;
+    switch (cmd.kind) {
+        .add, .put, .upsert => {
+            for (cmd.columns) |*col| {
+                switch (col.*) {
+                    .named => |name| {
+                        if (checkIdent("insert.column", name)) |err| return err;
+                    },
+                    else => return insertTargetError(""),
+                }
+            }
+        },
+        else => {
+            for (cmd.columns) |*col| {
+                if (checkExpr("columns", col)) |err| return err;
+            }
+        },
     }
     for (cmd.distinct_on) |*col| {
         if (checkExpr("distinct_on", col)) |err| return err;

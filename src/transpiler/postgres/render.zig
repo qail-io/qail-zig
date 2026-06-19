@@ -20,6 +20,7 @@ const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
 const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */";
 const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
 const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
+const INVALID_INSERT_COLUMN = "/* ERROR: Invalid insert column */";
 
 pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
     var has_and = false;
@@ -383,7 +384,7 @@ fn isValidQualifiedIdentifier(value: []const u8) bool {
         std.mem.indexOf(u8, value, "..") == null;
 }
 
-fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
+pub fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
     if (!isValidQualifiedIdentifier(value)) {
         try writer.writeAll(INVALID_IDENTIFIER);
         return;
@@ -395,6 +396,13 @@ fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
         if (!first) try writer.writeByte('.');
         first = false;
         try writeIdentifierMaybeQuoted(writer, part);
+    }
+}
+
+pub fn writeInsertTargetColumn(writer: anytype, ex: *const Expr) !void {
+    switch (ex.*) {
+        .named => |name| try writeIdentifierOrError(writer, name),
+        else => try writer.writeAll(INVALID_INSERT_COLUMN),
     }
 }
 

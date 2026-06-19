@@ -24,6 +24,15 @@ test "sanitize: column injection rejected" {
     try std.testing.expectEqualStrings("columns", err.field);
 }
 
+test "sanitize: insert target expression rejected" {
+    const targets = [_]Expr{Expr.int(1)};
+    var cmd = QailCmd.add("users").select(&targets);
+    cmd.insert_values = &[_]ast.Value{.{ .int = 1 }};
+
+    const err = validateCmd(&cmd).?;
+    try std.testing.expectEqualStrings("insert.column", err.field);
+}
+
 test "sanitize: raw sql rejected" {
     const cmd = raw_cmd.command("SELECT 1");
     const err = validateCmd(&cmd).?;

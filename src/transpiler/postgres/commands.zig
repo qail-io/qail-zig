@@ -122,7 +122,7 @@ pub fn writeUpdate(writer: anytype, cmd: *const QailCmd) !void {
 
     for (cmd.assignments, 0..) |assign, i| {
         if (i > 0) try writer.writeAll(", ");
-        try writer.writeAll(assign.column);
+        try render.writeIdentifierOrError(writer, assign.column);
         try writer.writeAll(" = ");
         try render.writeValue(writer, &assign.value);
     }
@@ -165,7 +165,7 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd) !void {
         try writer.writeAll(" (");
         for (cmd.assignments, 0..) |assign, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(assign.column);
+            try render.writeIdentifierOrError(writer, assign.column);
         }
         try writer.writeAll(")");
     }
@@ -278,7 +278,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
             try writer.writeAll("UPDATE SET ");
             for (assignments, 0..) |assignment, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writer.writeAll(assignment.column);
+                try render.writeIdentifierOrError(writer, assignment.column);
                 try writer.writeAll(" = ");
                 var expr = assignment.expr;
                 try render.writeExpr(writer, &expr);
@@ -290,7 +290,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
                 try writer.writeAll(" (");
                 for (insert.columns, 0..) |column, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(column);
+                    try render.writeIdentifierOrError(writer, column);
                 }
                 try writer.writeByte(')');
             }

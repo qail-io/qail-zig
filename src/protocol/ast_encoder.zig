@@ -40,6 +40,7 @@ const INVALID_FUNCTION_KEYWORD = "/* ERROR: Invalid function keyword */";
 const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */";
 const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
 const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
+const INVALID_INSERT_COLUMN = "/* ERROR: Invalid insert column */";
 
 /// AST-to-Wire encoder
 /// Directly encodes QailCmd AST to PostgreSQL Extended Query Protocol bytes
@@ -343,7 +344,7 @@ pub const AstEncoder = struct {
 
                 for (cmd.assignments, 0..) |assign, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(assign.column);
+                    try writeIdentifierOrError(writer, assign.column);
                     try writer.writeAll(" = ");
                     try writeValue(writer, &assign.value);
                 }
@@ -1115,7 +1116,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
             try writer.writeAll("UPDATE SET ");
             for (assignments, 0..) |assignment, i| {
                 if (i > 0) try writer.writeAll(", ");
-                try writer.writeAll(assignment.column);
+                try writeIdentifierOrError(writer, assignment.column);
                 try writer.writeAll(" = ");
                 var expr = assignment.expr;
                 try writeExpr(writer, &expr);
@@ -1127,7 +1128,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
                 try writer.writeAll(" (");
                 for (insert.columns, 0..) |column, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(column);
+                    try writeIdentifierOrError(writer, column);
                 }
                 try writer.writeByte(')');
             }
@@ -1336,14 +1337,14 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
         try writer.writeAll(" (");
         for (cmd.columns, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writeExpr(writer, &col);
+            try writeInsertTargetColumn(writer, &col);
         }
         try writer.writeByte(')');
     } else if (!cmd.default_values and cmd.columns.len == 0 and cmd.assignments.len > 0) {
         try writer.writeAll(" (");
         for (cmd.assignments, 0..) |assign, i| {
             if (i > 0) try writer.writeAll(", ");
-            try writer.writeAll(assign.column);
+            try writeIdentifierOrError(writer, assign.column);
         }
         try writer.writeByte(')');
     }
@@ -1385,7 +1386,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
                 try writer.writeAll(" (");
                 for (conflict.columns, 0..) |col, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(col);
+                    try writeIdentifierOrError(writer, col);
                 }
                 try writer.writeByte(')');
             }
@@ -1400,15 +1401,15 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
                         try writer.writeAll(" DO UPDATE SET ");
                         for (cmd.assignments, 0..) |assign, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            try writer.writeAll(assign.column);
+                            try writeIdentifierOrError(writer, assign.column);
                             try writer.writeAll(" = EXCLUDED.");
-                            try writer.writeAll(assign.column);
+                            try writeIdentifierOrError(writer, assign.column);
                         }
                     } else {
                         try writer.writeAll(" DO UPDATE SET ");
                         for (updates, 0..) |assign, i| {
                             if (i > 0) try writer.writeAll(", ");
-                            try writer.writeAll(assign.column);
+                            try writeIdentifierOrError(writer, assign.column);
                             try writer.writeAll(" = ");
                             try writeValue(writer, &assign.value);
                         }
@@ -1706,6 +1707,13 @@ fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
         if (!first) try writer.writeByte('.');
         first = false;
         try writeIdentifierMaybeQuoted(writer, part);
+    }
+}
+
+fn writeInsertTargetColumn(writer: anytype, expr: *const Expr) !void {
+    switch (expr.*) {
+        .named => |name| try writeIdentifierOrError(writer, name),
+        else => try writer.writeAll(INVALID_INSERT_COLUMN),
     }
 }
 
@@ -2192,6 +2200,25 @@ test "ast encoder insert uses typed source query" {
 
     try std.testing.expectEqualStrings(
         "INSERT INTO users (id, email) SELECT id, email FROM users_archive",
+        writer.getWritten(),
+    );
+}
+
+test "ast encoder insert target expressions fail closed" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const target_cols = [_]Expr{ Expr.int(1), Expr.col("email") };
+    const values = [_]Value{ .{ .int = 1 }, .{ .string = "alice@example.com" } };
+    var cmd = QailCmd.add("users").select(&target_cols);
+    cmd.insert_values = &values;
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try encoder.writeAstToSql(writer.writer(), &cmd);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (/* ERROR: Invalid insert column */, email) VALUES (1, 'alice@example.com')",
         writer.getWritten(),
     );
 }
