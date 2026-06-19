@@ -41,6 +41,7 @@ pub const Cursor = struct {
     /// Build DECLARE CURSOR SQL from a QAIL AST command.
     pub fn declareSql(self: *const Cursor, allocator: std.mem.Allocator, query: *const QailCmd) ![]u8 {
         try raw_policy.rejectPublicRuntimeCmd(query);
+        if (!isCursorSelectable(query.kind)) return error.InvalidCursorQuery;
 
         var encoder = AstEncoder.init(allocator);
         defer encoder.deinit();
@@ -60,6 +61,13 @@ pub const Cursor = struct {
         return cursor_sql.buildClose(allocator, self.name);
     }
 };
+
+fn isCursorSelectable(kind: ast.CmdKind) bool {
+    return switch (kind) {
+        .get, .cnt, .search, .over, .with => true,
+        else => false,
+    };
+}
 
 // ==================== Tests ====================
 
@@ -88,4 +96,15 @@ test "Cursor SQL generation quotes cursor name" {
     const fetch = try cursor.fetchSql(allocator, 100);
     defer allocator.free(fetch);
     try std.testing.expectEqualStrings("FETCH 100 FROM \"c\"\"; DROP TABLE users; --\"", fetch);
+}
+
+test "Cursor SQL generation rejects non-select queries" {
+    const allocator = std.testing.allocator;
+    const cursor = Cursor.init(allocator, "test_cursor");
+
+    const mutation = QailCmd.del("users");
+    try std.testing.expectError(error.InvalidCursorQuery, cursor.declareSql(allocator, &mutation));
+
+    const copy = QailCmd.copyOut("users");
+    try std.testing.expectError(error.InvalidCursorQuery, cursor.declareSql(allocator, &copy));
 }
