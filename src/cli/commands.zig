@@ -339,13 +339,21 @@ pub fn make(comptime Cli: type) type {
         }
 
         fn isRustKeyword(name: []const u8) bool {
-            return std.mem.eql(u8, name, "type") or
-                std.mem.eql(u8, name, "match") or
-                std.mem.eql(u8, name, "struct") or
-                std.mem.eql(u8, name, "enum") or
-                std.mem.eql(u8, name, "mod") or
-                std.mem.eql(u8, name, "self") or
-                std.mem.eql(u8, name, "crate");
+            const keywords = [_][]const u8{
+                "as",      "break",   "const",    "continue", "crate",  "else",
+                "enum",    "extern",  "false",    "fn",       "for",    "if",
+                "impl",    "in",      "let",      "loop",     "match",  "mod",
+                "move",    "mut",     "pub",      "ref",      "return", "self",
+                "Self",    "static",  "struct",   "super",    "trait",  "true",
+                "type",    "unsafe",  "use",      "where",    "while",  "async",
+                "await",   "dyn",     "abstract", "become",   "box",    "do",
+                "final",   "macro",   "override", "priv",     "try",    "typeof",
+                "unsized", "virtual", "yield",
+            };
+            for (keywords) |keyword| {
+                if (std.mem.eql(u8, name, keyword)) return true;
+            }
+            return false;
         }
 
         fn toRustFieldIdent(allocator: Allocator, input: []const u8) ![]u8 {
@@ -395,6 +403,11 @@ pub fn make(comptime Cli: type) type {
             if (out.items.len == 0) return allocator.dupe(u8, "Table");
             if (std.ascii.isDigit(out.items[0])) {
                 try out.insert(allocator, 0, 'T');
+            }
+            if (isRustKeyword(out.items)) {
+                const prefixed = try std.fmt.allocPrint(allocator, "Qail{s}", .{out.items});
+                out.deinit(allocator);
+                return prefixed;
             }
             return out.toOwnedSlice(allocator);
         }
