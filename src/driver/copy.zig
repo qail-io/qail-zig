@@ -25,6 +25,20 @@ pub fn copyIn(
     const sql = try copy_sql.buildCopyInSql(allocator, table, columns);
     defer allocator.free(sql);
 
+    var encoded_rows: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer {
+        for (encoded_rows.items) |line| allocator.free(line);
+        encoded_rows.deinit(allocator);
+    }
+
+    for (rows) |row| {
+        const line = try helpers.encodeCopyRow(allocator, row);
+        encoded_rows.append(allocator, line) catch |err| {
+            allocator.free(line);
+            return err;
+        };
+    }
+
     // Send Query message
     var encoder = protocol.Encoder.init(allocator);
     defer encoder.deinit();
@@ -50,10 +64,7 @@ pub fn copyIn(
 
     // Send data rows as CopyData messages
     var total_rows: u64 = 0;
-    for (rows) |row| {
-        const line = try helpers.encodeCopyRow(allocator, row);
-        defer allocator.free(line);
-
+    for (encoded_rows.items) |line| {
         try helpers.sendCopyData(conn, line);
         total_rows += 1;
     }

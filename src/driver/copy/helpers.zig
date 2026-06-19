@@ -1,21 +1,33 @@
 const std = @import("std");
 
 pub fn encodeCopyRow(allocator: std.mem.Allocator, row: []const ?[]const u8) ![]const u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
-    defer parts.deinit(allocator);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
 
-    for (row) |col| {
+    for (row, 0..) |col, i| {
+        if (i > 0) try out.append(allocator, '\t');
         if (col) |value| {
-            try parts.append(allocator, value);
+            try appendCopyTextField(&out, allocator, value);
         } else {
-            try parts.append(allocator, "\\N");
+            try out.appendSlice(allocator, "\\N");
         }
     }
+    try out.append(allocator, '\n');
 
-    const joined = try std.mem.join(allocator, "\t", parts.items);
-    defer allocator.free(joined);
+    return try out.toOwnedSlice(allocator);
+}
 
-    return try std.fmt.allocPrint(allocator, "{s}\n", .{joined});
+fn appendCopyTextField(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    for (value) |byte| {
+        switch (byte) {
+            0 => return error.InvalidCopyData,
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            else => try out.append(allocator, byte),
+        }
+    }
 }
 
 pub fn sendCopyData(conn: anytype, data: []const u8) !void {
@@ -90,6 +102,25 @@ test "quoteQualifiedIdentifierAlloc quotes qualified identifiers" {
 
 test "quoteQualifiedIdentifierAlloc rejects invalid identifier" {
     try std.testing.expectError(error.InvalidIdentifier, quoteQualifiedIdentifierAlloc(std.testing.allocator, "users;drop"));
+}
+
+test "encodeCopyRow escapes copy text structural bytes" {
+    const row = [_]?[]const u8{
+        "hello\tworld",
+        "line\nnext",
+        "carriage\rreturn",
+        "back\\slash",
+        null,
+    };
+    const encoded = try encodeCopyRow(std.testing.allocator, &row);
+    defer std.testing.allocator.free(encoded);
+
+    try std.testing.expectEqualStrings("hello\\tworld\tline\\nnext\tcarriage\\rreturn\tback\\\\slash\t\\N\n", encoded);
+}
+
+test "encodeCopyRow rejects nul bytes" {
+    const row = [_]?[]const u8{"bad\x00value"};
+    try std.testing.expectError(error.InvalidCopyData, encodeCopyRow(std.testing.allocator, &row));
 }
 
 test "sendCopyData rejects payload above i32 wire limit" {

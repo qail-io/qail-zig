@@ -74,6 +74,35 @@ test "copy_in_raw quotes qualified identifiers in generated query" {
     try std.testing.expect(std.mem.indexOf(u8, conn.sent.items, "COPY \"tenant\".\"users\" (\"id\", \"full_name\") FROM STDIN") != null);
 }
 
+test "copy_in escapes copy text data" {
+    const msgs = [_]MockMsg{
+        .{ .msg_type = .copy_in_response },
+        .{ .msg_type = .command_complete, .payload = "COPY 1" },
+        .{ .msg_type = .ready_for_query, .payload = &.{'I'} },
+    };
+    var conn = MockConn.init(std.testing.allocator, &msgs);
+    defer conn.deinit();
+
+    const row = [_]?[]const u8{ "hello\tworld", "line\nnext", "back\\slash" };
+    const rows = [_][]const ?[]const u8{&row};
+    const inserted = try copy.copyIn(&conn, std.testing.allocator, "users", &.{ "body", "note", "path" }, &rows);
+
+    try std.testing.expectEqual(@as(u64, 1), inserted);
+    try std.testing.expect(std.mem.indexOf(u8, conn.sent.items, "hello\\tworld\tline\\nnext\tback\\\\slash\n") != null);
+}
+
+test "copy_in rejects invalid copy data before sending" {
+    var conn = MockConn.init(std.testing.allocator, &.{});
+    defer conn.deinit();
+
+    const row = [_]?[]const u8{"bad\x00value"};
+    const rows = [_][]const ?[]const u8{&row};
+    const err = copy.copyIn(&conn, std.testing.allocator, "users", &.{"body"}, &rows) catch |e| e;
+
+    try std.testing.expectEqual(error.InvalidCopyData, err);
+    try std.testing.expectEqual(@as(usize, 0), conn.sent.items.len);
+}
+
 test "copy_in_raw rejects invalid identifier before sending" {
     var conn = MockConn.init(std.testing.allocator, &.{});
     defer conn.deinit();
