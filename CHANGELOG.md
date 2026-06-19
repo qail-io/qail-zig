@@ -4,6 +4,40 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+### Breaking
+
+- Public raw SQL inputs are no longer part of the driver API on `main`. Runtime execution and public transpilation now fail closed for raw commands and nested raw escape hatches.
+- Cursor SQL helper modules and data-safety raw helper modules are hidden from the public surface; callers should use AST-native commands and documented driver/pool APIs.
+- The current pool constructor is `PgPool.init(allocator, config)` or `PgPool.initUri(allocator, uri)`. Older docs that showed `PgPool.connect(config)` were stale.
+
+### Added
+
+- Branch-management CLI support and codegen tooling were added after the `v0.8.3` CLI parity milestone.
+- Migration tracking now has unique version generation, full receipt fields, schema adjustments, and precise column nullability handling.
+- Public API guard tests now prevent reintroducing raw SQL helper exports on the driver/runtime path.
+
+### Changed
+
+- Runtime SQL-string policy is stricter across core and driver code, with audited internal renderers separated from the public API.
+- SQL value formatting and cursor identifier rendering now quote string-like values and identifiers defensively.
+- The CLI source tree was reorganized into dedicated command and parsing modules.
+
+### Fixed
+
+- The Linux `PgDriver.connect` stack-size fix and pipeline failure metadata from `v0.8.1` remain in place on `main`.
+- Public AST payload validation is hardened before driver execution.
+
+## v0.8.3 — 2026-04-23
+
+### Added
+
+- Completed the CLI parity milestone and source tree reorganization.
+
+### Changed
+
+- Moved CLI implementation into a broader organized command/test layout.
+- Refreshed benchmark and test source paths to match the reorganized tree.
+
 ## v0.8.1 — 2026-04-23
 
 ### Added

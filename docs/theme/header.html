@@ -1,7 +1,15 @@
 <!-- Custom header for QAIL Zig docs -->
 <nav class="qail-header">
     <a href="https://dev.qail.io/zig" class="qail-logo">
-        <span class="qail-icon">🪝</span>
+        <img
+            src="/qail-icon.png"
+            alt="QAIL logo"
+            class="qail-icon"
+            width="28"
+            height="27"
+            loading="eager"
+            decoding="async"
+        />
         <span class="qail-text">QAIL Zig</span>
     </a>
     <div class="qail-nav-links">
@@ -40,7 +48,10 @@
     }
 
     .qail-icon {
-        font-size: 1.5rem;
+        display: block;
+        width: 28px;
+        height: auto;
+        object-fit: contain;
     }
 
     .qail-text {

@@ -43,7 +43,15 @@ document.addEventListener('DOMContentLoaded', function () {
     nav.innerHTML = `
         <div class="nav-container">
             <a href="/zig" class="nav-logo">
-                <span class="logo-icon">🪝</span>
+                <img
+                    src="/qail-icon.png"
+                    alt="QAIL logo"
+                    class="logo-icon"
+                    width="28"
+                    height="27"
+                    loading="eager"
+                    decoding="async"
+                />
                 <span class="logo-text">QAIL Zig</span>
             </a>
             <div class="nav-links">

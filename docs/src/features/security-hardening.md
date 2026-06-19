@@ -5,8 +5,9 @@ The recent qail-zig work focused on PG-driver hardening parity against qail.rs.
 ## Added or Tightened
 
 - AST sanitization for untrusted command input
-- raw SQL escape-hatch rejection on the sanitization path
+- raw SQL escape-hatch rejection on the sanitization, runtime, and public transpiler paths
 - strict runtime SQL-string allowlist checks for core/driver files
+- public API guards that keep raw, trusted-compatibility, cursor SQL helper, and data-safety raw helper modules internal
 - stricter startup/auth ordering checks
 - authentication method-switch rejection
 - SASL final / `AuthenticationOk` sequencing checks
@@ -24,7 +25,8 @@ Protocol bugs are often state-machine bugs, not just parsing bugs. The hardening
 - AST-native execution is the preferred path.
 - `validateAst` exists for untrusted or deserialized command ingress.
 - Public driver execution rejects raw SQL command payloads; remaining SQL strings are confined to audited internal renderers/helpers.
-- protocol handlers are moving toward explicit state validation and drain-to-ready behavior after errors.
+- Public transpilation fails closed for raw command payloads.
+- Protocol handlers use explicit state validation and drain-to-ready behavior after errors where recovery is possible.
 
 ## Remaining Direction
 

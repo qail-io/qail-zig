@@ -5,11 +5,11 @@
 [![Zig](https://img.shields.io/badge/Zig-0.16+-F7A41D?style=flat-square&logo=zig)](https://ziglang.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791?style=flat-square&logo=postgresql)](https://www.postgresql.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.8.1-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.8.1)
+[![Version](https://img.shields.io/badge/version-0.8.3-green.svg?style=flat-square)](https://github.com/qail-io/qail-zig/releases/tag/v0.8.3)
 
 > **Status: Active** — The PostgreSQL driver, pooling, TLS, COPY, CLI, hardening suites, and benchmark harness are live, tracking wire-protocol parity against qail.rs.
 >
-> **Scope:** 48,078 tracked text lines overall, including 45,334 lines of Zig across 160 tracked `.zig` files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, builders, benchmarks, and optional Linux GSSAPI/libc integration for Kerberos/GSSENC.
+> **Scope:** 56,749 tracked text lines overall, including 53,426 lines of Zig across 172 tracked `.zig` files covering the wire protocol, connection pool, TLS, pipeline, COPY, AST encoder, parser, CLI, builders, benchmarks, and optional Linux GSSAPI/libc integration for Kerberos/GSSENC.
 >
 > **[qail.rs](https://github.com/qail-io/qail)** remains the generalized production platform; qail-zig is the dedicated Zig driver implementation, with enterprise-auth on Linux using the platform GSSAPI stack rather than a self-contained Zig Kerberos implementation.
 
@@ -22,7 +22,7 @@
 
 ## Highlights
 
-- **48,078 total LOC** — 45,334 Zig lines across 160 tracked `.zig` files, with optional Linux libc/GSSAPI integration only for Kerberos/GSSENC
+- **56,749 total LOC** — 53,426 Zig lines across 172 tracked `.zig` files, with optional Linux libc/GSSAPI integration only for Kerberos/GSSENC
 - **AST-Native Queries** — Type-safe query building, not string concatenation
 - **Codegen Parity** — 26 enums + 9 structs auto-generated from [qail.rs](https://github.com/qail-io/qail) AST
 - **Full PostgreSQL Driver** — Connection pooling, pipelining, TLS, COPY
@@ -193,7 +193,7 @@ const config = qail.driver.pool.PoolConfig.new("localhost", 5432, "postgres", "m
     .password("secret")
     .max_connections(20);
 
-var pool = try qail.driver.pool.PgPool.connect(config);
+var pool = try qail.driver.pool.PgPool.init(allocator, config);
 defer pool.deinit();
 
 var conn = try pool.acquire();
@@ -289,7 +289,7 @@ qail lint file.qail      # Lint checks
 
 | Feature | qail-zig | qail.rs |
 |---------|----------|---------|
-| Total LOC | 48,078 | 208,087 |
+| Total LOC | 56,749 | 210,593 |
 | Dependencies | 0 | 15+ crates |
 | Build Time | <2s | ~30s |
 | Binary Size | ~200KB | ~2MB |

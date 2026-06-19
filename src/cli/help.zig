@@ -190,5 +190,5 @@ pub fn showMigrateHelp() void {
 }
 
 pub fn showVersion() void {
-    print("qail-zig 0.8.1\n", .{});
+    print("qail-zig 0.8.3\n", .{});
 }

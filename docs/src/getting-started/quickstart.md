@@ -28,6 +28,7 @@ pub fn main() !void {
 ## High-Level Entry Points
 
 - `qail.driver.driver.PgDriver.connect(...)`
+- `qail.driver.driver.PgDriver.connectUrl(...)`
 - `qail.driver.pool.PgPool.init(...)`
 - `qail.driver.pipeline.Pipeline.init(...)`
 - `qail.validateAst(...)`

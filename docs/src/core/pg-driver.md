@@ -33,3 +33,5 @@ The focus of qail-zig is not a SQL-string convenience wrapper. The serious path 
 ## Current Emphasis
 
 Recent work concentrated on hardening the PG driver instead of broadening surface area first. That includes startup/auth state validation, protocol framing checks, COPY sequencing checks, replication stream fail-closed handling, and AST sanitization.
+
+The current public driver surface keeps raw SQL and trusted compatibility helpers internal. Application code should enter through `QailCmd`, `PgDriver`, `PgPool`, `Pipeline`, COPY helpers, and documented connection options.
