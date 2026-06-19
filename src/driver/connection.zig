@@ -74,8 +74,10 @@ pub const Connection = struct {
     /// Returns: (message_type, payload)
     pub fn readMessage(self: *Connection) !struct { msg_type: BackendMessage, payload: []const u8 } {
         const raw = try self.readMessageRawFast();
+        const msg_type: BackendMessage = @enumFromInt(raw.msg_type);
+        try Decoder.validateBackendMessagePayload(msg_type, raw.payload);
         return .{
-            .msg_type = @enumFromInt(raw.msg_type),
+            .msg_type = msg_type,
             .payload = raw.payload,
         };
     }

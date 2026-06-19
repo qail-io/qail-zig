@@ -29,6 +29,27 @@ pub const Decoder = struct {
         return self.remaining() >= 5; // Minimum message size
     }
 
+    pub fn validateBackendMessagePayload(msg_type: BackendMessage, payload: []const u8) !void {
+        var decoder = Decoder.init(payload);
+        switch (msg_type) {
+            .backend_key_data => _ = try decoder.parseBackendKeyData(),
+            .command_complete => _ = try decoder.parseCommandComplete(),
+            .copy_done,
+            .empty_query,
+            .no_data,
+            .parse_complete,
+            .bind_complete,
+            .close_complete,
+            .portal_suspended,
+            => if (payload.len != 0) return error.InvalidBackendMessagePayload,
+            .error_response, .notice => _ = try decoder.parseErrorResponse(),
+            .notification => _ = try decoder.parseNotificationResponse(),
+            .parameter_status => _ = try decoder.parseParameterStatus(),
+            .ready_for_query => _ = try decoder.parseReadyForQuery(),
+            else => {},
+        }
+    }
+
     // ==================== Reading Helpers ====================
 
     fn readByte(self: *Decoder) !u8 {
@@ -181,6 +202,7 @@ pub const Decoder = struct {
     /// Parse ParameterStatus message
     pub fn parseParameterStatus(self: *Decoder) !struct { name: []const u8, value: []const u8 } {
         const name = try self.readCString();
+        if (name.len == 0) return error.InvalidParameterStatusPayload;
         const value = try self.readCString();
         if (self.remaining() != 0) return error.InvalidParameterStatusPayload;
         return .{ .name = name, .value = value };
@@ -197,6 +219,7 @@ pub const Decoder = struct {
     /// - `secret_key_bytes`: full `4..=256` bytes used by protocol 3.2 cancel
     pub fn parseBackendKeyData(self: *Decoder) !struct { process_id: u32, secret_key: u32, secret_key_bytes: []const u8 } {
         const process_id = try self.readU32();
+        if (process_id == 0 or process_id > std.math.maxInt(i32)) return error.InvalidBackendKeyDataPayload;
         const secret_len = self.remaining();
         if (secret_len < 4 or secret_len > 256) return error.InvalidBackendKeyDataPayload;
 
@@ -269,6 +292,7 @@ pub const Decoder = struct {
     pub fn parseNotificationResponse(self: *Decoder) !struct { process_id: i32, channel: []const u8, payload: []const u8 } {
         const process_id = try self.readI32();
         const channel = try self.readCString();
+        if (channel.len == 0) return error.InvalidNotificationPayload;
         const payload = try self.readCString();
         if (self.remaining() != 0) return error.InvalidNotificationPayload;
         return .{
@@ -447,6 +471,7 @@ pub const Decoder = struct {
     /// Parse CommandComplete message
     pub fn parseCommandComplete(self: *Decoder) ![]const u8 {
         const tag = try self.readCString();
+        if (tag.len == 0) return error.InvalidCommandCompletePayload;
         if (self.remaining() != 0) return error.InvalidCommandCompletePayload;
         return tag;
     }
@@ -603,11 +628,37 @@ test "decode notification response" {
     try std.testing.expectEqualStrings("hello", notification.payload);
 }
 
+test "decode notification response rejects empty channel" {
+    const data = [_]u8{
+        0, 0, 0, 123, // process id
+        0, // empty channel
+        'h', 'e', 'l', 'l', 'o', 0, // payload
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidNotificationPayload, decoder.parseNotificationResponse());
+}
+
 test "decode parameter status rejects trailing bytes" {
     const data = [_]u8{
         'a', 0,
         'b', 0,
         'x',
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidParameterStatusPayload, decoder.parseParameterStatus());
+}
+
+test "decode parameter status rejects empty name" {
+    const data = [_]u8{
+        0,
+        'v',
+        'a',
+        'l',
+        'u',
+        'e',
+        0,
     };
     var decoder = Decoder.init(&data);
 
@@ -660,6 +711,22 @@ test "decode backend key data with legacy 4-byte key" {
     try std.testing.expectEqual(@as(u32, 2), key.secret_key);
     try std.testing.expectEqual(@as(usize, 4), key.secret_key_bytes.len);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 2 }, key.secret_key_bytes);
+}
+
+test "decode backend key data rejects non-positive signed process id" {
+    const zero_pid = [_]u8{
+        0, 0, 0, 0, // invalid process id
+        0, 0, 0, 2, // secret key
+    };
+    var zero_decoder = Decoder.init(&zero_pid);
+    try std.testing.expectError(error.InvalidBackendKeyDataPayload, zero_decoder.parseBackendKeyData());
+
+    const negative_pid = [_]u8{
+        255, 255, 255, 249, // -7 as signed i32
+        0,   0,   0,   2,
+    };
+    var negative_decoder = Decoder.init(&negative_pid);
+    try std.testing.expectError(error.InvalidBackendKeyDataPayload, negative_decoder.parseBackendKeyData());
 }
 
 test "decode backend key data accepts extended key payload" {
@@ -863,6 +930,13 @@ test "decode command complete rejects trailing bytes" {
         'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0,
         'x',
     };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidCommandCompletePayload, decoder.parseCommandComplete());
+}
+
+test "decode command complete rejects empty tag" {
+    const data = [_]u8{0};
     var decoder = Decoder.init(&data);
 
     try std.testing.expectError(error.InvalidCommandCompletePayload, decoder.parseCommandComplete());

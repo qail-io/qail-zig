@@ -52,6 +52,7 @@ pub fn copyIn(
         const msg = try conn.readMessage();
         switch (msg.msg_type) {
             .copy_in_response => {
+                try helpers.validateTextCopyResponse(allocator, msg.payload, columns.len);
                 saw_copy_in_response = true;
                 break;
             },
@@ -119,6 +120,7 @@ pub fn copyInRaw(
         const msg = try conn.readMessage();
         switch (msg.msg_type) {
             .copy_in_response => {
+                try helpers.validateTextCopyResponse(allocator, msg.payload, columns.len);
                 saw_copy_in_response = true;
                 break;
             },
@@ -183,6 +185,7 @@ pub fn copyExport(
         const msg = try conn.readMessage();
         switch (msg.msg_type) {
             .copy_out_response => {
+                try helpers.validateTextCopyResponse(allocator, msg.payload, columns.len);
                 saw_copy_out = true;
                 break;
             },

@@ -1,4 +1,5 @@
 const std = @import("std");
+const protocol = @import("../../protocol/mod.zig");
 
 pub fn encodeCopyRow(allocator: std.mem.Allocator, row: []const ?[]const u8) ![]const u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -44,6 +45,24 @@ pub fn sendCopyData(conn: anytype, data: []const u8) !void {
 pub fn sendCopyDone(conn: anytype) !void {
     const msg = [_]u8{ 'c', 0, 0, 0, 4 };
     try conn.send(&msg);
+}
+
+pub fn validateTextCopyResponse(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    expected_columns: ?usize,
+) !void {
+    var decoder = protocol.Decoder.init(payload);
+    const response = try decoder.parseCopyResponse(allocator);
+    defer allocator.free(response.column_formats);
+
+    if (response.format != 0) return error.InvalidCopyResponse;
+    if (expected_columns) |expected| {
+        if (response.column_formats.len != expected) return error.InvalidCopyResponse;
+    }
+    for (response.column_formats) |format| {
+        if (format != 0) return error.InvalidCopyResponse;
+    }
 }
 
 pub fn quoteIdentifierListAlloc(allocator: std.mem.Allocator, columns: []const []const u8) ![]u8 {
@@ -139,4 +158,47 @@ test "sendCopyData rejects payload above i32 wire limit" {
 
     try std.testing.expectError(error.CopyDataTooLarge, sendCopyData(&conn, payload));
     try std.testing.expectEqual(@as(usize, 0), conn.send_count);
+}
+
+test "validateTextCopyResponse accepts matching text response" {
+    const payload = [_]u8{
+        0, // overall text format
+        0, 2, // two columns
+        0, 0, // col0 text
+        0, 0, // col1 text
+    };
+
+    try validateTextCopyResponse(std.testing.allocator, &payload, 2);
+}
+
+test "validateTextCopyResponse rejects binary response formats" {
+    const overall_binary = [_]u8{
+        1,
+        0,
+        1,
+        0,
+        0,
+    };
+    try std.testing.expectError(error.InvalidCopyResponse, validateTextCopyResponse(std.testing.allocator, &overall_binary, 1));
+
+    const column_binary = [_]u8{
+        0,
+        0,
+        1,
+        0,
+        1,
+    };
+    try std.testing.expectError(error.InvalidCopyResponse, validateTextCopyResponse(std.testing.allocator, &column_binary, 1));
+}
+
+test "validateTextCopyResponse rejects column count mismatch" {
+    const payload = [_]u8{
+        0,
+        0,
+        1,
+        0,
+        0,
+    };
+
+    try std.testing.expectError(error.InvalidCopyResponse, validateTextCopyResponse(std.testing.allocator, &payload, 2));
 }

@@ -15,6 +15,7 @@ const cancel_mod = @import("cancel.zig");
 const row_mod = @import("row.zig");
 const query_mod = @import("query.zig");
 const copy_mod = @import("copy.zig");
+const copy_helpers_mod = @import("copy/helpers.zig");
 const io_backend_mod = @import("io_backend.zig");
 const rls_mod = @import("rls.zig");
 const connect_url_mod = @import("connect_url.zig");
@@ -1423,6 +1424,7 @@ pub const PgDriver = struct {
             switch (msg.msg_type) {
                 .copy_out_response => {
                     if (saw_copy_out) return error.InvalidCopyState;
+                    try copy_helpers_mod.validateTextCopyResponse(self.allocator, msg.payload, expectedCopyOutColumnCount(cmd));
                     saw_copy_out = true;
                 },
                 .copy_data => {
@@ -1434,7 +1436,8 @@ pub const PgDriver = struct {
                     saw_copy_done = true;
                 },
                 .command_complete => {
-                    if (!saw_copy_out) return error.InvalidCopyState;
+                    if (!saw_copy_out or !saw_copy_done) return error.InvalidCopyState;
+                    if (saw_command_complete) return error.InvalidCopyState;
                     saw_command_complete = true;
                 },
                 .ready_for_query => {
@@ -2349,6 +2352,20 @@ const CopyByteSink = struct {
 fn appendCopyChunk(ctx: ?*anyopaque, chunk: []const u8) !void {
     const sink: *CopyByteSink = @ptrCast(@alignCast(ctx orelse return error.InvalidCopyState));
     try sink.out.appendSlice(sink.allocator, chunk);
+}
+
+fn expectedCopyOutColumnCount(cmd: *const QailCmd) ?usize {
+    if (cmd.columns.len == 0) return null;
+
+    var count: usize = 0;
+    for (cmd.columns) |column_expr| {
+        switch (column_expr) {
+            .named, .aliased => count += 1,
+            .star => return null,
+            else => return null,
+        }
+    }
+    return count;
 }
 
 fn extractCopyColumns(allocator: std.mem.Allocator, cmd: *const QailCmd) ![][]const u8 {

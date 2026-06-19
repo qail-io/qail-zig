@@ -109,6 +109,7 @@ pub const AsyncConnection = struct {
 
         const payload = self.read_buffer[self.read_pos + 5 .. self.read_pos + 5 + payload_len];
         self.read_pos += 5 + payload_len;
+        try Decoder.validateBackendMessagePayload(msg_type, payload);
 
         return .{ .msg_type = msg_type, .payload = payload };
     }

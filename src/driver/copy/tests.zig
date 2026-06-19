@@ -10,6 +10,11 @@ const MockMsg = struct {
     payload: []const u8 = &.{},
 };
 
+const copy_in_one_col = [_]u8{ 0, 0, 1, 0, 0 };
+const copy_in_two_cols = [_]u8{ 0, 0, 2, 0, 0, 0, 0 };
+const copy_in_three_cols = [_]u8{ 0, 0, 3, 0, 0, 0, 0, 0, 0 };
+const copy_out_one_col = [_]u8{ 0, 0, 1, 0, 0 };
+
 const MockConn = struct {
     allocator: std.mem.Allocator,
     messages: []const MockMsg,
@@ -62,7 +67,7 @@ test "copy sendCopyData rejects oversized payload" {
 
 test "copy_in_raw quotes qualified identifiers in generated query" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_in_response },
+        .{ .msg_type = .copy_in_response, .payload = &copy_in_two_cols },
         .{ .msg_type = .command_complete, .payload = "COPY 1" },
         .{ .msg_type = .ready_for_query, .payload = &.{'I'} },
     };
@@ -76,7 +81,7 @@ test "copy_in_raw quotes qualified identifiers in generated query" {
 
 test "copy_in escapes copy text data" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_in_response },
+        .{ .msg_type = .copy_in_response, .payload = &copy_in_three_cols },
         .{ .msg_type = .command_complete, .payload = "COPY 1" },
         .{ .msg_type = .ready_for_query, .payload = &.{'I'} },
     };
@@ -125,7 +130,7 @@ test "copy_in_raw rejects unexpected startup message" {
 
 test "copy_in_raw rejects ready_without_command_complete" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_in_response },
+        .{ .msg_type = .copy_in_response, .payload = &copy_in_one_col },
         .{ .msg_type = .ready_for_query, .payload = &.{'I'} },
     };
     var conn = MockConn.init(std.testing.allocator, &msgs);
@@ -137,7 +142,7 @@ test "copy_in_raw rejects ready_without_command_complete" {
 
 test "copy_export rejects unexpected stream message" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_out_response },
+        .{ .msg_type = .copy_out_response, .payload = &copy_out_one_col },
         .{ .msg_type = .backend_key_data, .payload = &.{ 0, 0, 0, 1, 0, 0, 0, 2 } },
     };
     var conn = MockConn.init(std.testing.allocator, &msgs);
@@ -149,7 +154,7 @@ test "copy_export rejects unexpected stream message" {
 
 test "copy_export requires copy_done and command_complete before ready" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_out_response },
+        .{ .msg_type = .copy_out_response, .payload = &copy_out_one_col },
         .{ .msg_type = .copy_data, .payload = "1\tAlice\n" },
         .{ .msg_type = .ready_for_query, .payload = &.{'I'} },
     };
@@ -162,7 +167,7 @@ test "copy_export requires copy_done and command_complete before ready" {
 
 test "copy_export rejects copy_data after copy_done" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_out_response },
+        .{ .msg_type = .copy_out_response, .payload = &copy_out_one_col },
         .{ .msg_type = .copy_data, .payload = "1\tAlice\n" },
         .{ .msg_type = .copy_done },
         .{ .msg_type = .copy_data, .payload = "2\tBob\n" },
@@ -176,7 +181,7 @@ test "copy_export rejects copy_data after copy_done" {
 
 test "copy_export rejects command_complete before copy_done" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_out_response },
+        .{ .msg_type = .copy_out_response, .payload = &copy_out_one_col },
         .{ .msg_type = .copy_data, .payload = "1\tAlice\n" },
         .{ .msg_type = .command_complete, .payload = "COPY 1" },
     };
@@ -189,7 +194,7 @@ test "copy_export rejects command_complete before copy_done" {
 
 test "copy_export succeeds on valid message sequence" {
     const msgs = [_]MockMsg{
-        .{ .msg_type = .copy_out_response },
+        .{ .msg_type = .copy_out_response, .payload = &copy_out_one_col },
         .{ .msg_type = .copy_data, .payload = "1\tAlice\n" },
         .{ .msg_type = .copy_done },
         .{ .msg_type = .command_complete, .payload = "COPY 1" },

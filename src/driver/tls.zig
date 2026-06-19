@@ -252,6 +252,7 @@ pub const TlsConnection = struct {
 
         const payload = self.pg_read_buffer[self.pg_read_pos + 5 .. self.pg_read_pos + 5 + payload_len];
         self.pg_read_pos += 5 + payload_len;
+        try Decoder.validateBackendMessagePayload(msg_type, payload);
 
         return .{ .msg_type = msg_type, .payload = payload };
     }

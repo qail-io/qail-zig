@@ -99,6 +99,38 @@ pub const Encoder = struct {
         try addLenChecked(total, 1);
     }
 
+    fn hasNul(s: []const u8) bool {
+        return std.mem.indexOfScalar(u8, s, 0) != null;
+    }
+
+    fn validateStartupCString(s: []const u8) !void {
+        if (hasNul(s)) return error.NullByte;
+    }
+
+    fn validateStartupParamName(name: []const u8) !void {
+        try validateStartupCString(name);
+        if (name.len == 0) return error.InvalidStartupParam;
+
+        const trimmed = std.mem.trim(u8, name, " \t\r\n");
+        if (trimmed.len != name.len) return error.InvalidStartupParam;
+        if (std.ascii.eqlIgnoreCase(name, "user") or std.ascii.eqlIgnoreCase(name, "database")) {
+            return error.InvalidStartupParam;
+        }
+    }
+
+    fn validateStartupParams(extra_params: []const StartupParam) !void {
+        for (extra_params, 0..) |param, i| {
+            try validateStartupParamName(param.name);
+            try validateStartupCString(param.value);
+
+            for (extra_params[0..i]) |seen| {
+                if (std.ascii.eqlIgnoreCase(seen.name, param.name)) {
+                    return error.InvalidStartupParam;
+                }
+            }
+        }
+    }
+
     fn toWireLen(total: usize) !u32 {
         if (total > max_wire_message_len) return error.MessageTooLarge;
         return @intCast(total);
@@ -177,6 +209,10 @@ pub const Encoder = struct {
         }
         try addLenChecked(&msg_len_usize, 1);
         const msg_len = try toWireLen(msg_len_usize);
+
+        try validateStartupCString(user);
+        try validateStartupCString(database);
+        try validateStartupParams(extra_params);
 
         try self.writeU32(msg_len);
         try self.writeU32(PROTOCOL_VERSION);
@@ -668,4 +704,58 @@ test "encode startup rejects embedded nul in startup params" {
     defer encoder.deinit();
 
     try std.testing.expectError(error.NullByte, encoder.encodeStartupWithParams("po\x00stgres", "db", &.{}));
+    try std.testing.expectEqual(@as(usize, 0), encoder.getWritten().len);
+}
+
+test "encode startup rejects invalid extra startup params before writing" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try std.testing.expectError(
+        error.InvalidStartupParam,
+        encoder.encodeStartupWithParams(
+            "postgres",
+            "db",
+            &.{.{ .name = " application_name ", .value = "qail" }},
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoder.getWritten().len);
+
+    try std.testing.expectError(
+        error.InvalidStartupParam,
+        encoder.encodeStartupWithParams(
+            "postgres",
+            "db",
+            &.{.{ .name = "user", .value = "mallory" }},
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoder.getWritten().len);
+
+    try std.testing.expectError(
+        error.InvalidStartupParam,
+        encoder.encodeStartupWithParams(
+            "postgres",
+            "db",
+            &.{
+                .{ .name = "application_name", .value = "qail" },
+                .{ .name = "APPLICATION_NAME", .value = "other" },
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoder.getWritten().len);
+}
+
+test "encode startup rejects embedded nul in extra startup params before writing" {
+    var encoder = Encoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    try std.testing.expectError(
+        error.NullByte,
+        encoder.encodeStartupWithParams(
+            "postgres",
+            "db",
+            &.{.{ .name = "application_name", .value = "qail\x00zig" }},
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoder.getWritten().len);
 }
