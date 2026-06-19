@@ -314,23 +314,32 @@ pub const CodebaseScanner = struct {
         const lower = try toLowerAlloc(self.allocator, scan_line);
         defer self.allocator.free(lower);
 
-        const select_pos = findKeyword(lower, "select", 0) orelse return;
-        const from_pos = findKeyword(lower, "from", select_pos + "select".len) orelse return;
-        const table_start = skipSqlWs(lower, from_pos + "from".len);
-        const table_end = findSqlIdentifierEnd(lower, table_start);
-        if (table_end <= table_start) return;
+        var search_start: usize = 0;
+        while (findKeyword(lower, "select", search_start)) |select_pos| {
+            const from_pos = findKeyword(lower, "from", select_pos + "select".len) orelse {
+                search_start = select_pos + "select".len;
+                continue;
+            };
+            const table_start = skipSqlWs(lower, from_pos + "from".len);
+            const table_end = findSqlIdentifierEnd(lower, table_start);
+            if (table_end <= table_start) {
+                search_start = select_pos + "select".len;
+                continue;
+            }
 
-        var columns: std.ArrayList([]const u8) = .empty;
-        defer freeStringList(self.allocator, &columns);
-        try appendSqlProjectionColumns(&columns, self.allocator, line[select_pos + "select".len .. from_pos]);
-        try appendSqlJoinPredicateColumns(&columns, self.allocator, line, lower, table_end);
-        if (findKeyword(lower, "where", table_end)) |where_pos| {
-            try appendSqlPredicateColumns(&columns, self.allocator, line[where_pos + "where".len ..]);
+            var columns: std.ArrayList([]const u8) = .empty;
+            defer freeStringList(self.allocator, &columns);
+            try appendSqlProjectionColumns(&columns, self.allocator, line[select_pos + "select".len .. from_pos]);
+            try appendSqlJoinPredicateColumns(&columns, self.allocator, line, lower, table_end);
+            if (findKeyword(lower, "where", table_end)) |where_pos| {
+                try appendSqlPredicateColumns(&columns, self.allocator, line[where_pos + "where".len ..]);
+            }
+            try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
+
+            try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+            try self.appendSqlJoinedTableRefs(file_path, line_num, line, lower, table_end, columns.items);
+            search_start = select_pos + "select".len;
         }
-        try appendSqlReturningColumns(&columns, self.allocator, line, lower, table_end);
-
-        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
-        try self.appendSqlJoinedTableRefs(file_path, line_num, line, lower, table_end, columns.items);
     }
 
     /// Find SQL INSERT pattern
@@ -1759,6 +1768,21 @@ test "sql scanner tracks joined raw sql table references" {
     try expectHasColumn(scanner.refs.items[1].columns.items, "user_id");
 }
 
+test "sql scanner tracks multiple select sources on one raw sql line" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"WITH recent AS (SELECT user_id FROM orders WHERE status = $1) SELECT users.email FROM users JOIN recent ON recent.user_id = users.id\")",
+    );
+
+    try expectHasTable(scanner.refs.items, "orders");
+    try expectHasTable(scanner.refs.items, "users");
+}
+
 test "sql scanner extracts raw insert update delete columns" {
     const allocator = std.testing.allocator;
     var scanner = CodebaseScanner.init(allocator);
@@ -1886,4 +1910,11 @@ fn expectHasColumn(columns: []const []const u8, target: []const u8) !void {
         if (std.mem.eql(u8, col, target)) return;
     }
     return error.ExpectedColumnMissing;
+}
+
+fn expectHasTable(refs: []const CodeReference, target: []const u8) !void {
+    for (refs) |ref| {
+        if (std.mem.eql(u8, ref.table, target)) return;
+    }
+    return error.ExpectedTableMissing;
 }
