@@ -861,9 +861,62 @@ const Parser = struct {
             }
         }
 
+        try validateSchemaForeignKeys(&schema);
         return schema;
     }
 };
+
+const ForeignKeyReference = struct {
+    table: []const u8,
+    column: []const u8,
+};
+
+fn validateSchemaForeignKeys(schema: *const Schema) !void {
+    for (schema.tables.items) |table| {
+        for (table.columns.items) |col| {
+            const refs = col.references orelse continue;
+            const target = try parseForeignKeyReference(refs);
+            const target_table = schema.findTable(target.table) orelse return error.InvalidForeignKeyReference;
+            const target_column = target_table.findColumn(target.column) orelse return error.InvalidForeignKeyReference;
+            if (!target_column.primary_key and !target_column.unique) {
+                return error.InvalidForeignKeyReference;
+            }
+        }
+    }
+}
+
+fn parseForeignKeyReference(refs: []const u8) !ForeignKeyReference {
+    const trimmed = std.mem.trim(u8, refs, " \t\r\n");
+    const open = std.mem.indexOfScalar(u8, trimmed, '(') orelse return error.InvalidForeignKeyReference;
+    const close = std.mem.indexOfScalarPos(u8, trimmed, open + 1, ')') orelse return error.InvalidForeignKeyReference;
+    if (std.mem.indexOfScalarPos(u8, trimmed, close + 1, ')') != null) return error.InvalidForeignKeyReference;
+
+    const table = std.mem.trim(u8, trimmed[0..open], " \t\r\n");
+    const column = std.mem.trim(u8, trimmed[open + 1 .. close], " \t\r\n");
+    const trailing = std.mem.trim(u8, trimmed[close + 1 ..], " \t\r\n");
+
+    if (table.len == 0 or column.len == 0 or trailing.len != 0) return error.InvalidForeignKeyReference;
+    if (!isForeignKeyTableIdentifier(table) or !isForeignKeyColumnIdentifier(column)) {
+        return error.InvalidForeignKeyReference;
+    }
+    return .{ .table = table, .column = column };
+}
+
+fn isForeignKeyTableIdentifier(identifier: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, identifier, '.');
+    while (parts.next()) |part| {
+        if (!isForeignKeyColumnIdentifier(part)) return false;
+    }
+    return true;
+}
+
+fn isForeignKeyColumnIdentifier(identifier: []const u8) bool {
+    if (identifier.len == 0 or !Parser.isIdentifierStart(identifier[0])) return false;
+    for (identifier[1..]) |ch| {
+        if (!Parser.isIdentifierPart(ch)) return false;
+    }
+    return true;
+}
 
 fn validateTableCheckReferences(table: *const TableDef) !void {
     for (table.columns.items) |col| {
@@ -2046,6 +2099,70 @@ test "schema parser validates column check references" {
     try std.testing.expect(bookings.findColumn("starts_at") != null);
     try std.testing.expect(bookings.findColumn("ends_at") != null);
     try std.testing.expect(bookings.findColumn("code") != null);
+}
+
+test "schema parser validates foreign key references" {
+    const allocator = std.testing.allocator;
+
+    const valid_input =
+        \\table posts (
+        \\    id uuid primary_key,
+        \\    user_id uuid references users(id),
+        \\    author_email text references users(email)
+        \\)
+        \\
+        \\table users (
+        \\    id uuid primary_key,
+        \\    email text unique
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, valid_input);
+    defer schema.deinit();
+
+    const posts = schema.findTable("posts").?;
+    try std.testing.expectEqualStrings("users(id)", posts.findColumn("user_id").?.references.?);
+    try std.testing.expectEqualStrings("users(email)", posts.findColumn("author_email").?.references.?);
+
+    const invalid_inputs = [_][]const u8{
+        \\table posts (
+        \\    user_id uuid references users(id)
+        \\)
+        ,
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+        \\table posts (
+        \\    user_id uuid references users(missing_id)
+        \\)
+        ,
+        \\table users (
+        \\    email text
+        \\)
+        \\table posts (
+        \\    author_email text references users(email)
+        \\)
+        ,
+        \\table users (
+        \\    id uuid primary_key,
+        \\    email text unique
+        \\)
+        \\table posts (
+        \\    user_id uuid references users(id, email)
+        \\)
+        ,
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+        \\table posts (
+        \\    user_id uuid references users.id
+        \\)
+        ,
+    };
+
+    for (invalid_inputs) |input| {
+        try std.testing.expectError(error.InvalidForeignKeyReference, Schema.parse(allocator, input));
+    }
 }
 
 test "parse policy block" {

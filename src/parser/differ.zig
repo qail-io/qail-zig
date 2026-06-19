@@ -804,6 +804,10 @@ test "diff new reference column with default fails closed" {
     const allocator = std.testing.allocator;
 
     const old_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
         \\table orders (
         \\    id uuid primary_key
         \\)
@@ -812,6 +816,10 @@ test "diff new reference column with default fails closed" {
     defer old.deinit();
 
     const new_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
         \\table orders (
         \\    id uuid primary_key,
         \\    tenant_id uuid references tenants(id) default '00000000-0000-0000-0000-000000000000'
@@ -827,6 +835,10 @@ test "diff new nullable reference column preserves reference constraint" {
     const allocator = std.testing.allocator;
 
     const old_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
         \\table orders (
         \\    id uuid primary_key
         \\)
@@ -835,6 +847,10 @@ test "diff new nullable reference column preserves reference constraint" {
     defer old.deinit();
 
     const new_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
         \\table orders (
         \\    id uuid primary_key,
         \\    tenant_id uuid references tenants(id)
@@ -894,6 +910,10 @@ test "diff existing column constraint drift fails closed" {
     try std.testing.expectError(error.UnsupportedDefaultConstraintDrift, diffSchemas(allocator, &old, &with_default));
 
     const reference_old_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
         \\table orders (
         \\    tenant_id uuid
         \\)
@@ -902,6 +922,10 @@ test "diff existing column constraint drift fails closed" {
     defer reference_old.deinit();
 
     const reference_new_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
         \\table orders (
         \\    tenant_id uuid references tenants(id)
         \\)
