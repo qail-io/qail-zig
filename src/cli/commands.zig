@@ -19,10 +19,7 @@ pub fn make(comptime Cli: type) type {
         };
 
         fn freeParsedCmd(allocator: Allocator, cmd: *const QailCmd) void {
-            if (cmd.columns.len > 0) allocator.free(cmd.columns);
-            if (cmd.where_clauses.len > 0) allocator.free(cmd.where_clauses);
-            if (cmd.joins.len > 0) allocator.free(cmd.joins);
-            if (cmd.order_by.len > 0) allocator.free(cmd.order_by);
+            @import("../parser/mod.zig").deinitParsedCommand(allocator, cmd);
         }
 
         fn readFileAlloc(allocator: Allocator, path: []const u8, max_bytes: usize) ![]u8 {

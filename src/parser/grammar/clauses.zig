@@ -102,17 +102,21 @@ pub fn parseWhereClause(allocator: std.mem.Allocator, input: []const u8) ParseEr
     trimmed = try skipWhitespace1(after_where);
 
     var clauses: std.ArrayList(WhereClause) = .empty;
-    errdefer clauses.deinit(allocator);
+    errdefer {
+        freeWhereClauseAllocations(allocator, clauses.items);
+        clauses.deinit(allocator);
+    }
 
     // Parse first condition
-    const first = try parseCondition(trimmed);
+    const first = try parseCondition(allocator, trimmed);
+    clauses.append(allocator, .{ .condition = first.value, .logical_op = .@"and" }) catch {
+        freeConditionValueAllocations(allocator, &first.value);
+        return ParseError.InvalidSyntax;
+    };
     trimmed = skipWhitespace(first.remaining);
 
     var saw_and = false;
     var saw_or = false;
-
-    var tail_conditions: std.ArrayList(Condition) = .empty;
-    defer tail_conditions.deinit(allocator);
 
     // Parse remaining conditions with AND/OR
     while (true) {
@@ -132,8 +136,11 @@ pub fn parseWhereClause(allocator: std.mem.Allocator, input: []const u8) ParseEr
             .@"or" => saw_or = true,
         }
 
-        const cond = try parseCondition(trimmed);
-        tail_conditions.append(allocator, cond.value) catch return ParseError.InvalidSyntax;
+        const cond = try parseCondition(allocator, trimmed);
+        clauses.append(allocator, .{ .condition = cond.value, .logical_op = .@"and" }) catch {
+            freeConditionValueAllocations(allocator, &cond.value);
+            return ParseError.InvalidSyntax;
+        };
         trimmed = skipWhitespace(cond.remaining);
     }
 
@@ -144,10 +151,8 @@ pub fn parseWhereClause(allocator: std.mem.Allocator, input: []const u8) ParseEr
     }
 
     const chain_op: LogicalOp = if (saw_or) .@"or" else .@"and";
-
-    clauses.append(allocator, .{ .condition = first.value, .logical_op = chain_op }) catch return ParseError.InvalidSyntax;
-    for (tail_conditions.items) |cond| {
-        clauses.append(allocator, .{ .condition = cond, .logical_op = chain_op }) catch return ParseError.InvalidSyntax;
+    for (clauses.items) |*clause| {
+        clause.logical_op = chain_op;
     }
 
     return .{
@@ -157,7 +162,7 @@ pub fn parseWhereClause(allocator: std.mem.Allocator, input: []const u8) ParseEr
 }
 
 /// Parse a single condition: col = val
-fn parseCondition(input: []const u8) ParseError!ParseResult(Condition) {
+fn parseCondition(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult(Condition) {
     const trimmed = skipWhitespace(input);
 
     // Parse column name
@@ -176,13 +181,72 @@ fn parseCondition(input: []const u8) ParseError!ParseResult(Condition) {
         };
     }
 
-    // Parse value
-    const val = try parseValue(remaining);
+    const val = if (op.value == .in or op.value == .not_in)
+        try parseInValue(allocator, remaining)
+    else
+        try parseValue(remaining);
 
     return .{
         .remaining = val.remaining,
         .value = Condition.init(col.value, op.value, val.value),
     };
+}
+
+fn parseInValue(allocator: std.mem.Allocator, input: []const u8) ParseError!ParseResult(Value) {
+    var trimmed = skipWhitespace(input);
+    if (trimmed.len == 0) return ParseError.UnexpectedEnd;
+
+    if (trimmed[0] != '(') {
+        return parseValue(trimmed);
+    }
+
+    trimmed = skipWhitespace(trimmed[1..]);
+    if (trimmed.len == 0 or trimmed[0] == ')') return ParseError.InvalidSyntax;
+
+    var values: std.ArrayList(Value) = .empty;
+    errdefer values.deinit(allocator);
+
+    while (true) {
+        const value = try parseValue(trimmed);
+        values.append(allocator, value.value) catch return ParseError.InvalidSyntax;
+        trimmed = skipWhitespace(value.remaining);
+
+        if (trimmed.len == 0) return ParseError.InvalidSyntax;
+
+        if (trimmed[0] == ',') {
+            trimmed = skipWhitespace(trimmed[1..]);
+            if (trimmed.len == 0 or trimmed[0] == ')') return ParseError.InvalidSyntax;
+            continue;
+        }
+
+        if (trimmed[0] != ')') return ParseError.InvalidSyntax;
+
+        const owned_values = values.toOwnedSlice(allocator) catch return ParseError.InvalidSyntax;
+        return .{
+            .remaining = trimmed[1..],
+            .value = .{ .array = owned_values },
+        };
+    }
+}
+
+pub fn freeWhereClauseAllocations(allocator: std.mem.Allocator, where_clauses: []const WhereClause) void {
+    for (where_clauses) |*where_clause| {
+        freeConditionValueAllocations(allocator, &where_clause.condition);
+    }
+}
+
+fn freeConditionValueAllocations(allocator: std.mem.Allocator, condition: *const Condition) void {
+    freeValueAllocations(allocator, condition.value);
+}
+
+fn freeValueAllocations(allocator: std.mem.Allocator, value: Value) void {
+    switch (value) {
+        .array => |values| {
+            for (values) |item| freeValueAllocations(allocator, item);
+            if (values.len > 0) allocator.free(values);
+        },
+        else => {},
+    }
 }
 
 // ==================== Order By Clause ====================
@@ -348,6 +412,38 @@ test "parseWhereClause rejects mixed and/or chains" {
         ParseError.InvalidSyntax,
         parseWhereClause(allocator, "where active = true and role = 'admin' or email = 'a@b.c'"),
     );
+}
+
+test "parseWhereClause parses in lists and named parameters" {
+    const allocator = std.testing.allocator;
+
+    const list_result = try parseWhereClause(allocator, "where id in (1, 2, 3)");
+    defer allocator.free(list_result.value);
+    defer freeWhereClauseAllocations(allocator, list_result.value);
+
+    try std.testing.expectEqual(@as(usize, 1), list_result.value.len);
+    try std.testing.expectEqual(Operator.in, list_result.value[0].condition.op);
+    try std.testing.expect(list_result.value[0].condition.value == .array);
+    try std.testing.expectEqual(@as(usize, 3), list_result.value[0].condition.value.array.len);
+    try std.testing.expectEqual(Value{ .int = 1 }, list_result.value[0].condition.value.array[0]);
+    try std.testing.expectEqual(Value{ .int = 2 }, list_result.value[0].condition.value.array[1]);
+    try std.testing.expectEqual(Value{ .int = 3 }, list_result.value[0].condition.value.array[2]);
+
+    const param_result = try parseWhereClause(allocator, "where id not in :ids");
+    defer allocator.free(param_result.value);
+    defer freeWhereClauseAllocations(allocator, param_result.value);
+
+    try std.testing.expectEqual(@as(usize, 1), param_result.value.len);
+    try std.testing.expectEqual(Operator.not_in, param_result.value[0].condition.op);
+    try std.testing.expect(param_result.value[0].condition.value == .named_param);
+    try std.testing.expectEqualStrings("ids", param_result.value[0].condition.value.named_param);
+}
+
+test "parseWhereClause rejects empty in lists" {
+    const allocator = std.testing.allocator;
+
+    try std.testing.expectError(ParseError.InvalidSyntax, parseWhereClause(allocator, "where id in ()"));
+    try std.testing.expectError(ParseError.InvalidSyntax, parseWhereClause(allocator, "where id in (1,)"));
 }
 
 test "parseOrderByClause" {

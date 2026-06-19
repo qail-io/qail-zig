@@ -26,6 +26,7 @@ pub const computeChecksum = migrations.computeChecksum;
 /// Parse QAIL text syntax into QailCmd AST
 pub const parse = grammar.parse;
 pub const parseRoot = grammar.parseRoot;
+pub const deinitParsedCommand = grammar.deinitParsedCommand;
 
 test {
     @import("std").testing.refAllDecls(@This());

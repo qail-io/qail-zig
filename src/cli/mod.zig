@@ -329,10 +329,7 @@ pub fn run(allocator: Allocator, cmd: Command) !void {
 }
 
 pub fn freeParsedCmd(allocator: Allocator, cmd: *const QailCmd) void {
-    if (cmd.columns.len > 0) allocator.free(cmd.columns);
-    if (cmd.where_clauses.len > 0) allocator.free(cmd.where_clauses);
-    if (cmd.joins.len > 0) allocator.free(cmd.joins);
-    if (cmd.order_by.len > 0) allocator.free(cmd.order_by);
+    @import("../parser/mod.zig").deinitParsedCommand(allocator, cmd);
 }
 
 pub fn deinitFetchedRows(allocator: Allocator, rows: []@import("../driver/row.zig").PgRow) void {

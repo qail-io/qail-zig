@@ -45,11 +45,18 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) !QailCmd {
     return result.value;
 }
 
-fn freeParsedCommandAllocations(allocator: std.mem.Allocator, cmd: *QailCmd) void {
+pub fn deinitParsedCommand(allocator: std.mem.Allocator, cmd: *const QailCmd) void {
     if (cmd.joins.len > 0) allocator.free(cmd.joins);
     if (cmd.columns.len > 0) allocator.free(cmd.columns);
-    if (cmd.where_clauses.len > 0) allocator.free(cmd.where_clauses);
+    if (cmd.where_clauses.len > 0) {
+        clauses.freeWhereClauseAllocations(allocator, cmd.where_clauses);
+        allocator.free(cmd.where_clauses);
+    }
     if (cmd.order_by.len > 0) allocator.free(cmd.order_by);
+}
+
+fn freeParsedCommandAllocations(allocator: std.mem.Allocator, cmd: *const QailCmd) void {
+    deinitParsedCommand(allocator, cmd);
 }
 
 /// Parse root entry point - returns QailCmd and remaining input
@@ -193,7 +200,7 @@ test "parse get with fields" {
     const allocator = std.testing.allocator;
 
     const cmd = try parse(allocator, "get users fields id, email");
-    defer allocator.free(cmd.columns);
+    defer deinitParsedCommand(allocator, &cmd);
 
     try std.testing.expectEqual(CmdKind.get, cmd.kind);
     try std.testing.expectEqual(@as(usize, 2), cmd.columns.len);
@@ -203,7 +210,7 @@ test "parse get with where" {
     const allocator = std.testing.allocator;
 
     const cmd = try parse(allocator, "get users where active = true");
-    defer allocator.free(cmd.where_clauses);
+    defer deinitParsedCommand(allocator, &cmd);
 
     try std.testing.expectEqual(CmdKind.get, cmd.kind);
     try std.testing.expectEqual(@as(usize, 1), cmd.where_clauses.len);
@@ -219,11 +226,7 @@ test "parse full query" {
         \\order by created_at desc
         \\limit 10
     );
-    defer {
-        allocator.free(cmd.columns);
-        allocator.free(cmd.where_clauses);
-        allocator.free(cmd.order_by);
-    }
+    defer deinitParsedCommand(allocator, &cmd);
 
     try std.testing.expectEqual(CmdKind.get, cmd.kind);
     try std.testing.expectEqualStrings("users", cmd.table);
