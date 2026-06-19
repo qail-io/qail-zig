@@ -1725,12 +1725,20 @@ fn writeInsertTargetColumn(writer: anytype, expr: *const Expr) !void {
     }
 }
 
+fn writeIdentifierOrStar(writer: anytype, value: []const u8) !void {
+    if (std.mem.eql(u8, value, "*")) {
+        try writer.writeByte('*');
+    } else {
+        try writeIdentifierOrError(writer, value);
+    }
+}
+
 fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
     switch (expr.*) {
         .star => try writer.writeAll("*"),
-        .named => |name| try writer.writeAll(name),
+        .named => |name| try writeIdentifierOrError(writer, name),
         .aliased => |a| {
-            try writer.writeAll(a.name);
+            try writeIdentifierOrError(writer, a.name);
             try writer.writeAll(" AS ");
             try writeIdentifierMaybeQuoted(writer, a.alias);
         },
@@ -1738,7 +1746,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             try writer.writeAll(agg.func.toSql());
             try writer.writeAll("(");
             if (agg.distinct) try writer.writeAll("DISTINCT ");
-            try writer.writeAll(agg.column);
+            try writeIdentifierOrStar(writer, agg.column);
             try writer.writeAll(")");
             if (agg.alias) |alias| {
                 try writer.writeAll(" AS ");
@@ -1830,7 +1838,7 @@ fn writeExpr(writer: anytype, expr: *const Expr) anyerror!void {
             }
         },
         .json_access => |ja| {
-            try writer.writeAll(ja.column);
+            try writeIdentifierOrError(writer, ja.column);
             for (ja.path) |seg| {
                 if (seg.as_text) {
                     try writer.writeAll("->>'");
@@ -2836,8 +2844,11 @@ test "ast encoder quotes expression identifiers and escapes json paths" {
     const name = Expr.col("name");
     const profile = Expr.col("profile");
     const cols = [_]Expr{
+        Expr.col("name; DROP TABLE users; --"),
+        Expr.colAs("email; DROP TABLE users; --", "safe_alias"),
+        .{ .aggregate = .{ .func = .sum, .column = "amount; DROP TABLE users; --" } },
         .{ .json_access = .{
-            .column = "data",
+            .column = "data; DROP TABLE users; --",
             .path = &[_]ast.expr.JsonPathSegment{.{ .key = "a' || pg_sleep(1) --", .as_text = true }},
         } },
         .{ .collate = .{
@@ -2856,9 +2867,14 @@ test "ast encoder quotes expression identifiers and escapes json paths" {
     try encoder.writeAstToSql(writer.writer(), &cmd);
     const sql = writer.getWritten();
 
-    try std.testing.expect(std.mem.indexOf(u8, sql, "data->>'a'' || pg_sleep(1) --'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"name; DROP TABLE users; --\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"email; DROP TABLE users; --\" AS safe_alias") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SUM(\"amount; DROP TABLE users; --\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"data; DROP TABLE users; --\"->>'a'' || pg_sleep(1) --'") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "COLLATE \"C\"\"; DROP TABLE users; --\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, ").\"field; DROP TABLE users; --\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SELECT name; DROP") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SUM(amount; DROP") == null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "COLLATE \"C\"; DROP") == null);
     try std.testing.expect(std.mem.indexOf(u8, sql, ").field; DROP") == null);
 }

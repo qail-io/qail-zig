@@ -143,9 +143,9 @@ fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition) 
 pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
     switch (ex.*) {
         .star => try writer.writeAll("*"),
-        .named => |name| try writer.writeAll(name),
+        .named => |name| try writeIdentifierOrError(writer, name),
         .aliased => |a| {
-            try writer.writeAll(a.name);
+            try writeIdentifierOrError(writer, a.name);
             try writer.writeAll(" AS ");
             try writeIdentifierMaybeQuoted(writer, a.alias);
         },
@@ -153,7 +153,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
             try writer.writeAll(agg.func.toSql());
             try writer.writeAll("(");
             if (agg.distinct) try writer.writeAll("DISTINCT ");
-            try writer.writeAll(agg.column);
+            try writeIdentifierOrStar(writer, agg.column);
             try writer.writeAll(")");
             if (agg.alias) |alias| {
                 try writer.writeAll(" AS ");
@@ -245,7 +245,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
             }
         },
         .json_access => |ja| {
-            try writer.writeAll(ja.column);
+            try writeIdentifierOrError(writer, ja.column);
             for (ja.path) |seg| {
                 if (seg.as_text) {
                     try writer.writeAll("->>'");
@@ -403,6 +403,14 @@ pub fn writeInsertTargetColumn(writer: anytype, ex: *const Expr) !void {
     switch (ex.*) {
         .named => |name| try writeIdentifierOrError(writer, name),
         else => try writer.writeAll(INVALID_INSERT_COLUMN),
+    }
+}
+
+fn writeIdentifierOrStar(writer: anytype, value: []const u8) !void {
+    if (std.mem.eql(u8, value, "*")) {
+        try writer.writeByte('*');
+    } else {
+        try writeIdentifierOrError(writer, value);
     }
 }
 

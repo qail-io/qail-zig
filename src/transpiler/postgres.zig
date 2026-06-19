@@ -701,8 +701,11 @@ test "trusted transpiler quotes expression identifiers and escapes json paths" {
     const name = Expr.col("name");
     const profile = Expr.col("profile");
     const cols = [_]Expr{
+        Expr.col("name; DROP TABLE users; --"),
+        Expr.colAs("email; DROP TABLE users; --", "safe_alias"),
+        .{ .aggregate = .{ .func = .sum, .column = "amount; DROP TABLE users; --" } },
         .{ .json_access = .{
-            .column = "data",
+            .column = "data; DROP TABLE users; --",
             .path = &[_]ast.expr.JsonPathSegment{.{ .key = "a' || pg_sleep(1) --", .as_text = true }},
         } },
         .{ .collate = .{
@@ -718,9 +721,14 @@ test "trusted transpiler quotes expression identifiers and escapes json paths" {
     const sql = try toSqlTrusted(std.testing.allocator, &cmd);
     defer std.testing.allocator.free(sql);
 
-    try std.testing.expect(std.mem.indexOf(u8, sql, "data->>'a'' || pg_sleep(1) --'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"name; DROP TABLE users; --\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"email; DROP TABLE users; --\" AS safe_alias") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SUM(\"amount; DROP TABLE users; --\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "\"data; DROP TABLE users; --\"->>'a'' || pg_sleep(1) --'") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "COLLATE \"C\"\"; DROP TABLE users; --\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, sql, ").\"field; DROP TABLE users; --\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SELECT name; DROP") == null);
+    try std.testing.expect(std.mem.indexOf(u8, sql, "SUM(amount; DROP") == null);
     try std.testing.expect(std.mem.indexOf(u8, sql, "COLLATE \"C\"; DROP") == null);
     try std.testing.expect(std.mem.indexOf(u8, sql, ").field; DROP") == null);
 }
