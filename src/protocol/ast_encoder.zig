@@ -2030,15 +2030,31 @@ fn writeCallTarget(writer: anytype, target: []const u8) !void {
 fn functionArgsAreSafe(args: []const u8) bool {
     const trimmed = std.mem.trim(u8, args, " \t\r\n");
     if (trimmed.len == 0) return true;
+    if (std.mem.indexOfScalar(u8, args, 0) != null or
+        std.mem.indexOfScalar(u8, args, ';') != null or
+        std.mem.indexOfScalar(u8, args, '\n') != null or
+        std.mem.indexOfScalar(u8, args, '\r') != null or
+        std.mem.indexOf(u8, args, "--") != null or
+        std.mem.indexOf(u8, args, "/*") != null or
+        std.mem.indexOf(u8, args, "*/") != null)
+    {
+        return false;
+    }
 
     var start: usize = 0;
     var depth: usize = 0;
+    var bracket_depth: usize = 0;
     for (args, 0..) |ch, idx| {
         switch (ch) {
             '(' => depth += 1,
             ')' => {
                 if (depth == 0) return false;
                 depth -= 1;
+            },
+            '[' => bracket_depth += 1,
+            ']' => {
+                if (bracket_depth == 0) return false;
+                bracket_depth -= 1;
             },
             ',' => if (depth == 0) {
                 const part = std.mem.trim(u8, args[start..idx], " \t\r\n");
@@ -2048,7 +2064,7 @@ fn functionArgsAreSafe(args: []const u8) bool {
             else => {},
         }
     }
-    if (depth != 0) return false;
+    if (depth != 0 or bracket_depth != 0) return false;
 
     const tail = std.mem.trim(u8, args[start..], " \t\r\n");
     return tail.len != 0 and checkedSqlTypeFragment(tail) != null;
@@ -3737,14 +3753,20 @@ test "ast encoder function signatures and session settings are sanitized" {
     defer encoder.deinit();
 
     var valid_drop = QailCmd.dropFunction("");
-    valid_drop.payload = "public.cleanup(numeric(10,2), text)";
+    valid_drop.payload = "public.price_quote(numeric(12,2), text[])";
     var valid_drop_buf: [256]u8 = undefined;
     var valid_drop_writer = io.FixedBufferWriter.init(&valid_drop_buf);
     try encoder.writeAstToSql(valid_drop_writer.writer(), &valid_drop);
     try std.testing.expectEqualStrings(
-        "DROP FUNCTION IF EXISTS public.cleanup(numeric(10,2), text)",
+        "DROP FUNCTION IF EXISTS public.price_quote(numeric(12,2), text[])",
         valid_drop_writer.getWritten(),
     );
+
+    try std.testing.expect(functionArgsAreSafe("numeric(12,2), text[]"));
+    try std.testing.expect(!functionArgsAreSafe("numeric(12,2), text["));
+    try std.testing.expect(!functionArgsAreSafe("numeric(12,2), text]"));
+    try std.testing.expect(!functionArgsAreSafe("int\x00"));
+    try std.testing.expect(!functionArgsAreSafe("int\ntext"));
 
     var malicious_drop = QailCmd.dropFunction("");
     malicious_drop.payload = "public.cleanup(int); DROP TABLE users; --";
@@ -3754,6 +3776,16 @@ test "ast encoder function signatures and session settings are sanitized" {
     try std.testing.expectEqualStrings(
         "DROP FUNCTION IF EXISTS public.\"cleanup(int); DROP TABLE users; --\"",
         malicious_drop_writer.getWritten(),
+    );
+
+    var invalid_args_drop = QailCmd.dropFunction("");
+    invalid_args_drop.payload = "public.cleanup(text[)";
+    var invalid_args_buf: [256]u8 = undefined;
+    var invalid_args_writer = io.FixedBufferWriter.init(&invalid_args_buf);
+    try encoder.writeAstToSql(invalid_args_writer.writer(), &invalid_args_drop);
+    try std.testing.expectEqualStrings(
+        "DROP FUNCTION IF EXISTS public.\"cleanup(text[)\"",
+        invalid_args_writer.getWritten(),
     );
 
     var session_set = QailCmd.sessionSet("app.current_tenant");
