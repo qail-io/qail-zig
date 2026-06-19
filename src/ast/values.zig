@@ -75,7 +75,10 @@ pub const Value = union(enum) {
             .null => try writer.writeAll("NULL"),
             .bool => |b| try writer.writeAll(if (b) "true" else "false"),
             .int => |i| try writer.print("{d}", .{i}),
-            .float => |f| try writer.print("{d}", .{f}),
+            .float => |f| {
+                try ensureFiniteFloat64(f);
+                try writer.print("{d}", .{f});
+            },
             .string => |s| try writeSqlStringLiteral(writer, s),
             .bytes => |b| {
                 try writer.writeAll("'\\x");
@@ -122,6 +125,7 @@ pub const Value = union(enum) {
             .vector => |v| {
                 try writer.writeByte('[');
                 for (v, 0..) |val, i| {
+                    try ensureFiniteFloat32(val);
                     if (i > 0) try writer.writeAll(", ");
                     try writer.print("{d}", .{val});
                 }
@@ -174,7 +178,28 @@ pub const Value = union(enum) {
     pub fn fromJson(j: []const u8) Value {
         return .{ .json = j };
     }
+
+    pub fn validateFinite(self: Value) !void {
+        switch (self) {
+            .float => |f| if (!std.math.isFinite(f)) return error.NonFiniteSqlValue,
+            .vector => |v| for (v) |val| {
+                if (!std.math.isFinite(val)) return error.NonFiniteSqlValue;
+            },
+            .array => |arr| for (arr) |value| {
+                try value.validateFinite();
+            },
+            else => {},
+        }
+    }
 };
+
+fn ensureFiniteFloat64(value: f64) error{WriteFailed}!void {
+    if (!std.math.isFinite(value)) return error.WriteFailed;
+}
+
+fn ensureFiniteFloat32(value: f32) error{WriteFailed}!void {
+    if (!std.math.isFinite(value)) return error.WriteFailed;
+}
 
 fn isSafeIdentifier(value: []const u8) bool {
     if (value.len == 0) return false;
@@ -282,6 +307,21 @@ test "value format validates raw function fragments" {
     var bad_writer = io.FixedBufferWriter.init(&buf);
     try (Value{ .function = "now(); DROP TABLE users; --" }).format(bad_writer.writer());
     try std.testing.expectEqualStrings("/* ERROR: Invalid function expression */", bad_writer.getWritten());
+}
+
+test "value format rejects non-finite floats and vectors" {
+    var buf: [64]u8 = undefined;
+
+    try std.testing.expectError(error.NonFiniteSqlValue, (Value{ .float = std.math.nan(f64) }).validateFinite());
+
+    var nan_writer = io.FixedBufferWriter.init(&buf);
+    try std.testing.expectError(error.WriteFailed, (Value{ .float = std.math.nan(f64) }).format(nan_writer.writer()));
+
+    const vector = [_]f32{ 1.0, std.math.inf(f32) };
+    try std.testing.expectError(error.NonFiniteSqlValue, (Value{ .vector = &vector }).validateFinite());
+
+    var vector_writer = io.FixedBufferWriter.init(&buf);
+    try std.testing.expectError(error.WriteFailed, (Value{ .vector = &vector }).format(vector_writer.writer()));
 }
 
 // ==================== Comptime Exhaustive Tests ====================

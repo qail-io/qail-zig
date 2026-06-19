@@ -2920,6 +2920,7 @@ fn writeFrameBound(writer: anytype, bound: ast.expr.FrameBound) !void {
 }
 
 fn writeValue(writer: anytype, val: *const Value) !void {
+    try val.validateFinite();
     try val.format(writer);
 }
 
@@ -4625,4 +4626,16 @@ test "ast encoder rejects embedded nul in rendered sql cstring" {
         .limit(1);
 
     try std.testing.expectError(error.NullByte, encoder.encodeQuery(&cmd));
+}
+
+test "ast encoder rejects non-finite value rendering" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "score", .value = .{ .float = std.math.inf(f64) } },
+    };
+    const cmd = QailCmd.add("events").values(&assigns);
+
+    try std.testing.expectError(error.NonFiniteSqlValue, encoder.encodeQuery(&cmd));
 }
