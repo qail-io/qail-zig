@@ -2214,9 +2214,158 @@ fn checkedFunctionDefinitionPayload(payload: []const u8) ?[]const u8 {
     return trimmed;
 }
 
+const TokenCursor = struct {
+    input: []const u8,
+    pos: usize = 0,
+
+    fn next(self: *TokenCursor) ?[]const u8 {
+        while (self.pos < self.input.len and std.ascii.isWhitespace(self.input[self.pos])) : (self.pos += 1) {}
+        if (self.pos >= self.input.len) return null;
+        const start = self.pos;
+        while (self.pos < self.input.len and !std.ascii.isWhitespace(self.input[self.pos])) : (self.pos += 1) {}
+        return self.input[start..self.pos];
+    }
+
+    fn peek(self: *TokenCursor) ?[]const u8 {
+        const saved = self.pos;
+        defer self.pos = saved;
+        return self.next();
+    }
+
+    fn done(self: *TokenCursor) bool {
+        return self.peek() == null;
+    }
+};
+
+const TriggerEventSeen = enum {
+    insert,
+    update,
+    delete,
+    truncate,
+};
+
+fn triggerEventFromToken(token: []const u8) ?TriggerEventSeen {
+    if (std.ascii.eqlIgnoreCase(token, "INSERT")) return .insert;
+    if (std.ascii.eqlIgnoreCase(token, "UPDATE")) return .update;
+    if (std.ascii.eqlIgnoreCase(token, "DELETE")) return .delete;
+    if (std.ascii.eqlIgnoreCase(token, "TRUNCATE")) return .truncate;
+    return null;
+}
+
+fn markTriggerEvent(seen: *[4]bool, event: TriggerEventSeen) bool {
+    const idx: usize = switch (event) {
+        .insert => 0,
+        .update => 1,
+        .delete => 2,
+        .truncate => 3,
+    };
+    if (seen[idx]) return false;
+    seen[idx] = true;
+    return true;
+}
+
+fn anyTriggerEvent(seen: *const [4]bool) bool {
+    return seen[0] or seen[1] or seen[2] or seen[3];
+}
+
+fn isSafeNativeTableRef(value: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, value, '.');
+    var saw_part = false;
+    while (parts.next()) |part| {
+        if (!isSafeNativeIdentifier(part)) return false;
+        saw_part = true;
+    }
+    return saw_part;
+}
+
+fn trimCommaToken(token: []const u8) []const u8 {
+    return std.mem.trim(u8, token, ",");
+}
+
+fn parseTriggerUpdateColumns(cursor: *TokenCursor) bool {
+    var saw_column = false;
+    while (cursor.peek()) |raw| {
+        if (std.ascii.eqlIgnoreCase(raw, "OR") or
+            std.ascii.eqlIgnoreCase(raw, "ON") or
+            triggerEventFromToken(raw) != null)
+        {
+            break;
+        }
+
+        _ = cursor.next();
+        var columns = std.mem.splitScalar(u8, raw, ',');
+        while (columns.next()) |column_raw| {
+            const column = trimCommaToken(column_raw);
+            if (column.len == 0) continue;
+            if (!isSafeNativeIdentifier(column)) return false;
+            saw_column = true;
+        }
+    }
+    return saw_column;
+}
+
+fn triggerFunctionTargetIsSafe(target: []const u8) bool {
+    const trimmed = std.mem.trim(u8, target, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.indexOfScalar(u8, trimmed, 0) != null) return false;
+    if (std.mem.indexOfScalar(u8, trimmed, '(')) |open| {
+        if (!std.mem.endsWith(u8, trimmed, ")")) return false;
+        const name = std.mem.trim(u8, trimmed[0..open], " \t\r\n");
+        const args = trimmed[open + 1 .. trimmed.len - 1];
+        return isSafeNativeTableRef(name) and (std.mem.trim(u8, args, " \t\r\n").len == 0 or functionArgsAreSafe(args));
+    }
+    return isSafeNativeTableRef(trimmed);
+}
+
 fn checkedTriggerDefinitionPayload(payload: []const u8) ?[]const u8 {
     const trimmed = trimTrailingSemicolon(payload);
     if (containsRawDelimiter(trimmed)) return null;
+    var cursor = TokenCursor{ .input = trimmed };
+
+    const timing = cursor.next() orelse return null;
+    if (std.ascii.eqlIgnoreCase(timing, "INSTEAD")) {
+        const of = cursor.next() orelse return null;
+        if (!std.ascii.eqlIgnoreCase(of, "OF")) return null;
+    } else if (!std.ascii.eqlIgnoreCase(timing, "BEFORE") and !std.ascii.eqlIgnoreCase(timing, "AFTER")) {
+        return null;
+    }
+
+    var seen_events = [_]bool{ false, false, false, false };
+    while (cursor.peek()) |token| {
+        if (std.ascii.eqlIgnoreCase(token, "ON")) break;
+        _ = cursor.next();
+        if (std.ascii.eqlIgnoreCase(token, "OR")) continue;
+        const event = triggerEventFromToken(token) orelse return null;
+        if (!markTriggerEvent(&seen_events, event)) return null;
+        if (event == .update and cursor.peek() != null and std.ascii.eqlIgnoreCase(cursor.peek().?, "OF")) {
+            _ = cursor.next();
+            if (!parseTriggerUpdateColumns(&cursor)) return null;
+        }
+    }
+    if (!anyTriggerEvent(&seen_events)) return null;
+
+    const on = cursor.next() orelse return null;
+    if (!std.ascii.eqlIgnoreCase(on, "ON")) return null;
+    const table = cursor.next() orelse return null;
+    if (!isSafeNativeTableRef(table)) return null;
+
+    if (cursor.peek()) |token| {
+        if (std.ascii.eqlIgnoreCase(token, "FOR")) {
+            _ = cursor.next();
+            const each = cursor.next() orelse return null;
+            if (!std.ascii.eqlIgnoreCase(each, "EACH")) return null;
+            const granularity = cursor.next() orelse return null;
+            if (!std.ascii.eqlIgnoreCase(granularity, "ROW") and !std.ascii.eqlIgnoreCase(granularity, "STATEMENT")) return null;
+        }
+    }
+
+    const execute = cursor.next() orelse return null;
+    if (!std.ascii.eqlIgnoreCase(execute, "EXECUTE")) return null;
+    const function_kw = cursor.next() orelse return null;
+    if (!std.ascii.eqlIgnoreCase(function_kw, "FUNCTION") and !std.ascii.eqlIgnoreCase(function_kw, "PROCEDURE")) return null;
+    const target = cursor.next() orelse return null;
+    if (!triggerFunctionTargetIsSafe(target)) return null;
+    if (!cursor.done()) return null;
+
     return trimmed;
 }
 
@@ -3663,11 +3812,45 @@ test "ast encoder validates trusted function and trigger payloads" {
         trigger_writer.getWritten(),
     );
 
+    var qualified_trigger = QailCmd.createTrigger("touch_users_updated");
+    qualified_trigger.payload = "BEFORE UPDATE OF updated_at,email ON app.users FOR EACH ROW EXECUTE FUNCTION util.touch()";
+    var qualified_trigger_buf: [512]u8 = undefined;
+    var qualified_trigger_writer = io.FixedBufferWriter.init(&qualified_trigger_buf);
+    try encoder.writeAstToSql(qualified_trigger_writer.writer(), &qualified_trigger);
+    try std.testing.expectEqualStrings(
+        "CREATE TRIGGER touch_users_updated BEFORE UPDATE OF updated_at,email ON app.users FOR EACH ROW EXECUTE FUNCTION util.touch()",
+        qualified_trigger_writer.getWritten(),
+    );
+
     var unsafe_trigger = QailCmd.createTrigger("touch_users_updated");
     unsafe_trigger.payload = "BEFORE UPDATE ON users; DROP TABLE users; --";
     var unsafe_trigger_buf: [512]u8 = undefined;
     var unsafe_trigger_writer = io.FixedBufferWriter.init(&unsafe_trigger_buf);
     try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(unsafe_trigger_writer.writer(), &unsafe_trigger));
+
+    var duplicate_event = QailCmd.createTrigger("touch_users_updated");
+    duplicate_event.payload = "BEFORE UPDATE OR UPDATE ON users EXECUTE FUNCTION touch_users()";
+    var duplicate_event_buf: [512]u8 = undefined;
+    var duplicate_event_writer = io.FixedBufferWriter.init(&duplicate_event_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(duplicate_event_writer.writer(), &duplicate_event));
+
+    var invalid_update_column = QailCmd.createTrigger("touch_users_updated");
+    invalid_update_column.payload = "BEFORE UPDATE OF bad-name ON users EXECUTE FUNCTION touch_users()";
+    var invalid_update_column_buf: [512]u8 = undefined;
+    var invalid_update_column_writer = io.FixedBufferWriter.init(&invalid_update_column_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(invalid_update_column_writer.writer(), &invalid_update_column));
+
+    var invalid_table = QailCmd.createTrigger("touch_users_updated");
+    invalid_table.payload = "BEFORE UPDATE ON bad-table EXECUTE FUNCTION touch_users()";
+    var invalid_table_buf: [512]u8 = undefined;
+    var invalid_table_writer = io.FixedBufferWriter.init(&invalid_table_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(invalid_table_writer.writer(), &invalid_table));
+
+    var trailing_trigger = QailCmd.createTrigger("touch_users_updated");
+    trailing_trigger.payload = "BEFORE UPDATE ON users EXECUTE FUNCTION touch_users() garbage";
+    var trailing_trigger_buf: [512]u8 = undefined;
+    var trailing_trigger_writer = io.FixedBufferWriter.init(&trailing_trigger_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(trailing_trigger_writer.writer(), &trailing_trigger));
 }
 
 test "ast encoder explain analyze" {
