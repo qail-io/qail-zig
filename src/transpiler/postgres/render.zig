@@ -431,6 +431,26 @@ fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
     return trimmed;
 }
 
+fn checkedReadOnlySubquerySql(value: []const u8) ?[]const u8 {
+    const checked = checkedSqlExprFragment(value) orelse return null;
+    if (!startsWithReadOnlySubqueryKeyword(checked)) return null;
+    return checked;
+}
+
+fn startsWithReadOnlySubqueryKeyword(value: []const u8) bool {
+    return startsWithSqlKeyword(value, "SELECT") or
+        startsWithSqlKeyword(value, "VALUES") or
+        startsWithSqlKeyword(value, "TABLE");
+}
+
+fn startsWithSqlKeyword(value: []const u8, keyword: []const u8) bool {
+    if (value.len < keyword.len) return false;
+    if (!std.ascii.eqlIgnoreCase(value[0..keyword.len], keyword)) return false;
+    if (value.len == keyword.len) return true;
+    const next = value[keyword.len];
+    return std.ascii.isWhitespace(next) or next == '(';
+}
+
 fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
     const checked = checkedSqlExprFragment(fragment) orelse {
         try writer.writeAll(INVALID_RAW_FRAGMENT);
@@ -440,7 +460,7 @@ fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
 }
 
 fn writeCheckedSubquerySql(writer: anytype, sql: []const u8) !void {
-    const checked = checkedSqlExprFragment(sql) orelse "SELECT NULL WHERE FALSE";
+    const checked = checkedReadOnlySubquerySql(sql) orelse "SELECT NULL WHERE FALSE";
     try writer.writeAll(checked);
 }
 

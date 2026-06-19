@@ -715,6 +715,18 @@ test "trusted transpiler expression fragments fail closed" {
         raw_sql,
     );
 
+    const safe_subquery_cols = [_]Expr{.{ .subquery = .{
+        .sql = "SELECT count(*) FROM pg_class",
+        .alias = "class_count",
+    } }};
+    const safe_subquery_cmd = QailCmd.get("users").select(&safe_subquery_cols);
+    const safe_subquery_sql = try toSqlTrusted(std.testing.allocator, &safe_subquery_cmd);
+    defer std.testing.allocator.free(safe_subquery_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT (SELECT count(*) FROM pg_class) AS class_count FROM users",
+        safe_subquery_sql,
+    );
+
     const subquery_cols = [_]Expr{.{ .subquery = .{
         .sql = "SELECT 1; DROP TABLE users; --",
         .alias = "safe_alias",
@@ -727,6 +739,18 @@ test "trusted transpiler expression fragments fail closed" {
         subquery_sql,
     );
 
+    const mutating_subquery_cols = [_]Expr{.{ .subquery = .{
+        .sql = "DELETE FROM users RETURNING id",
+        .alias = "deleted_id",
+    } }};
+    const mutating_subquery_cmd = QailCmd.get("users").select(&mutating_subquery_cols);
+    const mutating_subquery_sql = try toSqlTrusted(std.testing.allocator, &mutating_subquery_cmd);
+    defer std.testing.allocator.free(mutating_subquery_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT (SELECT NULL WHERE FALSE) AS deleted_id FROM users",
+        mutating_subquery_sql,
+    );
+
     const exists_cols = [_]Expr{.{ .exists_subquery = .{
         .sql = "SELECT 1; DROP TABLE users; --",
         .alias = "safe_exists",
@@ -737,6 +761,18 @@ test "trusted transpiler expression fragments fail closed" {
     try std.testing.expectEqualStrings(
         "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_exists FROM users",
         exists_sql,
+    );
+
+    const mutating_cte_exists_cols = [_]Expr{.{ .exists_subquery = .{
+        .sql = "WITH deleted AS (DELETE FROM users RETURNING id) SELECT id FROM deleted",
+        .alias = "safe_cte",
+    } }};
+    const mutating_cte_exists_cmd = QailCmd.get("users").select(&mutating_cte_exists_cols);
+    const mutating_cte_exists_sql = try toSqlTrusted(std.testing.allocator, &mutating_cte_exists_cmd);
+    defer std.testing.allocator.free(mutating_cte_exists_sql);
+    try std.testing.expectEqualStrings(
+        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_cte FROM users",
+        mutating_cte_exists_sql,
     );
 }
 

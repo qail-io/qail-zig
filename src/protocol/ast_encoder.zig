@@ -1790,6 +1790,25 @@ fn checkedSqlExprFragment(value: []const u8) ?[]const u8 {
     return trimmed;
 }
 
+fn checkedReadOnlySubquerySql(value: []const u8) ?[]const u8 {
+    const checked = checkedSqlExprFragment(value) orelse return null;
+    if (!startsWithReadOnlySubqueryKeyword(checked)) return null;
+    return checked;
+}
+
+fn startsWithReadOnlySubqueryKeyword(value: []const u8) bool {
+    return startsWithSqlKeyword(value, "SELECT") or
+        startsWithSqlKeyword(value, "VALUES") or
+        startsWithSqlKeyword(value, "TABLE");
+}
+
+fn startsWithSqlKeyword(value: []const u8, keyword: []const u8) bool {
+    if (!startsWithIgnoreCase(value, keyword)) return false;
+    if (value.len == keyword.len) return true;
+    const next = value[keyword.len];
+    return std.ascii.isWhitespace(next) or next == '(';
+}
+
 fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
     const checked = checkedSqlExprFragment(fragment) orelse {
         try writer.writeAll(INVALID_RAW_FRAGMENT);
@@ -1799,7 +1818,7 @@ fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
 }
 
 fn writeCheckedSubquerySql(writer: anytype, sql: []const u8) !void {
-    const checked = checkedSqlExprFragment(sql) orelse "SELECT NULL WHERE FALSE";
+    const checked = checkedReadOnlySubquerySql(sql) orelse "SELECT NULL WHERE FALSE";
     try writer.writeAll(checked);
 }
 
@@ -4781,6 +4800,19 @@ test "ast encoder expression fragments fail closed" {
         raw_writer.getWritten(),
     );
 
+    const safe_subquery_cols = [_]Expr{.{ .subquery = .{
+        .sql = "SELECT count(*) FROM pg_class",
+        .alias = "class_count",
+    } }};
+    const safe_subquery_cmd = QailCmd.get("users").select(&safe_subquery_cols);
+    var safe_subquery_buf: [256]u8 = undefined;
+    var safe_subquery_writer = io.FixedBufferWriter.init(&safe_subquery_buf);
+    try encoder.writeAstToSql(safe_subquery_writer.writer(), &safe_subquery_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT (SELECT count(*) FROM pg_class) AS class_count FROM users",
+        safe_subquery_writer.getWritten(),
+    );
+
     const subquery_cols = [_]Expr{.{ .subquery = .{
         .sql = "SELECT 1; DROP TABLE users; --",
         .alias = "safe_alias",
@@ -4794,6 +4826,19 @@ test "ast encoder expression fragments fail closed" {
         subquery_writer.getWritten(),
     );
 
+    const mutating_subquery_cols = [_]Expr{.{ .subquery = .{
+        .sql = "DELETE FROM users RETURNING id",
+        .alias = "deleted_id",
+    } }};
+    const mutating_subquery_cmd = QailCmd.get("users").select(&mutating_subquery_cols);
+    var mutating_subquery_buf: [256]u8 = undefined;
+    var mutating_subquery_writer = io.FixedBufferWriter.init(&mutating_subquery_buf);
+    try encoder.writeAstToSql(mutating_subquery_writer.writer(), &mutating_subquery_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT (SELECT NULL WHERE FALSE) AS deleted_id FROM users",
+        mutating_subquery_writer.getWritten(),
+    );
+
     const exists_cols = [_]Expr{.{ .exists_subquery = .{
         .sql = "SELECT 1; DROP TABLE users; --",
         .alias = "safe_exists",
@@ -4805,6 +4850,19 @@ test "ast encoder expression fragments fail closed" {
     try std.testing.expectEqualStrings(
         "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_exists FROM users",
         exists_writer.getWritten(),
+    );
+
+    const mutating_cte_exists_cols = [_]Expr{.{ .exists_subquery = .{
+        .sql = "WITH deleted AS (DELETE FROM users RETURNING id) SELECT id FROM deleted",
+        .alias = "safe_cte",
+    } }};
+    const mutating_cte_exists_cmd = QailCmd.get("users").select(&mutating_cte_exists_cols);
+    var mutating_cte_exists_buf: [256]u8 = undefined;
+    var mutating_cte_exists_writer = io.FixedBufferWriter.init(&mutating_cte_exists_buf);
+    try encoder.writeAstToSql(mutating_cte_exists_writer.writer(), &mutating_cte_exists_cmd);
+    try std.testing.expectEqualStrings(
+        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_cte FROM users",
+        mutating_cte_exists_writer.getWritten(),
     );
 }
 
