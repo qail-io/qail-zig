@@ -280,6 +280,44 @@ fn collectTableRls(
     }
 }
 
+fn collectConstraintIndexNames(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    constraint_indexes: *std.StringHashMap(void),
+) !void {
+    const joins = [_]Join{
+        .{
+            .kind = .inner,
+            .table = "pg_catalog.pg_class",
+            .alias = "idx",
+            .on_left = "idx.oid",
+            .on_right = "con.conindid",
+        },
+        .{
+            .kind = .inner,
+            .table = "pg_catalog.pg_namespace",
+            .alias = "ns",
+            .on_left = "ns.oid",
+            .on_right = "con.connamespace",
+        },
+    };
+    const cmd = QailCmd.get("pg_catalog.pg_constraint")
+        .alias("con")
+        .join(&joins)
+        .select(&.{
+            Expr.colAs("idx.relname", "index_name"),
+        }).where(&.{
+        .{ .condition = .{ .column = "ns.nspname", .op = .eq, .value = .{ .string = "public" } } },
+    });
+    const rows = try pg.fetchAll(&cmd);
+    defer deinitFetchedRows(allocator, rows);
+
+    for (rows) |row| {
+        const index_name = row.getByName("index_name") orelse continue;
+        try putStringSetKey(allocator, constraint_indexes, index_name);
+    }
+}
+
 fn collectConstrainedColumns(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
@@ -801,6 +839,95 @@ fn writeLiveTableRls(
     if (rls.force) try writer.writeAll("    force_rls\n");
 }
 
+fn writeLiveIndexes(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    base_tables: *const std.StringHashMap(void),
+    writer: anytype,
+    prefix_blank: bool,
+) !bool {
+    var constraint_indexes = std.StringHashMap(void).init(allocator);
+    defer deinitStringSet(allocator, &constraint_indexes);
+    try collectConstraintIndexNames(allocator, pg, &constraint_indexes);
+
+    const cmd = QailCmd.get("pg_indexes")
+        .select(&.{
+            Expr.col("indexname"),
+            Expr.col("tablename"),
+            Expr.col("indexdef"),
+        }).where(&.{
+            .{ .condition = .{ .column = "schemaname", .op = .eq, .value = .{ .string = "public" } } },
+        }).orderBy(&.{
+        .{ .column = "tablename", .order = .asc },
+        .{ .column = "indexname", .order = .asc },
+    });
+    const rows = try pg.fetchAll(&cmd);
+    defer deinitFetchedRows(allocator, rows);
+
+    var wrote_any = false;
+    for (rows) |row| {
+        const index_name = row.getByName("indexname") orelse continue;
+        const table_name = row.getByName("tablename") orelse continue;
+        const index_def = row.getByName("indexdef") orelse continue;
+        if (!base_tables.contains(table_name)) continue;
+        if (constraint_indexes.contains(index_name)) continue;
+
+        if (!wrote_any and prefix_blank) try writer.writeByte('\n');
+        wrote_any = true;
+        try writeLiveIndexLine(writer, index_name, table_name, index_def);
+    }
+    return wrote_any;
+}
+
+fn writeLiveIndexLine(writer: anytype, index_name: []const u8, table_name: []const u8, index_def: []const u8) !void {
+    if (!isLiveSchemaIdentifier(index_name) or !isLiveSchemaIdentifier(table_name)) {
+        return error.UnsupportedLiveIndexIdentifier;
+    }
+
+    const open = findSqlParen(index_def, 0) orelse return error.UnsupportedLiveIndexDefinition;
+    const close = findMatchingSqlParen(index_def, open) orelse return error.UnsupportedLiveIndexDefinition;
+    const columns = std.mem.trim(u8, index_def[open + 1 .. close], " \t\r\n");
+    if (!isSafeLiveIndexElementList(columns)) return error.UnsupportedLiveIndexDefinition;
+
+    const method = liveIndexMethod(index_def[0..open]) orelse return error.UnsupportedLiveIndexMethod;
+    const unique = isUniqueLiveIndexDefinition(index_def);
+    const trailing = std.mem.trim(u8, index_def[close + 1 ..], " \t\r\n");
+    const where_pos = findTopLevelSqlKeyword(trailing, "WHERE");
+    const before_where = if (where_pos) |pos| std.mem.trim(u8, trailing[0..pos], " \t\r\n") else trailing;
+    const where_clause = if (where_pos) |pos| std.mem.trim(u8, trailing[pos + 5 ..], " \t\r\n") else null;
+
+    var include: ?[]const u8 = null;
+    if (before_where.len > 0) {
+        if (!startsWithSqlKeywordLocal(before_where, "INCLUDE")) return error.UnsupportedLiveIndexDefinition;
+        const include_open = findSqlParen(before_where, 7) orelse return error.UnsupportedLiveIndexDefinition;
+        const include_close = findMatchingSqlParen(before_where, include_open) orelse return error.UnsupportedLiveIndexDefinition;
+        const after_include = std.mem.trim(u8, before_where[include_close + 1 ..], " \t\r\n");
+        if (after_include.len != 0) return error.UnsupportedLiveIndexDefinition;
+        const include_columns = std.mem.trim(u8, before_where[include_open + 1 .. include_close], " \t\r\n");
+        if (!isSafeLiveIndexIdentifierList(include_columns)) return error.UnsupportedLiveIndexDefinition;
+        include = include_columns;
+    }
+
+    if (where_clause) |predicate| {
+        if (!isSafeLivePolicyPredicate(predicate)) return error.UnsupportedLiveIndexDefinition;
+    }
+
+    if (unique) try writer.writeAll("unique ");
+    try writer.writeAll("index ");
+    try writer.print("{s} on {s}", .{ index_name, table_name });
+    if (!std.ascii.eqlIgnoreCase(method, "btree")) {
+        try writer.print(" using {s}", .{method});
+    }
+    try writer.print(" ({s})", .{columns});
+    if (include) |include_columns| {
+        try writer.print(" include ({s})", .{include_columns});
+    }
+    if (where_clause) |predicate| {
+        if (predicate.len > 0) try writer.print(" where {s}", .{predicate});
+    }
+    try writer.writeByte('\n');
+}
+
 fn writeLivePolicies(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
@@ -880,6 +1007,254 @@ fn livePolicyTarget(cmd: []const u8) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(cmd, "UPDATE")) return "update";
     if (std.ascii.eqlIgnoreCase(cmd, "DELETE")) return "delete";
     return null;
+}
+
+fn isUniqueLiveIndexDefinition(def: []const u8) bool {
+    var tokens = std.mem.tokenizeAny(u8, def, " \t\r\n");
+    const create = tokens.next() orelse return false;
+    const unique = tokens.next() orelse return false;
+    const index = tokens.next() orelse return false;
+    return std.ascii.eqlIgnoreCase(create, "CREATE") and
+        std.ascii.eqlIgnoreCase(unique, "UNIQUE") and
+        std.ascii.eqlIgnoreCase(index, "INDEX");
+}
+
+fn liveIndexMethod(before_columns: []const u8) ?[]const u8 {
+    const using_pos = findTopLevelSqlKeyword(before_columns, "USING") orelse return "btree";
+    const method = std.mem.trim(u8, before_columns[using_pos + 5 ..], " \t\r\n");
+    if (!isAllowedLiveIndexMethod(method)) return null;
+    return method;
+}
+
+fn isAllowedLiveIndexMethod(method: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(method, "btree") or
+        std.ascii.eqlIgnoreCase(method, "hash") or
+        std.ascii.eqlIgnoreCase(method, "gin") or
+        std.ascii.eqlIgnoreCase(method, "gist") or
+        std.ascii.eqlIgnoreCase(method, "brin") or
+        std.ascii.eqlIgnoreCase(method, "spgist") or
+        std.ascii.eqlIgnoreCase(method, "hnsw") or
+        std.ascii.eqlIgnoreCase(method, "ivfflat");
+}
+
+fn isSafeLiveIndexElementList(fragment: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, fragment, ',');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        count += 1;
+        if (!isSafeLiveIndexElement(std.mem.trim(u8, part, " \t\r\n"))) return false;
+    }
+    return count > 0;
+}
+
+fn isSafeLiveIndexIdentifierList(fragment: []const u8) bool {
+    var parts = std.mem.splitScalar(u8, fragment, ',');
+    var count: usize = 0;
+    while (parts.next()) |part| {
+        count += 1;
+        if (!isLiveQualifiedIdentifier(std.mem.trim(u8, part, " \t\r\n"))) return false;
+    }
+    return count > 0;
+}
+
+fn isSafeLiveIndexElement(element: []const u8) bool {
+    if (element.len == 0 or !isSafeLivePolicyPredicate(element)) return false;
+    if (std.mem.indexOfScalar(u8, element, '(') != null or
+        std.mem.indexOfScalar(u8, element, ')') != null or
+        std.mem.indexOfScalar(u8, element, '\'') != null or
+        std.mem.indexOfScalar(u8, element, '"') != null)
+    {
+        return false;
+    }
+
+    var tokens = std.mem.tokenizeAny(u8, element, " \t\r\n");
+    const column = tokens.next() orelse return false;
+    if (!isLiveQualifiedIdentifier(column)) return false;
+    while (tokens.next()) |token| {
+        if (!isAllowedLiveIndexModifier(token)) return false;
+    }
+    return true;
+}
+
+fn isAllowedLiveIndexModifier(token: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(token, "asc") or
+        std.ascii.eqlIgnoreCase(token, "desc") or
+        std.ascii.eqlIgnoreCase(token, "nulls") or
+        std.ascii.eqlIgnoreCase(token, "first") or
+        std.ascii.eqlIgnoreCase(token, "last") or
+        isAllowedLiveIndexOpclass(token);
+}
+
+fn isAllowedLiveIndexOpclass(token: []const u8) bool {
+    if (std.mem.indexOfScalar(u8, token, '_') == null) return false;
+    if (token.len == 0 or !std.ascii.isAlphabetic(token[0])) return false;
+    for (token[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    }
+    return true;
+}
+
+fn isLiveQualifiedIdentifier(identifier: []const u8) bool {
+    if (identifier.len == 0 or std.mem.startsWith(u8, identifier, ".") or std.mem.endsWith(u8, identifier, ".")) {
+        return false;
+    }
+    var parts = std.mem.splitScalar(u8, identifier, '.');
+    while (parts.next()) |part| {
+        if (!isLiveSchemaIdentifier(part)) return false;
+    }
+    return true;
+}
+
+fn startsWithSqlKeywordLocal(value: []const u8, keyword: []const u8) bool {
+    if (value.len < keyword.len) return false;
+    if (!std.ascii.eqlIgnoreCase(value[0..keyword.len], keyword)) return false;
+    if (value.len == keyword.len) return true;
+    return std.ascii.isWhitespace(value[keyword.len]) or value[keyword.len] == '(';
+}
+
+fn findSqlParen(input: []const u8, start: usize) ?usize {
+    var idx = start;
+    var in_single = false;
+    var in_double = false;
+    while (idx < input.len) : (idx += 1) {
+        const ch = input[idx];
+        if (in_single) {
+            if (ch == '\'') {
+                if (idx + 1 < input.len and input[idx + 1] == '\'') {
+                    idx += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if (in_double) {
+            if (ch == '"') {
+                if (idx + 1 < input.len and input[idx + 1] == '"') {
+                    idx += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        if (ch == '\'') {
+            in_single = true;
+            continue;
+        }
+        if (ch == '"') {
+            in_double = true;
+            continue;
+        }
+        if (ch == '(') return idx;
+    }
+    return null;
+}
+
+fn findMatchingSqlParen(input: []const u8, open: usize) ?usize {
+    if (open >= input.len or input[open] != '(') return null;
+    var idx = open + 1;
+    var depth: usize = 1;
+    var in_single = false;
+    var in_double = false;
+    while (idx < input.len) : (idx += 1) {
+        const ch = input[idx];
+        if (in_single) {
+            if (ch == '\'') {
+                if (idx + 1 < input.len and input[idx + 1] == '\'') {
+                    idx += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if (in_double) {
+            if (ch == '"') {
+                if (idx + 1 < input.len and input[idx + 1] == '"') {
+                    idx += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        if (ch == '\'') {
+            in_single = true;
+            continue;
+        }
+        if (ch == '"') {
+            in_double = true;
+            continue;
+        }
+        if (ch == '(') {
+            depth += 1;
+            continue;
+        }
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) return idx;
+        }
+    }
+    return null;
+}
+
+fn findTopLevelSqlKeyword(input: []const u8, keyword: []const u8) ?usize {
+    var idx: usize = 0;
+    var depth: usize = 0;
+    var in_single = false;
+    var in_double = false;
+    while (idx < input.len) : (idx += 1) {
+        const ch = input[idx];
+        if (in_single) {
+            if (ch == '\'') {
+                if (idx + 1 < input.len and input[idx + 1] == '\'') {
+                    idx += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if (in_double) {
+            if (ch == '"') {
+                if (idx + 1 < input.len and input[idx + 1] == '"') {
+                    idx += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        if (ch == '\'') {
+            in_single = true;
+            continue;
+        }
+        if (ch == '"') {
+            in_double = true;
+            continue;
+        }
+        if (ch == '(') {
+            depth += 1;
+            continue;
+        }
+        if (ch == ')') {
+            if (depth > 0) depth -= 1;
+            continue;
+        }
+        if (depth != 0) continue;
+        if (idx + keyword.len > input.len) continue;
+        if (!std.ascii.eqlIgnoreCase(input[idx .. idx + keyword.len], keyword)) continue;
+        const before_ok = idx == 0 or !isLiveKeywordChar(input[idx - 1]);
+        const after = idx + keyword.len;
+        const after_ok = after == input.len or !isLiveKeywordChar(input[after]);
+        if (before_ok and after_ok) return idx;
+    }
+    return null;
+}
+
+fn isLiveKeywordChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
 
 fn livePolicyRole(raw_roles: []const u8) !?[]const u8 {
@@ -1119,7 +1494,8 @@ pub fn renderLiveSchemaSnapshot(
         try writeLiveTableRls(writer, &table_rls, current_table.?);
         try writer.writeAll(")\n");
     }
-    try writeLivePolicies(allocator, pg, &base_tables, writer, current_table != null);
+    const wrote_indexes = try writeLiveIndexes(allocator, pg, &base_tables, writer, current_table != null);
+    try writeLivePolicies(allocator, pg, &base_tables, writer, current_table != null or wrote_indexes);
 
     return .{
         .schema = try out.toOwnedSlice(),
@@ -1219,6 +1595,41 @@ test "live snapshot renders table row level security directives" {
     try std.testing.expectEqualStrings(
         "    enable_rls\n    force_rls\n",
         rendered,
+    );
+}
+
+test "live snapshot renders supported index definitions" {
+    const allocator = std.testing.allocator;
+    var out = io_compat.AllocatingWriter.init(allocator);
+    defer out.deinit();
+
+    try writeLiveIndexLine(
+        out.writer(),
+        "idx_users_email_active",
+        "users",
+        "CREATE UNIQUE INDEX idx_users_email_active ON public.users USING btree (email, created_at DESC NULLS LAST) INCLUDE (id) WHERE deleted_at IS NULL",
+    );
+    const rendered = try out.toOwnedSlice();
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "unique index idx_users_email_active on users (email, created_at DESC NULLS LAST) include (id) where deleted_at IS NULL\n",
+        rendered,
+    );
+}
+
+test "live snapshot rejects unsupported expression indexes" {
+    var out = io_compat.AllocatingWriter.init(std.testing.allocator);
+    defer out.deinit();
+
+    try std.testing.expectError(
+        error.UnsupportedLiveIndexDefinition,
+        writeLiveIndexLine(
+            out.writer(),
+            "idx_users_lower_email",
+            "users",
+            "CREATE INDEX idx_users_lower_email ON public.users USING btree (lower(email))",
+        ),
     );
 }
 
