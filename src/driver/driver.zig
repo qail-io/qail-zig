@@ -1310,12 +1310,7 @@ pub const PgDriver = struct {
                 .command_complete => {
                     var decoder = Decoder.init(msg.payload);
                     const tag = try decoder.parseCommandComplete();
-
-                    // Parse affected rows from tag like "UPDATE 5"
-                    var parts = std.mem.splitBackwardsScalar(u8, tag, ' ');
-                    if (parts.next()) |last| {
-                        affected_rows = std.fmt.parseInt(u64, last, 10) catch 0;
-                    }
+                    affected_rows = try parseAffectedRows(tag);
                 },
                 .no_data => {},
                 .ready_for_query => break,
@@ -2161,10 +2156,7 @@ pub const PgDriver = struct {
                 .command_complete => {
                     var decoder = Decoder.init(msg.payload);
                     const tag = try decoder.parseCommandComplete();
-                    var parts = std.mem.splitBackwardsScalar(u8, tag, ' ');
-                    if (parts.next()) |last| {
-                        affected_rows = std.fmt.parseInt(u64, last, 10) catch 0;
-                    }
+                    affected_rows = try parseAffectedRows(tag);
                 },
                 .ready_for_query => break,
                 .error_response => {
@@ -2391,6 +2383,36 @@ fn extractCopyColumns(allocator: std.mem.Allocator, cmd: *const QailCmd) ![][]co
     return try columns.toOwnedSlice(allocator);
 }
 
+fn commandTagCarriesAffectedRows(command: []const u8) bool {
+    return std.mem.eql(u8, command, "COPY") or
+        std.mem.eql(u8, command, "DELETE") or
+        std.mem.eql(u8, command, "FETCH") or
+        std.mem.eql(u8, command, "INSERT") or
+        std.mem.eql(u8, command, "MERGE") or
+        std.mem.eql(u8, command, "MOVE") or
+        std.mem.eql(u8, command, "SELECT") or
+        std.mem.eql(u8, command, "UPDATE");
+}
+
+fn parseAffectedRows(tag: []const u8) !u64 {
+    var parts = std.mem.tokenizeAny(u8, tag, " \t\r\n");
+    const command = parts.next() orelse return 0;
+    if (!commandTagCarriesAffectedRows(command)) return 0;
+
+    const count = if (std.mem.eql(u8, command, "INSERT")) blk: {
+        _ = parts.next() orelse return error.MalformedCommandCompleteTag;
+        const rows = parts.next() orelse return error.MalformedCommandCompleteTag;
+        if (parts.next() != null) return error.MalformedCommandCompleteTag;
+        break :blk rows;
+    } else blk: {
+        const rows = parts.next() orelse return error.MalformedCommandCompleteTag;
+        if (parts.next() != null) return error.MalformedCommandCompleteTag;
+        break :blk rows;
+    };
+
+    return std.fmt.parseInt(u64, count, 10) catch error.InvalidCommandCompleteTag;
+}
+
 fn freeRows(allocator: std.mem.Allocator, rows: []PgRow) void {
     for (rows) |*row| row.deinit();
     allocator.free(rows);
@@ -2400,6 +2422,17 @@ fn freeRows(allocator: std.mem.Allocator, rows: []PgRow) void {
 test "pgdriver struct" {
     // Just test the struct can be referenced
     _ = PgDriver;
+}
+
+test "parse affected rows validates command complete tag shape" {
+    try std.testing.expectEqual(@as(u64, 5), try parseAffectedRows("UPDATE 5"));
+    try std.testing.expectEqual(@as(u64, 7), try parseAffectedRows("INSERT 0 7"));
+    try std.testing.expectEqual(@as(u64, 0), try parseAffectedRows("CREATE TABLE"));
+
+    try std.testing.expectError(error.MalformedCommandCompleteTag, parseAffectedRows("DELETE"));
+    try std.testing.expectError(error.MalformedCommandCompleteTag, parseAffectedRows("UPDATE 1 garbage 500"));
+    try std.testing.expectError(error.MalformedCommandCompleteTag, parseAffectedRows("INSERT 0 1 extra"));
+    try std.testing.expectError(error.InvalidCommandCompleteTag, parseAffectedRows("COPY abc"));
 }
 
 test "parse connection url with query options" {
