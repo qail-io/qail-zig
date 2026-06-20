@@ -105,12 +105,12 @@ pub fn ArrayIterator(comptime T: type) type {
             };
         }
 
-        /// Get next element
-        pub fn next(self: *Self) ?T {
-            return self.nextStrict() catch null;
+        /// Get next element, failing on malformed or NULL array elements.
+        pub fn next(self: *Self) !?T {
+            return self.nextStrict();
         }
 
-        /// Get next element, failing on malformed or NULL array elements.
+        /// Backward-compatible alias for `next`.
         pub fn nextStrict(self: *Self) !?T {
             if (self.invalid) return error.InvalidArrayData;
             if (self.elem_idx >= self.elem_count) return null;
@@ -186,7 +186,7 @@ test "ArrayIterator type" {
     _ = ArrayIterator([]const u8);
 }
 
-test "ArrayIterator next skips null elements but continues iteration" {
+test "ArrayIterator next rejects null elements without losing later values" {
     const data = [_]u8{
         0, 0, 0, 1, // ndim = 1
         0, 0, 0, 0, // flags
@@ -201,10 +201,10 @@ test "ArrayIterator next skips null elements but continues iteration" {
     };
 
     var it = ArrayIterator(i32).init(&data);
-    try std.testing.expectEqual(@as(?i32, 1), it.next());
-    try std.testing.expectEqual(@as(?i32, null), it.next());
-    try std.testing.expectEqual(@as(?i32, 3), it.next());
-    try std.testing.expectEqual(@as(?i32, null), it.next());
+    try std.testing.expectEqual(@as(?i32, 1), try it.next());
+    try std.testing.expectError(error.NullArrayElement, it.next());
+    try std.testing.expectEqual(@as(?i32, 3), try it.next());
+    try std.testing.expectEqual(@as(?i32, null), try it.next());
 }
 
 test "ArrayIterator toSlice rejects null elements" {
@@ -234,7 +234,7 @@ test "ArrayIterator handles malformed element length safely" {
     };
 
     var it = ArrayIterator(i32).init(&data);
-    try std.testing.expectEqual(@as(?i32, null), it.next());
+    try std.testing.expectError(error.InvalidArrayData, it.next());
     try std.testing.expectEqual(it.elem_count, it.elem_idx);
 }
 
@@ -264,5 +264,5 @@ test "ArrayIterator rejects truncated dimension header" {
 
     var it = ArrayIterator(i32).init(&data);
     try std.testing.expectEqual(@as(usize, 0), it.elem_count);
-    try std.testing.expectEqual(@as(?i32, null), it.next());
+    try std.testing.expectError(error.InvalidArrayData, it.next());
 }

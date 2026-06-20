@@ -1358,6 +1358,83 @@ pub const PgDriver = struct {
         return try self.fetchAllTrusted(&cmd);
     }
 
+    fn fetchAllTrustedSqlParams(self: *PgDriver, sql: []const u8, params: []const ?[]const u8) ![]PgRow {
+        const wire_bytes = try query_mod.buildExtendedQuery(self.allocator, sql, params);
+        defer self.allocator.free(wire_bytes);
+
+        try self.conn.send(wire_bytes);
+
+        var rows: std.ArrayList(PgRow) = .empty;
+        errdefer {
+            for (rows.items) |*row| row.deinit();
+            rows.deinit(self.allocator);
+        }
+
+        var field_names_template: []const []const u8 = &.{};
+        errdefer if (field_names_template.len > 0) PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+        var flow = ExtendedFlowTracker.init(ExtendedFlowConfig.parseBindDescribePortalExecute(true));
+
+        while (true) {
+            const msg = try self.conn.readMessage();
+            try self.validateExtendedFlow(&flow, msg.msg_type, false);
+
+            switch (msg.msg_type) {
+                .parse_complete, .bind_complete => {},
+                .row_description => {
+                    var decoder = Decoder.init(msg.payload);
+                    const field_descriptions = try decoder.parseRowDescription(self.allocator);
+                    defer self.allocator.free(field_descriptions);
+
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
+                    }
+
+                    var names = try self.allocator.alloc([]const u8, field_descriptions.len);
+                    var copied: usize = 0;
+                    errdefer {
+                        for (names[0..copied]) |name| {
+                            self.allocator.free(name);
+                        }
+                        self.allocator.free(names);
+                    }
+                    for (field_descriptions, 0..) |fd, i| {
+                        names[i] = try self.allocator.dupe(u8, fd.name);
+                        copied += 1;
+                    }
+                    field_names_template = names;
+                },
+                .data_row => {
+                    var decoder = Decoder.init(msg.payload);
+                    const columns = try decoder.parseDataRowOwned(self.allocator);
+                    const row = try PgRow.initOwned(self.allocator, columns, field_names_template);
+                    try rows.append(self.allocator, row);
+                },
+                .command_complete => {},
+                .ready_for_query => {
+                    if (field_names_template.len > 0) {
+                        PgRow.freeOwnedFieldNames(self.allocator, field_names_template);
+                        field_names_template = &.{};
+                    }
+                    break;
+                },
+                .error_response => {
+                    var decoder = Decoder.init(msg.payload);
+                    const err = try decoder.parseErrorResponse();
+                    std.debug.print("Query error: {s}\n", .{err.message orelse "unknown"});
+                    _ = self.drainUntilReadyForQuery() catch {};
+                    return error.QueryError;
+                },
+                .notification => try notification_mod.appendDecodedNotification(self.allocator, &self.notifications, msg.payload),
+                .no_data => {},
+                .notice, .parameter_status => {},
+                else => return error.UnexpectedBackendMessageType,
+            }
+        }
+
+        return try rows.toOwnedSlice(self.allocator);
+    }
+
     // ==================== COPY Helpers ====================
 
     /// Bulk insert rows using PostgreSQL COPY FROM STDIN from AST-native `add` command.
@@ -1517,18 +1594,24 @@ pub const PgDriver = struct {
 
     /// Run EXPLAIN (FORMAT JSON) for a QAIL command and parse estimate.
     pub fn explainEstimate(self: *PgDriver, cmd: *const QailCmd) !?ExplainEstimate {
+        return self.explainEstimateParams(cmd, &.{});
+    }
+
+    /// Run EXPLAIN (FORMAT JSON) for a parameterized QAIL command.
+    pub fn explainEstimateParams(self: *PgDriver, cmd: *const QailCmd, params: []const ?[]const u8) !?ExplainEstimate {
         try raw_policy_mod.rejectPublicRuntimeCmd(cmd);
         const sql = try self.encoder.toSqlOwned(self.allocator, cmd);
         defer self.allocator.free(sql);
-        return try self.explainEstimateSqlTrusted(sql);
+        if (query_mod.countParams(sql) != params.len) return error.ParameterCountMismatch;
+        return try self.explainEstimateSqlTrusted(sql, params);
     }
 
     /// Run EXPLAIN (FORMAT JSON) for trusted SQL emitted by the AST encoder.
-    fn explainEstimateSqlTrusted(self: *PgDriver, sql: []const u8) !?ExplainEstimate {
+    fn explainEstimateSqlTrusted(self: *PgDriver, sql: []const u8, params: []const ?[]const u8) !?ExplainEstimate {
         const explain_sql = try raw_sql_mod.buildExplainFormatJson(self.allocator, sql);
         defer self.allocator.free(explain_sql);
 
-        const rows = try self.fetchAllTrustedRaw(explain_sql);
+        const rows = try self.fetchAllTrustedSqlParams(explain_sql, params);
         defer freeRows(self.allocator, rows);
 
         if (rows.len == 0) return null;

@@ -302,6 +302,7 @@ pub const Decoder = struct {
     /// Payload format: i32(process_id) + cstring(channel) + cstring(payload)
     pub fn parseNotificationResponse(self: *Decoder) !struct { process_id: i32, channel: []const u8, payload: []const u8 } {
         const process_id = try self.readI32();
+        if (process_id <= 0) return error.InvalidNotificationPayload;
         const channel = self.readUtf8CString() catch return error.InvalidNotificationPayload;
         if (channel.len == 0) return error.InvalidNotificationPayload;
         const payload = self.readUtf8CString() catch return error.InvalidNotificationPayload;
@@ -631,7 +632,7 @@ test "decode authentication sasl mechanisms" {
 
 test "decode authentication sasl rejects invalid utf8 mechanism" {
     const data = [_]u8{
-        0, 0, 0, 10, // SASL auth code
+        0,    0, 0, 10, // SASL auth code
         0xff, 0, 0,
     };
     var decoder = Decoder.init(&data);
@@ -675,6 +676,24 @@ test "decode notification response rejects empty channel" {
     var decoder = Decoder.init(&data);
 
     try std.testing.expectError(error.InvalidNotificationPayload, decoder.parseNotificationResponse());
+}
+
+test "decode notification response rejects non-positive process id" {
+    const zero_pid = [_]u8{
+        0,   0,   0, 0, // invalid process id
+        'c', 'h', 0, 'o',
+        'k', 0,
+    };
+    var zero_decoder = Decoder.init(&zero_pid);
+    try std.testing.expectError(error.InvalidNotificationPayload, zero_decoder.parseNotificationResponse());
+
+    const negative_pid = [_]u8{
+        255, 255, 255, 255, // -1 as signed i32
+        'c', 'h', 0,   'o',
+        'k', 0,
+    };
+    var negative_decoder = Decoder.init(&negative_pid);
+    try std.testing.expectError(error.InvalidNotificationPayload, negative_decoder.parseNotificationResponse());
 }
 
 test "decode notification response rejects invalid utf8 channel or payload" {
@@ -895,7 +914,7 @@ test "decode row description rejects invalid utf8 field name" {
     const data = [_]u8{
         0, 1, // field count = 1
         0xff, 0, // invalid field name
-        0,    0, 0, 1, // table oid
+        0, 0, 0, 1, // table oid
         0, 1, // column index
         0, 0, 0, 23, // type oid
         0, 4, // type len

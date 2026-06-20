@@ -213,7 +213,7 @@ fn toWireI32Len(total: usize) !i32 {
     return @intCast(total);
 }
 
-/// Build extended query message bytes (Parse + Bind + Execute + Sync)
+/// Build extended query message bytes (Parse + Bind + Describe + Execute + Sync)
 pub fn buildExtendedQuery(
     allocator: std.mem.Allocator,
     sql: []const u8,
@@ -246,7 +246,8 @@ pub fn buildExtendedQuery(
 
     try buf.append(allocator, 0); // portal name
     try buf.append(allocator, 0); // statement name
-    try buf.appendNTimes(allocator, 0, 2); // format codes
+    try buf.appendNTimes(allocator, 0, 2); // parameter format code count
+    try buf.appendNTimes(allocator, 0, 2); // parameter value count
     std.mem.writeInt(u16, buf.items[buf.items.len - 2 ..][0..2], @intCast(params.len), .big);
 
     for (params) |param| {
@@ -264,6 +265,13 @@ pub fn buildExtendedQuery(
 
     const bind_len = try toWireU32Len(std.math.sub(usize, buf.items.len, bind_len_pos) catch return error.MessageTooLarge);
     std.mem.writeInt(u32, buf.items[bind_len_pos..][0..4], bind_len, .big);
+
+    // Describe portal
+    try buf.append(allocator, 'D');
+    try buf.appendNTimes(allocator, 0, 4);
+    std.mem.writeInt(u32, buf.items[buf.items.len - 4 ..][0..4], 6, .big);
+    try buf.append(allocator, 'P');
+    try buf.append(allocator, 0);
 
     // Execute message
     try buf.append(allocator, 'E');
@@ -309,7 +317,7 @@ test "countParams" {
     try std.testing.expectEqual(@as(usize, 0), countParams("SELECT $$ $1 $$"));
 }
 
-test "buildExtendedQuery encodes parse-bind-execute-sync" {
+test "buildExtendedQuery encodes parse-bind-describe-execute-sync" {
     const allocator = std.testing.allocator;
     const params = [_]?[]const u8{"42"};
     const bytes = try buildExtendedQuery(allocator, "SELECT $1::int", &params);
@@ -317,7 +325,14 @@ test "buildExtendedQuery encodes parse-bind-execute-sync" {
 
     try std.testing.expect(bytes.len > 0);
     try std.testing.expectEqual(@as(u8, 'P'), bytes[0]);
-    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 'B') != null);
+    const bind_pos = std.mem.indexOfScalar(u8, bytes, 'B') orelse return error.TestExpectedEqual;
+    const bind_len = std.mem.readInt(u32, bytes[bind_pos + 1 ..][0..4], .big);
+    const bind = bytes[bind_pos + 5 .. bind_pos + 1 + bind_len];
+    try std.testing.expectEqual(@as(u8, 0), bind[0]); // unnamed portal
+    try std.testing.expectEqual(@as(u8, 0), bind[1]); // unnamed statement
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bind[2..4], .big));
+    try std.testing.expectEqual(@as(u16, 1), std.mem.readInt(u16, bind[4..6], .big));
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 'D') != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 'E') != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 'S') != null);
 }
