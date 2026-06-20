@@ -229,10 +229,18 @@ pub const TableDef = struct {
                 );
             }
             if (col.check) |check_expr| {
-                try writer.print(" CHECK({s})", .{check_expr});
+                if (col.check_name) |name| {
+                    try writer.print(" CONSTRAINT {s} CHECK({s})", .{ name, check_expr });
+                } else {
+                    try writer.print(" CHECK({s})", .{check_expr});
+                }
             }
-            for (col.extra_checks) |check_expr| {
-                try writer.print(" CHECK({s})", .{check_expr});
+            for (col.extra_checks, 0..) |check_expr, check_index| {
+                if (col.checkNameAt(if (col.check != null) check_index + 1 else check_index)) |name| {
+                    try writer.print(" CONSTRAINT {s} CHECK({s})", .{ name, check_expr });
+                } else {
+                    try writer.print(" CHECK({s})", .{check_expr});
+                }
             }
 
             if (i < self.columns.items.len - 1 or self.foreign_keys.items.len > 0) {
@@ -268,7 +276,9 @@ pub const ColumnDef = struct {
     reference_deferrable: ?[]const u8 = null,
     default_value: ?[]const u8 = null,
     check: ?[]const u8 = null,
+    check_name: ?[]const u8 = null,
     extra_checks: []const []const u8 = &.{},
+    extra_check_names: []const ?[]const u8 = &.{},
 
     pub fn deinit(self: *ColumnDef, allocator: Allocator) void {
         allocator.free(self.name);
@@ -280,8 +290,13 @@ pub const ColumnDef = struct {
         if (self.reference_deferrable) |mode| allocator.free(mode);
         if (self.default_value) |d| allocator.free(d);
         if (self.check) |c| allocator.free(c);
+        if (self.check_name) |name| allocator.free(name);
         for (self.extra_checks) |check_expr| allocator.free(check_expr);
         if (self.extra_checks.len > 0) allocator.free(self.extra_checks);
+        for (self.extra_check_names) |maybe_name| {
+            if (maybe_name) |name| allocator.free(name);
+        }
+        if (self.extra_check_names.len > 0) allocator.free(self.extra_check_names);
     }
 
     pub fn checkCount(self: *const ColumnDef) usize {
@@ -296,5 +311,16 @@ pub const ColumnDef = struct {
             return self.extra_checks[index - 1];
         }
         return self.extra_checks[index];
+    }
+
+    pub fn checkNameAt(self: *const ColumnDef, index: usize) ?[]const u8 {
+        if (self.check != null) {
+            if (index == 0) return self.check_name;
+            const extra_index = index - 1;
+            if (extra_index >= self.extra_check_names.len) return null;
+            return self.extra_check_names[extra_index];
+        }
+        if (index >= self.extra_check_names.len) return null;
+        return self.extra_check_names[index];
     }
 };

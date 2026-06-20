@@ -661,15 +661,19 @@ pub const MigrationCmd = struct {
     }
 };
 
-fn writeCheckConstraint(writer: anytype, expr: []const u8) !void {
+fn writeCheckConstraint(writer: anytype, expr: []const u8, name: ?[]const u8) !void {
     const trimmed = checkedSqlExprFragment(expr) orelse return error.UnsafeSqlFragment;
-    try writer.print(" CHECK ({s})", .{trimmed});
+    if (name) |constraint_name| {
+        try writer.print(" CONSTRAINT {s} CHECK ({s})", .{ constraint_name, trimmed });
+    } else {
+        try writer.print(" CHECK ({s})", .{trimmed});
+    }
 }
 
 fn writeColumnCheckConstraints(writer: anytype, col: ColumnDef) !void {
     const check_count = col.checkCount();
     for (0..check_count) |i| {
-        try writeCheckConstraint(writer, col.checkAt(i));
+        try writeCheckConstraint(writer, col.checkAt(i), col.checkNameAt(i));
     }
 }
 

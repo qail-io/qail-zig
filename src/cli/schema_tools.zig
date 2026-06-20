@@ -246,9 +246,13 @@ fn renderTable(writer: anytype, table: *const parser.TableDef) !void {
         }
         if (col.check) |check_expr| {
             try writer.print(" check ({s})", .{check_expr});
+            if (col.check_name) |name| try writer.print(" check_name {s}", .{name});
         }
-        for (col.extra_checks) |check_expr| {
+        for (col.extra_checks, 0..) |check_expr, check_index| {
             try writer.print(" check ({s})", .{check_expr});
+            if (col.checkNameAt(if (col.check != null) check_index + 1 else check_index)) |name| {
+                try writer.print(" check_name {s}", .{name});
+            }
         }
         try writer.writeAll("\n");
     }

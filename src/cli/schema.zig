@@ -40,6 +40,16 @@ const LiveForeignKeyReference = struct {
     }
 };
 
+const LiveColumnCheck = struct {
+    expr: []u8,
+    name: ?[]u8 = null,
+
+    fn deinit(self: *LiveColumnCheck, allocator: Allocator) void {
+        allocator.free(self.expr);
+        if (self.name) |name| allocator.free(name);
+    }
+};
+
 fn deinitFetchedRows(allocator: Allocator, rows: []@import("../driver/row.zig").PgRow) void {
     for (rows) |*row| {
         var owned = row.*;
@@ -190,11 +200,11 @@ fn appendOwnedLiveMultiColumnForeignKey(
     }
 }
 
-fn deinitCheckMap(allocator: Allocator, checks: *std.StringHashMap(std.ArrayList([]u8))) void {
+fn deinitCheckMap(allocator: Allocator, checks: *std.StringHashMap(std.ArrayList(LiveColumnCheck))) void {
     var it = checks.iterator();
     while (it.next()) |entry| {
         allocator.free(entry.key_ptr.*);
-        for (entry.value_ptr.items) |check_expr| allocator.free(check_expr);
+        for (entry.value_ptr.items) |*check| check.deinit(allocator);
         entry.value_ptr.deinit(allocator);
     }
     checks.deinit();
@@ -202,33 +212,34 @@ fn deinitCheckMap(allocator: Allocator, checks: *std.StringHashMap(std.ArrayList
 
 fn appendOwnedColumnCheck(
     allocator: Allocator,
-    checks: *std.StringHashMap(std.ArrayList([]u8)),
+    checks: *std.StringHashMap(std.ArrayList(LiveColumnCheck)),
     key: []u8,
-    check_expr: []u8,
+    check: LiveColumnCheck,
 ) !void {
+    var owned_check = check;
     var owns_key = true;
-    var owns_expr = true;
+    var owns_check = true;
     errdefer if (owns_key) allocator.free(key);
-    errdefer if (owns_expr) allocator.free(check_expr);
+    errdefer if (owns_check) owned_check.deinit(allocator);
 
-    var new_list = try std.ArrayList([]u8).initCapacity(allocator, 1);
+    var new_list = try std.ArrayList(LiveColumnCheck).initCapacity(allocator, 1);
     var owns_list = true;
     defer if (owns_list) new_list.deinit(allocator);
-    try new_list.append(allocator, check_expr);
+    try new_list.append(allocator, owned_check);
 
     const gop = try checks.getOrPut(key);
     if (gop.found_existing) {
         allocator.free(key);
         owns_key = false;
-        try gop.value_ptr.append(allocator, check_expr);
-        owns_expr = false;
+        try gop.value_ptr.append(allocator, owned_check);
+        owns_check = false;
         return;
     }
 
     gop.value_ptr.* = new_list;
     owns_list = false;
     owns_key = false;
-    owns_expr = false;
+    owns_check = false;
 }
 
 fn connectPgUrl(
@@ -573,7 +584,7 @@ fn collectCheckConstraints(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
     attnum_columns: *const std.StringHashMap([]u8),
-    checks: *std.StringHashMap(std.ArrayList([]u8)),
+    checks: *std.StringHashMap(std.ArrayList(LiveColumnCheck)),
 ) !void {
     const joins = [_]Join{
         .{
@@ -638,9 +649,20 @@ fn collectCheckConstraints(
             check_clause,
         ) orelse continue;
 
+        const constraint_name = row.getByName("constraint_name") orelse continue;
+        if (!isLiveSchemaIdentifier(constraint_name)) return error.UnsupportedLiveCheckIdentifier;
         const composite = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, column_name });
-        const owned_check = try allocator.dupe(u8, check_clause);
-        try appendOwnedColumnCheck(allocator, checks, composite, owned_check);
+        var owns_composite = true;
+        errdefer if (owns_composite) allocator.free(composite);
+        var check = LiveColumnCheck{
+            .expr = try allocator.dupe(u8, check_clause),
+            .name = try allocator.dupe(u8, constraint_name),
+        };
+        var moved_check = false;
+        errdefer if (!moved_check) check.deinit(allocator);
+        owns_composite = false;
+        moved_check = true;
+        try appendOwnedColumnCheck(allocator, checks, composite, check);
     }
 }
 
@@ -1079,12 +1101,13 @@ fn isCheckKeyword(token: []const u8) bool {
 
 fn writeLiveColumnChecks(
     writer: anytype,
-    checks: *const std.StringHashMap(std.ArrayList([]u8)),
+    checks: *const std.StringHashMap(std.ArrayList(LiveColumnCheck)),
     composite: []const u8,
 ) !void {
     if (checks.get(composite)) |column_checks| {
-        for (column_checks.items) |check_expr| {
-            try writer.print(" check ({s})", .{check_expr});
+        for (column_checks.items) |check| {
+            try writer.print(" check ({s})", .{check.expr});
+            if (check.name) |name| try writer.print(" check_name {s}", .{name});
         }
     }
 }
@@ -1694,7 +1717,7 @@ pub fn renderLiveSchemaSnapshot(
     defer deinitStringMap(allocator, &attnum_columns);
     try collectColumnAttnums(allocator, pg, &attnum_columns);
 
-    var column_checks = std.StringHashMap(std.ArrayList([]u8)).init(allocator);
+    var column_checks = std.StringHashMap(std.ArrayList(LiveColumnCheck)).init(allocator);
     defer deinitCheckMap(allocator, &column_checks);
     try collectCheckConstraints(allocator, pg, &attnum_columns, &column_checks);
 
@@ -1879,19 +1902,25 @@ test "live check helpers skip trivial not null and function names" {
 test "live snapshot renders multiple column checks" {
     const allocator = std.testing.allocator;
 
-    var checks = std.StringHashMap(std.ArrayList([]u8)).init(allocator);
+    var checks = std.StringHashMap(std.ArrayList(LiveColumnCheck)).init(allocator);
     defer deinitCheckMap(allocator, &checks);
     try appendOwnedColumnCheck(
         allocator,
         &checks,
         try allocator.dupe(u8, "inventory.quantity"),
-        try allocator.dupe(u8, "quantity >= 0"),
+        .{
+            .expr = try allocator.dupe(u8, "quantity >= 0"),
+            .name = try allocator.dupe(u8, "inventory_quantity_min"),
+        },
     );
     try appendOwnedColumnCheck(
         allocator,
         &checks,
         try allocator.dupe(u8, "inventory.quantity"),
-        try allocator.dupe(u8, "quantity <= 100"),
+        .{
+            .expr = try allocator.dupe(u8, "quantity <= 100"),
+            .name = try allocator.dupe(u8, "inventory_quantity_max"),
+        },
     );
 
     var out = io_compat.AllocatingWriter.init(allocator);
@@ -1901,7 +1930,7 @@ test "live snapshot renders multiple column checks" {
     defer allocator.free(rendered);
 
     try std.testing.expectEqualStrings(
-        " check (quantity >= 0) check (quantity <= 100)",
+        " check (quantity >= 0) check_name inventory_quantity_min check (quantity <= 100) check_name inventory_quantity_max",
         rendered,
     );
 }

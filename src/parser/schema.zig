@@ -659,7 +659,9 @@ const Parser = struct {
         reference_deferrable: ?[]const u8 = null,
         default_value: ?[]const u8 = null,
         check: ?[]const u8 = null,
+        check_name: ?[]const u8 = null,
         extra_checks: []const []const u8 = &.{},
+        extra_check_names: []?[]const u8 = &.{},
 
         fn deinit(self: *ConstraintResult, allocator: Allocator) void {
             if (self.references) |refs| allocator.free(refs);
@@ -668,8 +670,13 @@ const Parser = struct {
             if (self.reference_deferrable) |mode| allocator.free(mode);
             if (self.default_value) |default_value| allocator.free(default_value);
             if (self.check) |check| allocator.free(check);
+            if (self.check_name) |name| allocator.free(name);
             for (self.extra_checks) |check| allocator.free(check);
             if (self.extra_checks.len > 0) allocator.free(self.extra_checks);
+            for (self.extra_check_names) |maybe_name| {
+                if (maybe_name) |name| allocator.free(name);
+            }
+            if (self.extra_check_names.len > 0) allocator.free(self.extra_check_names);
         }
 
         fn appendCheck(self: *ConstraintResult, allocator: Allocator, check: []const u8) !void {
@@ -680,15 +687,40 @@ const Parser = struct {
 
             const next = try allocator.alloc([]const u8, self.extra_checks.len + 1);
             errdefer allocator.free(next);
+            const next_names = try allocator.alloc(?[]const u8, self.extra_checks.len + 1);
+            errdefer allocator.free(next_names);
+            @memset(next_names, null);
             @memcpy(next[0..self.extra_checks.len], self.extra_checks);
+            if (self.extra_check_names.len > 0) {
+                @memcpy(next_names[0..self.extra_check_names.len], self.extra_check_names);
+            }
             next[self.extra_checks.len] = check;
             if (self.extra_checks.len > 0) allocator.free(self.extra_checks);
+            if (self.extra_check_names.len > 0) allocator.free(self.extra_check_names);
             self.extra_checks = next;
+            self.extra_check_names = next_names;
+        }
+
+        fn setLastCheckName(self: *ConstraintResult, allocator: Allocator, name: []const u8) !void {
+            if (self.check == null) return error.InvalidColumnConstraint;
+            const owned_name = try allocator.dupe(u8, name);
+            errdefer allocator.free(owned_name);
+
+            if (self.extra_checks.len == 0) {
+                if (self.check_name != null) return error.DuplicateColumnConstraint;
+                self.check_name = owned_name;
+                return;
+            }
+
+            const index = self.extra_checks.len - 1;
+            if (self.extra_check_names.len <= index) return error.InvalidColumnConstraint;
+            if (self.extra_check_names[index] != null) return error.DuplicateColumnConstraint;
+            self.extra_check_names[index] = owned_name;
         }
     };
 
     fn parseConstraintIdentifierToken(self: *Parser) ![]const u8 {
-        self.skipWhitespace();
+        self.skipInlineWhitespace();
         const start = self.pos;
         const first = self.current() orelse return error.InvalidColumnConstraint;
         if (!isIdentifierStart(first)) return error.InvalidColumnConstraint;
@@ -960,6 +992,9 @@ const Parser = struct {
                 try result.appendCheck(self.allocator, owned_check);
                 moved_check = true;
                 self.advance(); // skip closing )
+            } else if (self.matchKeyword("check_name")) {
+                const name = try self.parseConstraintIdentifierToken();
+                try result.setLastCheckName(self.allocator, name);
             } else {
                 return error.InvalidColumnConstraint;
             }
@@ -993,7 +1028,9 @@ const Parser = struct {
             .reference_deferrable = constraints.reference_deferrable,
             .default_value = constraints.default_value,
             .check = constraints.check,
+            .check_name = constraints.check_name,
             .extra_checks = constraints.extra_checks,
+            .extra_check_names = constraints.extra_check_names,
         };
     }
 
@@ -3026,7 +3063,7 @@ test "schema parser preserves multiple column checks" {
 
     const input =
         \\table products (
-        \\    score integer check (score >= 0) check (score <= 100)
+        \\    score integer check (score >= 0) check_name score_min check (score <= 100) check_name score_max
         \\)
     ;
 
@@ -3037,8 +3074,35 @@ test "schema parser preserves multiple column checks" {
     const score = products.findColumn("score").?;
     try std.testing.expectEqual(@as(usize, 2), score.checkCount());
     try std.testing.expectEqualStrings("score >= 0", score.check.?);
+    try std.testing.expectEqualStrings("score_min", score.check_name.?);
     try std.testing.expectEqual(@as(usize, 1), score.extra_checks.len);
     try std.testing.expectEqualStrings("score <= 100", score.extra_checks[0]);
+    try std.testing.expectEqualStrings("score_max", score.checkNameAt(1).?);
+}
+
+test "schema parser rejects malformed check names" {
+    const allocator = std.testing.allocator;
+
+    const no_check =
+        \\table products (
+        \\    score integer check_name score_min
+        \\)
+    ;
+    try std.testing.expectError(error.InvalidColumnConstraint, Schema.parse(allocator, no_check));
+
+    const missing_name =
+        \\table products (
+        \\    score integer check (score >= 0) check_name
+        \\)
+    ;
+    try std.testing.expectError(error.InvalidColumnConstraint, Schema.parse(allocator, missing_name));
+
+    const duplicate_name =
+        \\table products (
+        \\    score integer check (score >= 0) check_name score_min check_name score_min_again
+        \\)
+    ;
+    try std.testing.expectError(error.DuplicateColumnConstraint, Schema.parse(allocator, duplicate_name));
 }
 
 test "schema parser ignores parentheses inside double quoted SQL fragments" {

@@ -136,6 +136,11 @@ const DecimalTypeParams = struct {
     scale: u64,
 };
 
+const ColumnCheckView = struct {
+    expr: []const u8,
+    name: ?[]const u8,
+};
+
 fn parseDecimalTypeParams(params: []const u8) ?DecimalTypeParams {
     var parts = std.mem.splitScalar(u8, params, ',');
     const precision_raw = parts.next() orelse return null;
@@ -163,14 +168,19 @@ fn collectSharedColumnChecks(
     allocator: Allocator,
     table: *const TableDef,
     other: *const TableDef,
-) ![][]const u8 {
-    var checks = try std.ArrayList([]const u8).initCapacity(allocator, 0);
+) ![]ColumnCheckView {
+    var checks = try std.ArrayList(ColumnCheckView).initCapacity(allocator, 0);
     errdefer checks.deinit(allocator);
 
     for (table.columns.items) |col| {
         if (other.findColumn(col.name) == null) continue;
-        if (col.check) |expr| try checks.append(allocator, expr);
-        for (col.extra_checks) |expr| try checks.append(allocator, expr);
+        const check_count = col.checkCount();
+        for (0..check_count) |i| {
+            try checks.append(allocator, .{
+                .expr = col.checkAt(i),
+                .name = col.checkNameAt(i),
+            });
+        }
     }
 
     return try checks.toOwnedSlice(allocator);
@@ -196,7 +206,8 @@ fn tableChecksEquivalent(
         var found = false;
         for (new_checks, 0..) |new_check, i| {
             if (matched[i]) continue;
-            if (!checkExpressionsEquivalent(old_check, new_check)) continue;
+            if (!optionalTrimmedTextEquivalent(old_check.name, new_check.name)) continue;
+            if (!checkExpressionsEquivalent(old_check.expr, new_check.expr)) continue;
             matched[i] = true;
             found = true;
             break;
@@ -1191,6 +1202,40 @@ test "diff new column preserves column check constraint" {
     );
 }
 
+test "diff new column renders named check constraint" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table players (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table players (
+        \\    id uuid primary_key,
+        \\    score integer check (score >= 0) check_name players_score_min
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    try std.testing.expectEqual(MigrationCmd.Action.add_column, cmds.items[0].action);
+
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE players ADD COLUMN score integer CONSTRAINT players_score_min CHECK (score >= 0)",
+        sql,
+    );
+}
+
 test "diff new column preserves multiple check constraints" {
     const allocator = std.testing.allocator;
 
@@ -1259,6 +1304,53 @@ test "diff existing column check drift fails closed" {
     defer new.deinit();
 
     try std.testing.expectError(error.UnsupportedCheckConstraintDrift, diffSchemas(allocator, &old, &new));
+}
+
+test "diff existing named column check name drift fails closed" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table inventory (
+        \\    quantity integer check (quantity >= 0) check_name quantity_min
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check (((quantity >= 0))) check_name quantity_floor
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    try std.testing.expectError(error.UnsupportedCheckConstraintDrift, diffSchemas(allocator, &old, &new));
+}
+
+test "diff existing named column check stays equivalent" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table inventory (
+        \\    quantity integer check (((quantity >= 0))) check_name quantity_min
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table inventory (
+        \\    quantity integer check ( quantity>=0 ) check_name quantity_min
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), cmds.items.len);
 }
 
 test "diff existing column multiple checks stay equivalent" {
