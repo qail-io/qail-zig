@@ -31,16 +31,6 @@ const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 const max_wire_message_len: usize = std.math.maxInt(i32);
 const MAX_RAW_FUNCTION_VALUE_LEN: usize = 1024;
 
-const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
-const INVALID_FUNCTION_KEYWORD = "/* ERROR: Invalid function keyword */";
-const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */";
-const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
-const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
-const INVALID_INSERT_COLUMN = "/* ERROR: Invalid insert column */";
-const INVALID_RAW_FRAGMENT = "/* ERROR: Invalid raw SQL fragment */";
-const INVALID_COLUMN_TYPE = "/* ERROR: Invalid column type */";
-const INVALID_COLUMN_FRAGMENT = "/* ERROR: Invalid column definition fragment */";
-
 /// AST-to-Wire encoder
 /// Directly encodes QailCmd AST to PostgreSQL Extended Query Protocol bytes
 pub const AstEncoder = struct {
@@ -1897,19 +1887,13 @@ fn startsWithSqlKeyword(value: []const u8, keyword: []const u8) bool {
 }
 
 fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
-    const checked = checkedSqlExprFragment(fragment) orelse {
-        try writer.writeAll(INVALID_RAW_FRAGMENT);
-        return;
-    };
+    const checked = checkedSqlExprFragment(fragment) orelse return error.UnsafeSqlFragment;
     try writer.writeAll(checked);
 }
 
 fn writeIndexMethodOrError(writer: anytype, method: []const u8) !void {
     const trimmed = std.mem.trim(u8, method, " \t\r\n");
-    if (!isAllowedIndexMethod(trimmed)) {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
-    }
+    if (!isAllowedIndexMethod(trimmed)) return error.InvalidIndexMethod;
     try writer.writeAll(trimmed);
 }
 
@@ -1933,27 +1917,16 @@ fn writeIndexElementOrError(writer: anytype, element: []const u8) !void {
         std.mem.indexOfScalar(u8, trimmed, '\'') != null or
         std.mem.indexOfScalar(u8, trimmed, '"') != null)
     {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
+        return error.InvalidIndexElement;
     }
 
     var tokens = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
-    const column = tokens.next() orelse {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
-    };
-    if (!isValidQualifiedIdentifier(column)) {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
-    }
+    const column = tokens.next() orelse return error.InvalidIndexElement;
+    if (!isValidQualifiedIdentifier(column)) return error.InvalidIndexElement;
 
     try writeIdentifierOrError(writer, column);
     while (tokens.next()) |token| {
-        if (!isAllowedIndexModifier(token)) {
-            try writer.writeAll(" ");
-            try writer.writeAll(INVALID_IDENTIFIER);
-            return;
-        }
+        if (!isAllowedIndexModifier(token)) return error.InvalidIndexElement;
         try writer.writeByte(' ');
         try writer.writeAll(token);
     }
@@ -2710,10 +2683,7 @@ fn isValidQualifiedIdentifier(value: []const u8) bool {
 }
 
 fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
-    if (!isValidQualifiedIdentifier(value)) {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
-    }
+    if (!isValidQualifiedIdentifier(value)) return error.InvalidIdentifier;
 
     var parts = std.mem.splitScalar(u8, value, '.');
     var first = true;
@@ -2725,10 +2695,7 @@ fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
 }
 
 fn writeSingleIdentifierOrError(writer: anytype, value: []const u8) !void {
-    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
-    }
+    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidIdentifier;
     try writeIdentifierMaybeQuoted(writer, value);
 }
 
@@ -2742,7 +2709,7 @@ fn writeRequiredSingleIdentifier(writer: anytype, value: []const u8) !void {
 fn writeInsertTargetColumn(writer: anytype, expr: *const Expr) !void {
     switch (expr.*) {
         .named => |name| try writeIdentifierOrError(writer, name),
-        else => try writer.writeAll(INVALID_INSERT_COLUMN),
+        else => return error.InvalidInsertColumn,
     }
 }
 
@@ -2965,10 +2932,7 @@ fn writeExpr(writer: anytype, expr: *const Expr, cmd: ?*const QailCmd) anyerror!
             }
         },
         .func_call => |fc| {
-            if (!isSafeFunctionName(fc.name)) {
-                try writer.writeAll(INVALID_FUNCTION_NAME);
-                return;
-            }
+            if (!isSafeFunctionName(fc.name)) return error.InvalidFunctionName;
             try writer.writeAll(fc.name);
             try writer.writeAll("(");
             for (fc.args, 0..) |arg, i| {
@@ -3021,10 +2985,7 @@ fn writeExpr(writer: anytype, expr: *const Expr, cmd: ?*const QailCmd) anyerror!
             }
         },
         .cast => |c| {
-            const target_type = checkedSqlTypeFragment(c.target_type) orelse {
-                try writer.writeAll(INVALID_CAST_TARGET);
-                return;
-            };
+            const target_type = checkedSqlTypeFragment(c.target_type) orelse return error.InvalidCastTarget;
             try writeExpr(writer, c.expr, cmd);
             try writer.writeAll("::");
             try writer.writeAll(target_type);
@@ -3063,19 +3024,13 @@ fn writeExpr(writer: anytype, expr: *const Expr, cmd: ?*const QailCmd) anyerror!
         },
         .special_func => |sf| {
             // SUBSTRING(expr FROM pos FOR len), EXTRACT(YEAR FROM date), etc.
-            if (!isSafeFunctionName(sf.name)) {
-                try writer.writeAll(INVALID_FUNCTION_NAME);
-                return;
-            }
+            if (!isSafeFunctionName(sf.name)) return error.InvalidFunctionName;
             try writer.writeAll(sf.name);
             try writer.writeByte('(');
             for (sf.args, 0..) |arg, i| {
                 if (i > 0) try writer.writeAll(" ");
                 if (arg.keyword) |kw| {
-                    if (!isSafeSqlKeyword(kw)) {
-                        try writer.writeAll(INVALID_FUNCTION_KEYWORD);
-                        return;
-                    }
+                    if (!isSafeSqlKeyword(kw)) return error.InvalidFunctionKeyword;
                     try writer.writeAll(kw);
                     try writer.writeAll(" ");
                 }
@@ -3168,10 +3123,7 @@ fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
 
     try writeIdentifierOrError(writer, def.name);
     try writer.writeAll(" ");
-    const data_type = checkedSqlTypeFragment(def.data_type) orelse {
-        try writer.writeAll(INVALID_COLUMN_TYPE);
-        return;
-    };
+    const data_type = checkedSqlTypeFragment(def.data_type) orelse return error.InvalidColumnType;
     try writer.writeAll(data_type);
 
     const has_pk = def.is_primary_key or Constraint.hasPrimaryKey(def.constraints);
@@ -3300,18 +3252,12 @@ fn writeTableConstraint(writer: anytype, constraint: TableConstraint) !void {
 }
 
 fn writeSqlExprFragmentOrError(writer: anytype, fragment: []const u8) !void {
-    const checked = checkedSqlExprFragment(fragment) orelse {
-        try writer.writeAll(INVALID_COLUMN_FRAGMENT);
-        return;
-    };
+    const checked = checkedSqlExprFragment(fragment) orelse return error.UnsafeSqlFragment;
     try writer.writeAll(checked);
 }
 
 fn writeWindowExpr(writer: anytype, w: WindowExpr, cmd: ?*const QailCmd) !void {
-    if (!isSafeFunctionName(w.func)) {
-        try writer.writeAll(INVALID_WINDOW_FUNCTION_NAME);
-        return;
-    }
+    if (!isSafeFunctionName(w.func)) return error.InvalidWindowFunctionName;
 
     try writer.writeAll(w.func);
     try writer.writeAll("() OVER (");
@@ -3836,11 +3782,7 @@ test "ast encoder column definition fragments fail closed" {
 
     var bad_buf: [512]u8 = undefined;
     var bad_writer = io.FixedBufferWriter.init(&bad_buf);
-    try encoder.writeAstToSql(bad_writer.writer(), &bad_cmd);
-    try std.testing.expectEqualStrings(
-        "CREATE TABLE IF NOT EXISTS events (score integer DEFAULT /* ERROR: Invalid column definition fragment */ CHECK (/* ERROR: Invalid column definition fragment */))",
-        bad_writer.getWritten(),
-    );
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(bad_writer.writer(), &bad_cmd));
 
     const ref_defs = [_]Expr{.{ .column_def = .{
         .name = "user_id",
@@ -3851,11 +3793,7 @@ test "ast encoder column definition fragments fail closed" {
 
     var ref_buf: [512]u8 = undefined;
     var ref_writer = io.FixedBufferWriter.init(&ref_buf);
-    try encoder.writeAstToSql(ref_writer.writer(), &ref_cmd);
-    try std.testing.expectEqualStrings(
-        "CREATE TABLE IF NOT EXISTS events (user_id uuid REFERENCES /* ERROR: Invalid column definition fragment */)",
-        ref_writer.getWritten(),
-    );
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(ref_writer.writer(), &ref_cmd));
 }
 
 test "ast encoder view payload fragments fail closed" {
@@ -4664,11 +4602,7 @@ test "ast encoder hardens ddl identifier lists and constrained fragments" {
     const index_cmd = QailCmd.createIndex("users").withIndex(idx);
     var index_buf: [256]u8 = undefined;
     var index_writer = io.FixedBufferWriter.init(&index_buf);
-    try encoder.writeAstToSql(index_writer.writer(), &index_cmd);
-    try std.testing.expectEqualStrings(
-        "CREATE INDEX idx_users_name ON users (/* ERROR: Invalid identifier */)",
-        index_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidIndexElement, encoder.writeAstToSql(index_writer.writer(), &index_cmd));
 
     const rich_idx = ast.cmd.IndexDef{
         .name = "idx_users_active_email",
@@ -4697,11 +4631,7 @@ test "ast encoder hardens ddl identifier lists and constrained fragments" {
     const expr_index_cmd = QailCmd.createIndex("users").withIndex(expr_idx);
     var expr_index_buf: [256]u8 = undefined;
     var expr_index_writer = io.FixedBufferWriter.init(&expr_index_buf);
-    try encoder.writeAstToSql(expr_index_writer.writer(), &expr_index_cmd);
-    try std.testing.expectEqualStrings(
-        "CREATE INDEX idx_users_lower_email ON users (/* ERROR: Invalid identifier */)",
-        expr_index_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidIndexElement, encoder.writeAstToSql(expr_index_writer.writer(), &expr_index_cmd));
 
     var enum_cmd = QailCmd{ .kind = .create_enum, .table = "mood", .payload = "'semi;inside', 'sad'" };
     var enum_buf: [256]u8 = undefined;
@@ -5165,11 +5095,7 @@ test "ast encoder expression fragments fail closed" {
 
     var function_buf: [256]u8 = undefined;
     var function_writer = io.FixedBufferWriter.init(&function_buf);
-    try encoder.writeAstToSql(function_writer.writer(), &bad_function_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid function name */ FROM users",
-        function_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidFunctionName, encoder.writeAstToSql(function_writer.writer(), &bad_function_cmd));
 
     const bad_cast_cols = [_]Expr{.{ .cast = .{
         .expr = &name,
@@ -5179,21 +5105,13 @@ test "ast encoder expression fragments fail closed" {
 
     var cast_buf: [256]u8 = undefined;
     var cast_writer = io.FixedBufferWriter.init(&cast_buf);
-    try encoder.writeAstToSql(cast_writer.writer(), &bad_cast_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid cast target type */ FROM users",
-        cast_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidCastTarget, encoder.writeAstToSql(cast_writer.writer(), &bad_cast_cmd));
 
     const raw_cols = [_]Expr{.{ .raw = "pg_sleep(1); DROP TABLE users; --" }};
     const raw_cmd = QailCmd.get("users").select(&raw_cols);
     var raw_buf: [256]u8 = undefined;
     var raw_writer = io.FixedBufferWriter.init(&raw_buf);
-    try encoder.writeAstToSql(raw_writer.writer(), &raw_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid raw SQL fragment */ FROM users",
-        raw_writer.getWritten(),
-    );
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(raw_writer.writer(), &raw_cmd));
 
     const unsafe_value_cols = [_]Expr{.{ .literal = .{ .function = "now(); DROP TABLE users; --" } }};
     const unsafe_value_cmd = QailCmd.get("users").select(&unsafe_value_cols);
@@ -5311,11 +5229,7 @@ test "ast encoder hardens window expressions" {
 
     var bad_buf: [256]u8 = undefined;
     var bad_writer = io.FixedBufferWriter.init(&bad_buf);
-    try encoder.writeAstToSql(bad_writer.writer(), &bad_window_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid window function name */ FROM users",
-        bad_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidWindowFunctionName, encoder.writeAstToSql(bad_writer.writer(), &bad_window_cmd));
 
     const window_cols = [_]Expr{.{ .window = .{
         .name = "rn",
