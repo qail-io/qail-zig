@@ -415,3 +415,45 @@ test "impact detects dropped table from multi table grant" {
     try std.testing.expect(!impact.safe_to_run);
     try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
 }
+
+test "impact detects dropped merge source and target columns" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "merge.sql",
+        .data = "MERGE INTO orders o USING staging_orders s ON o.id = s.id WHEN MATCHED THEN UPDATE SET status = s.status;",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "merge.sql", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{
+        .{
+            .table = "orders",
+            .action = .drop_column,
+            .column = .{
+                .name = "status",
+                .typ = "text",
+            },
+        },
+        .{
+            .table = "staging_orders",
+            .action = .drop_column,
+            .column = .{
+                .name = "status",
+                .typ = "text",
+            },
+        },
+    };
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 2), impact.breaking_changes.items.len);
+}

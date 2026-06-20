@@ -162,6 +162,7 @@ pub const CodebaseScanner = struct {
         try self.findSqlInsert(file_path, line_num, line);
         try self.findSqlUpdate(file_path, line_num, line);
         try self.findSqlDelete(file_path, line_num, line);
+        try self.findSqlMerge(file_path, line_num, line);
         try self.findSqlCreateIndex(file_path, line_num, line);
         try self.findSqlTableCommand(file_path, line_num, line, "create", "table");
         try self.findSqlTableCommand(file_path, line_num, line, "alter", "table");
@@ -418,6 +419,7 @@ pub const CodebaseScanner = struct {
 
         const update_pos = findKeyword(lower, "update", 0) orelse return;
         if (previousSqlKeywordIs(lower, update_pos, "do")) return;
+        if (previousSqlKeywordIs(lower, update_pos, "then")) return;
         const set_pos = findKeyword(lower, "set", update_pos + "update".len) orelse return;
         const table_start = skipSqlWs(lower, update_pos + "update".len);
         const table_end = findSqlIdentifierEnd(lower, table_start);
@@ -466,6 +468,45 @@ pub const CodebaseScanner = struct {
             const using_end = minKeywordPos(lower, using_start, &.{ "where", "returning" }) orelse lower.len;
             try self.appendSqlTableListRefs(file_path, line_num, line, lower, using_start, using_end, columns.items);
         }
+    }
+
+    fn findSqlMerge(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const merge_pos = findKeyword(lower, "merge", 0) orelse return;
+        const into_pos = findKeyword(lower, "into", merge_pos + "merge".len) orelse return;
+        const target_start = skipSqlWs(lower, into_pos + "into".len);
+        const target_end = findSqlIdentifierEnd(lower, target_start);
+        if (target_end <= target_start) return;
+        const target_alias_end = sqlTableRefEndAfterAlias(lower, target_end);
+
+        const using_pos = findKeyword(lower, "using", target_alias_end) orelse return;
+        const source_start = skipSqlWs(lower, using_pos + "using".len);
+        if (source_start >= lower.len or lower[source_start] == '(') return;
+        const source_end = findSqlIdentifierEnd(lower, source_start);
+        if (source_end <= source_start) return;
+        const source_alias_end = sqlTableRefEndAfterAlias(lower, source_end);
+
+        const on_pos = findKeyword(lower, "on", source_alias_end) orelse return;
+        var qualified_refs: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &qualified_refs);
+        try appendSqlExpressionColumns(&qualified_refs, self.allocator, sanitized[on_pos..]);
+
+        var target_columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &target_columns);
+        try appendQualifiedColumns(&target_columns, self.allocator, qualified_refs.items);
+        try appendSqlMergeTargetActionColumns(&target_columns, self.allocator, sanitized, lower, on_pos);
+
+        var source_columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &source_columns);
+        try appendQualifiedColumns(&source_columns, self.allocator, qualified_refs.items);
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, target_start, lower, target_columns.items);
+        try self.appendRawSqlTableRef(file_path, line_num, line, source_start, lower, source_columns.items);
     }
 
     fn appendSqlJoinedTableRefs(
@@ -1389,6 +1430,67 @@ fn appendSqlIndexKeyColumns(
     }
 }
 
+fn appendSqlMergeTargetActionColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    lower: []const u8,
+    start: usize,
+) !void {
+    var cursor = start;
+    while (findKeyword(lower, "set", cursor)) |set_pos| {
+        const set_start = set_pos + "set".len;
+        const set_end = minKeywordPos(lower, set_start, &.{ "when", "returning" }) orelse lower.len;
+        try appendSqlAssignmentTargets(columns, allocator, line[set_start..set_end]);
+        cursor = set_end;
+    }
+
+    cursor = start;
+    while (findKeyword(lower, "insert", cursor)) |insert_pos| {
+        const open = skipSqlWs(lower, insert_pos + "insert".len);
+        if (open < lower.len and lower[open] == '(') {
+            if (findMatchingParen(lower, open)) |close| {
+                try appendSqlColumnList(columns, allocator, line[open + 1 .. close]);
+                cursor = close + 1;
+                continue;
+            }
+        }
+        cursor = insert_pos + "insert".len;
+    }
+
+    if (findKeyword(lower, "returning", start)) |returning_pos| {
+        try appendSqlProjectionColumns(columns, allocator, line[returning_pos + "returning".len ..]);
+    }
+}
+
+fn appendSqlAssignmentTargets(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    assignments: []const u8,
+) !void {
+    var start: usize = 0;
+    while (start < assignments.len) {
+        const comma = findTopLevelComma(assignments, start) orelse assignments.len;
+        const assignment = assignments[start..comma];
+        if (findTopLevelScalar(assignment, '=')) |eq| {
+            try appendSqlColumnReference(columns, allocator, assignment[0..eq]);
+        }
+        start = comma + 1;
+    }
+}
+
+fn appendQualifiedColumns(
+    dest: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    columns: []const []const u8,
+) !void {
+    for (columns) |column| {
+        if (std.mem.indexOfScalar(u8, column, '.') != null) {
+            try appendUniqueOwned(dest, allocator, column);
+        }
+    }
+}
+
 fn sqlIndexKeyExpression(item: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, item, " \t\r\n");
     if (trimmed.len == 0) return trimmed;
@@ -1778,15 +1880,15 @@ fn isSqlReservedWord(s: []const u8) bool {
         "full",         "group",             "grouping",       "groups",    "having",
         "ilike",        "in",                "inner",          "insert",    "into",
         "is",           "join",              "last",           "left",      "like",
-        "limit",        "localtime",         "localtimestamp", "max",       "min",
-        "natural",      "not",               "nothing",        "null",      "nulls",
-        "offset",       "on",                "or",             "order",     "ordinality",
-        "outer",        "over",              "partition",      "preceding", "range",
-        "returning",    "right",             "rollup",         "row",       "rows",
-        "select",       "set",               "sets",           "sum",       "tablesample",
-        "then",         "ties",              "true",           "unbounded", "union",
-        "update",       "using",             "values",         "when",      "where",
-        "window",       "with",
+        "limit",        "localtime",         "localtimestamp", "matched",   "max",
+        "merge",        "min",               "natural",        "not",       "nothing",
+        "null",         "nulls",             "offset",         "on",        "or",
+        "order",        "ordinality",        "outer",          "over",      "partition",
+        "preceding",    "range",             "returning",      "right",     "rollup",
+        "row",          "rows",              "select",         "set",       "sets",
+        "sum",          "tablesample",       "then",           "ties",      "true",
+        "unbounded",    "union",             "update",         "using",     "values",
+        "when",         "where",             "window",         "with",
     };
     for (words) |word| {
         if (std.ascii.eqlIgnoreCase(s, word)) return true;
@@ -2847,6 +2949,30 @@ test "sql scanner tracks create index columns without opclasses" {
     try expectHasColumn(scanner.refs.items[1].columns.items, "tenant_id");
     try expectHasColumn(scanner.refs.items[1].columns.items, "active");
     try expectMissingColumn(scanner.refs.items[1].columns.items, "text_pattern_ops");
+}
+
+test "sql scanner tracks merge target and source columns" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"MERGE INTO orders o USING staging_orders s ON o.id = s.id WHEN MATCHED THEN UPDATE SET status = s.status WHEN NOT MATCHED THEN INSERT (id, status) VALUES (s.id, s.status) RETURNING created_at AS merged_at\")",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("orders", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("staging_orders", scanner.refs.items[1].table);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "id");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "status");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "created_at");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "merged_at");
+
+    try expectHasColumn(scanner.refs.items[1].columns.items, "id");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "status");
+    try expectMissingColumn(scanner.refs.items[1].columns.items, "created_at");
 }
 
 test "sql scanner tracks raw table privilege references" {
