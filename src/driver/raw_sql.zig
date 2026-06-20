@@ -11,6 +11,8 @@ pub const AlterTableRlsMode = enum {
     no_force,
 };
 
+const MAX_IDENT_LEN: usize = 63;
+
 pub fn begin() []const u8 {
     return "BEGIN";
 }
@@ -40,13 +42,13 @@ pub fn buildExplainFormatJson(allocator: std.mem.Allocator, sql: []const u8) ![]
 }
 
 pub fn buildListen(allocator: std.mem.Allocator, channel: []const u8) ![]u8 {
-    const quoted_channel = try quoteIdentifierAlloc(allocator, channel);
+    const quoted_channel = try quoteSingleIdentifierAlloc(allocator, channel);
     defer allocator.free(quoted_channel);
     return std.fmt.allocPrint(allocator, "LISTEN {s}", .{quoted_channel});
 }
 
 pub fn buildUnlisten(allocator: std.mem.Allocator, channel: []const u8) ![]u8 {
-    const quoted_channel = try quoteIdentifierAlloc(allocator, channel);
+    const quoted_channel = try quoteSingleIdentifierAlloc(allocator, channel);
     defer allocator.free(quoted_channel);
     return std.fmt.allocPrint(allocator, "UNLISTEN {s}", .{quoted_channel});
 }
@@ -56,7 +58,7 @@ pub fn buildAlterTableRls(
     table: []const u8,
     mode: AlterTableRlsMode,
 ) ![]u8 {
-    const quoted_table = try quoteIdentifierAlloc(allocator, table);
+    const quoted_table = try quoteQualifiedIdentifierAlloc(allocator, table);
     defer allocator.free(quoted_table);
     return std.fmt.allocPrint(allocator, "ALTER TABLE {s} {s}", .{ quoted_table, rlsClause(mode) });
 }
@@ -78,53 +80,81 @@ fn rlsClause(mode: AlterTableRlsMode) []const u8 {
     };
 }
 
-fn quoteIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
+fn quoteSingleIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
+    try validateIdentifierPart(ident);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.append(allocator, '"');
+    try out.appendSlice(allocator, ident);
+    try out.append(allocator, '"');
+    return try out.toOwnedSlice(allocator);
+}
+
+fn quoteQualifiedIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
     if (ident.len == 0) return error.InvalidIdentifier;
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
-    try out.append(allocator, '"');
-    for (ident) |ch| {
-        if (ch == 0) return error.InvalidIdentifier;
-        if (ch == '"') {
-            try out.appendSlice(allocator, "\"\"");
-        } else {
-            try out.append(allocator, ch);
-        }
+    var parts = std.mem.splitScalar(u8, ident, '.');
+    var wrote_part = false;
+    while (parts.next()) |part| {
+        try validateIdentifierPart(part);
+        if (wrote_part) try out.append(allocator, '.');
+        try out.append(allocator, '"');
+        try out.appendSlice(allocator, part);
+        try out.append(allocator, '"');
+        wrote_part = true;
     }
-    try out.append(allocator, '"');
+    if (!wrote_part) return error.InvalidIdentifier;
     return try out.toOwnedSlice(allocator);
+}
+
+fn validateIdentifierPart(part: []const u8) !void {
+    if (part.len == 0 or part.len > MAX_IDENT_LEN) return error.InvalidIdentifier;
+    if (!std.ascii.isAlphabetic(part[0]) and part[0] != '_') return error.InvalidIdentifier;
+    for (part[1..]) |ch| {
+        if (!isIdentifierChar(ch)) return error.InvalidIdentifier;
+    }
 }
 
 fn isIdentifierChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
 
-test "build listen quotes identifier" {
-    const sql = try buildListen(std.testing.allocator, "chan\"nel");
+test "build listen quotes strict identifier" {
+    const sql = try buildListen(std.testing.allocator, "channel_name");
     defer std.testing.allocator.free(sql);
 
-    try std.testing.expectEqualStrings("LISTEN \"chan\"\"nel\"", sql);
+    try std.testing.expectEqualStrings("LISTEN \"channel_name\"", sql);
 }
 
-test "build unlisten quotes identifier" {
-    const sql = try buildUnlisten(std.testing.allocator, "chan\"nel");
+test "build unlisten quotes strict identifier" {
+    const sql = try buildUnlisten(std.testing.allocator, "channel_name");
     defer std.testing.allocator.free(sql);
 
-    try std.testing.expectEqualStrings("UNLISTEN \"chan\"\"nel\"", sql);
+    try std.testing.expectEqualStrings("UNLISTEN \"channel_name\"", sql);
 }
 
-test "build listen rejects invalid identifier bytes" {
+test "build listen rejects invalid channels" {
     try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, ""));
+    try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, "1channel"));
+    try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, "chan.nel"));
+    try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, "chan\"nel"));
+    try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, "chan;nel"));
     try std.testing.expectError(error.InvalidIdentifier, buildListen(std.testing.allocator, "chan\x00nel"));
 }
 
-test "build alter table rls sql quotes identifier" {
-    const sql = try buildAlterTableRls(std.testing.allocator, "tenant\"orders", .enable);
+test "build alter table rls sql quotes qualified identifier" {
+    const sql = try buildAlterTableRls(std.testing.allocator, "tenant.orders", .enable);
     defer std.testing.allocator.free(sql);
 
-    try std.testing.expectEqualStrings("ALTER TABLE \"tenant\"\"orders\" ENABLE ROW LEVEL SECURITY", sql);
+    try std.testing.expectEqualStrings("ALTER TABLE \"tenant\".\"orders\" ENABLE ROW LEVEL SECURITY", sql);
+
+    try std.testing.expectError(error.InvalidIdentifier, buildAlterTableRls(std.testing.allocator, "tenant..orders", .enable));
+    try std.testing.expectError(error.InvalidIdentifier, buildAlterTableRls(std.testing.allocator, "tenant\"orders", .enable));
+    try std.testing.expectError(error.InvalidIdentifier, buildAlterTableRls(std.testing.allocator, "tenant;orders", .enable));
 }
 
 test "build deallocate prepared statement sql validates name" {

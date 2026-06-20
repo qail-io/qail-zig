@@ -1368,7 +1368,7 @@ fn validateMergeWriteTargets(columns: []const []const u8) !void {
 
 fn isReadOnlyMergeSource(cmd: *const QailCmd) bool {
     switch (cmd.kind) {
-        .get, .with, .cnt, .search, .over => {},
+        .get, .with => {},
         else => return false,
     }
 
@@ -4946,6 +4946,32 @@ test "ast encoder merge rejects invalid action shape" {
     var sql_buf: [512]u8 = undefined;
     var writer = io.FixedBufferWriter.init(&sql_buf);
     try std.testing.expectError(error.InvalidMergeActionShape, encoder.writeAstToSql(writer.writer(), &cmd));
+}
+
+test "ast encoder merge rejects non-select source query kinds" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const on = [_]ast.expr.Condition{.{
+        .left = Expr.col("users.id"),
+        .op = .eq,
+        .value = Value.fromColumn("s.id"),
+    }};
+    const clauses = [_]ast.cmd.MergeClause{.{
+        .match_kind = .not_matched_by_target,
+        .action = .do_nothing,
+    }};
+    const source = QailCmd{ .kind = .search, .table = "staging_users" };
+    const merge = ast.cmd.Merge{
+        .source = ast.cmd.MergeSource.fromQueryAs(&source, "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("users").withMerge(merge);
+
+    var sql_buf: [512]u8 = undefined;
+    var writer = io.FixedBufferWriter.init(&sql_buf);
+    try std.testing.expectError(error.InvalidMergeSourceQuery, encoder.writeAstToSql(writer.writer(), &cmd));
 }
 
 test "ast encoder alter constraint checks expression fragments" {

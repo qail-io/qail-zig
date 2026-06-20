@@ -89,13 +89,11 @@ test "Cursor SQL generation" {
     try std.testing.expectEqualStrings("CLOSE \"test_cursor\"", close);
 }
 
-test "Cursor SQL generation quotes cursor name" {
+test "Cursor SQL generation rejects invalid cursor name" {
     const allocator = std.testing.allocator;
     const cursor = Cursor.init(allocator, "c\"; DROP TABLE users; --");
 
-    const fetch = try cursor.fetchSql(allocator, 100);
-    defer allocator.free(fetch);
-    try std.testing.expectEqualStrings("FETCH 100 FROM \"c\"\"; DROP TABLE users; --\"", fetch);
+    try std.testing.expectError(error.InvalidCursorName, cursor.fetchSql(allocator, 100));
 }
 
 test "Cursor SQL generation rejects non-select queries" {

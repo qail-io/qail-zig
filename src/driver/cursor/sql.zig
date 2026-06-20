@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const MAX_IDENT_LEN: usize = 63;
+
 pub fn buildDeclare(
     allocator: std.mem.Allocator,
     cursor_name: []const u8,
@@ -31,22 +33,23 @@ pub fn buildClose(
 }
 
 fn quoteIdentifierAlloc(allocator: std.mem.Allocator, ident: []const u8) ![]u8 {
-    if (ident.len == 0) return error.InvalidCursorName;
+    try validateCursorName(ident);
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
     try out.append(allocator, '"');
-    for (ident) |ch| {
-        if (ch == 0) return error.InvalidCursorName;
-        if (ch == '"') {
-            try out.appendSlice(allocator, "\"\"");
-        } else {
-            try out.append(allocator, ch);
-        }
-    }
+    try out.appendSlice(allocator, ident);
     try out.append(allocator, '"');
     return try out.toOwnedSlice(allocator);
+}
+
+fn validateCursorName(name: []const u8) !void {
+    if (name.len == 0 or name.len > MAX_IDENT_LEN) return error.InvalidCursorName;
+    if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_') return error.InvalidCursorName;
+    for (name[1..]) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '_') return error.InvalidCursorName;
+    }
 }
 
 test "cursor sql builders" {
@@ -63,12 +66,12 @@ test "cursor sql builders" {
     try std.testing.expectEqualStrings("CLOSE \"c1\"", close);
 }
 
-test "cursor sql builders quote unsafe cursor names" {
-    const fetch = try buildFetch(std.testing.allocator, "c\"; DROP TABLE users; --", 50);
-    defer std.testing.allocator.free(fetch);
-    try std.testing.expectEqualStrings("FETCH 50 FROM \"c\"\"; DROP TABLE users; --\"", fetch);
-
+test "cursor sql builders reject invalid cursor names" {
     try std.testing.expectError(error.InvalidCursorName, buildClose(std.testing.allocator, ""));
+    try std.testing.expectError(error.InvalidCursorName, buildFetch(std.testing.allocator, "1cursor", 50));
+    try std.testing.expectError(error.InvalidCursorName, buildFetch(std.testing.allocator, "bad.name", 50));
+    try std.testing.expectError(error.InvalidCursorName, buildFetch(std.testing.allocator, "bad\"name", 50));
+    try std.testing.expectError(error.InvalidCursorName, buildFetch(std.testing.allocator, "bad;name", 50));
     try std.testing.expectError(error.InvalidCursorName, buildClose(std.testing.allocator, "bad\x00name"));
 }
 

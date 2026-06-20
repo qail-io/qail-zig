@@ -550,7 +550,7 @@ fn validateMergeWriteTargets(columns: []const []const u8) !void {
 
 fn isReadOnlyMergeSource(cmd: *const QailCmd) bool {
     switch (cmd.kind) {
-        .get, .with, .cnt, .search, .over => {},
+        .get, .with => {},
         else => return false,
     }
 

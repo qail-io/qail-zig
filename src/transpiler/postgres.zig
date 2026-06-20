@@ -953,6 +953,27 @@ test "trusted transpiler expression fragments fail closed" {
     try std.testing.expectError(error.InvalidReadOnlySubquery, toSqlTrusted(std.testing.allocator, &mutating_cte_exists_cmd));
 }
 
+test "trusted transpiler rejects non-select merge source query kinds" {
+    const on = [_]ast.expr.Condition{.{
+        .left = Expr.col("users.id"),
+        .op = .eq,
+        .value = Value.fromColumn("s.id"),
+    }};
+    const clauses = [_]ast.cmd.MergeClause{.{
+        .match_kind = .not_matched_by_target,
+        .action = .do_nothing,
+    }};
+    const source = QailCmd{ .kind = .search, .table = "staging_users" };
+    const merge = ast.cmd.Merge{
+        .source = ast.cmd.MergeSource.fromQueryAs(&source, "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    const cmd = QailCmd.mergeInto("users").withMerge(merge);
+
+    try std.testing.expectError(error.InvalidMergeSourceQuery, toSqlTrusted(std.testing.allocator, &cmd));
+}
+
 test "trusted transpiler rejects mutation target identifiers" {
     const assignments = [_]ast.cmd.Assignment{.{
         .column = "name; DROP TABLE users; --",
