@@ -1638,7 +1638,8 @@ pub fn normalizePostgresType(
 
     if (!is_array) {
         if (default_expr) |d| {
-            if (std.mem.startsWith(u8, d, "nextval(")) {
+            const trimmed_default = std.mem.trim(u8, d, " \t\r\n");
+            if (std.mem.startsWith(u8, trimmed_default, "nextval(")) {
                 if (std.mem.eql(u8, base_type, "int4")) {
                     return .{ .typ = "serial", .is_array = false, .suppress_default = true };
                 }
@@ -1897,6 +1898,24 @@ test "live check helpers skip trivial not null and function names" {
         "count",
         checkExpressionAnchorColumn("COALESCE(count, 1) > 0").?,
     );
+}
+
+test "live type normalization trims serial nextval defaults" {
+    const serial_type = normalizePostgresType(
+        "int4",
+        "integer",
+        "  nextval('events_id_seq'::regclass)",
+    );
+    try std.testing.expectEqualStrings("serial", serial_type.typ);
+    try std.testing.expect(serial_type.suppress_default);
+
+    const bigserial_type = normalizePostgresType(
+        "int8",
+        "bigint",
+        "\n\tnextval('events_id_seq'::regclass)",
+    );
+    try std.testing.expectEqualStrings("bigserial", bigserial_type.typ);
+    try std.testing.expect(bigserial_type.suppress_default);
 }
 
 test "live snapshot renders multiple column checks" {
