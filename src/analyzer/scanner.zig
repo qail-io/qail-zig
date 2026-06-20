@@ -257,9 +257,26 @@ pub const CodebaseScanner = struct {
             if (c == '\n') try line_starts.append(self.allocator, i + 1);
         }
 
+        const prefixes = [_][]const u8{
+            "Qail::",
+            "QailCmd.",
+        };
+        for (prefixes) |prefix| {
+            try self.scanQailBuilderChainsWithPrefix(file_path, content, bindings, line_starts.items, prefix);
+        }
+    }
+
+    fn scanQailBuilderChainsWithPrefix(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        content: []const u8,
+        bindings: *const LiteralBindings,
+        line_starts: []const usize,
+        prefix: []const u8,
+    ) !void {
         var idx: usize = 0;
-        while (std.mem.indexOfPos(u8, content, idx, "Qail::")) |pos| {
-            const action_start = pos + "Qail::".len;
+        while (std.mem.indexOfPos(u8, content, idx, prefix)) |pos| {
+            const action_start = pos + prefix.len;
             const action_end = findIdentifierEnd(content, action_start);
             if (action_end <= action_start) {
                 idx = action_start;
@@ -294,8 +311,17 @@ pub const CodebaseScanner = struct {
                 tables.deinit(self.allocator);
             }
             if (tables.items.len == 0) {
-                idx = statement_end + 1;
+                idx = pos + prefix.len;
                 continue;
+            }
+
+            var related_tables = try self.extractRelatedBuilderTables(chain, bindings);
+            defer {
+                for (related_tables.items) |t| self.allocator.free(t);
+                related_tables.deinit(self.allocator);
+            }
+            for (related_tables.items) |table| {
+                try appendUniqueOwned(&tables, self.allocator, table);
             }
 
             var extracted_columns = try extractColumnsFromChain(self.allocator, chain, bindings);
@@ -304,10 +330,10 @@ pub const CodebaseScanner = struct {
                 extracted_columns.deinit(self.allocator);
             }
 
-            const line_no = offsetToLine(line_starts.items, pos);
-            const line_start = line_starts.items[line_no - 1];
+            const line_no = offsetToLine(line_starts, pos);
+            const line_start = line_starts[line_no - 1];
             var line_end = content.len;
-            if (line_no < line_starts.items.len) line_end = line_starts.items[line_no] - 1;
+            if (line_no < line_starts.len) line_end = line_starts[line_no] - 1;
             const snippet = trimSnippet(content[line_start..line_end]);
 
             for (tables.items) |table| {
@@ -326,15 +352,65 @@ pub const CodebaseScanner = struct {
                 });
             }
 
-            idx = statement_end + 1;
+            idx = pos + prefix.len;
         }
+    }
+
+    fn extractRelatedBuilderTables(
+        self: *CodebaseScanner,
+        chain: []const u8,
+        bindings: *const LiteralBindings,
+    ) !std.ArrayList([]const u8) {
+        var tables = std.ArrayList([]const u8).empty;
+        var idx: usize = 0;
+
+        while (std.mem.indexOfPos(u8, chain, idx, ".")) |dot| {
+            const name_start = dot + 1;
+            const name_end = findIdentifierEnd(chain, name_start);
+            if (name_end <= name_start) {
+                idx = name_start;
+                continue;
+            }
+            const name = chain[name_start..name_end];
+            const open = skipWs(chain, name_end);
+            if (open >= chain.len or chain[open] != '(') {
+                idx = name_end;
+                continue;
+            }
+            const close = findMatchingParen(chain, open) orelse {
+                idx = open + 1;
+                continue;
+            };
+
+            const args = chain[open + 1 .. close];
+            const first_arg = firstTopLevelArg(args);
+            if (std.mem.eql(u8, name, "join")) {
+                try appendAstTableBinding(&tables, self.allocator, first_arg, bindings);
+                try appendZigFieldTableReferences(&tables, self.allocator, args, bindings, &.{"table"});
+            } else if (isErgonomicJoinMethod(name)) {
+                var join_tables = try self.resolveBuilderTables(first_arg, bindings);
+                defer {
+                    for (join_tables.items) |t| self.allocator.free(t);
+                    join_tables.deinit(self.allocator);
+                }
+                for (join_tables.items) |table| try appendUniqueOwned(&tables, self.allocator, table);
+            } else if (std.mem.eql(u8, name, "withMerge")) {
+                try appendAstTableBinding(&tables, self.allocator, first_arg, bindings);
+                try appendZigMergeSourceTables(&tables, self.allocator, args, bindings);
+            }
+
+            idx = close + 1;
+        }
+
+        return tables;
     }
 
     fn resolveBuilderTables(self: *CodebaseScanner, first_arg: []const u8, bindings: *const LiteralBindings) !std.ArrayList([]const u8) {
         var tables = std.ArrayList([]const u8).empty;
 
         if (extractStringLiteral(self.allocator, first_arg)) |table| {
-            try tables.append(self.allocator, table);
+            try appendBuilderTableIdentifier(&tables, self.allocator, table);
+            self.allocator.free(table);
             return tables;
         } else |err| switch (err) {
             error.NotAStringLiteral => {},
@@ -344,7 +420,7 @@ pub const CodebaseScanner = struct {
         if (extractLookupIdent(first_arg)) |ident| {
             if (bindings.scalars.get(ident)) |values| {
                 for (values.items) |val| {
-                    try tables.append(self.allocator, try self.allocator.dupe(u8, val));
+                    try appendBuilderTableIdentifier(&tables, self.allocator, val);
                 }
             }
         }
@@ -2606,7 +2682,27 @@ fn isQailBuilderAction(name: []const u8) bool {
         std.mem.eql(u8, name, "add") or
         std.mem.eql(u8, name, "del") or
         std.mem.eql(u8, name, "put") or
-        std.mem.eql(u8, name, "make");
+        std.mem.eql(u8, name, "make") or
+        std.mem.eql(u8, name, "mergeInto") or
+        std.mem.eql(u8, name, "truncate") or
+        std.mem.eql(u8, name, "drop") or
+        std.mem.eql(u8, name, "createIndex") or
+        std.mem.eql(u8, name, "alter") or
+        std.mem.eql(u8, name, "alterDrop") or
+        std.mem.eql(u8, name, "modify") or
+        std.mem.eql(u8, name, "alterAddConstraint") or
+        std.mem.eql(u8, name, "lockTable") or
+        std.mem.eql(u8, name, "copyOut") or
+        std.mem.eql(u8, name, "explain") or
+        std.mem.eql(u8, name, "grant") or
+        std.mem.eql(u8, name, "revoke");
+}
+
+fn isErgonomicJoinMethod(name: []const u8) bool {
+    return std.mem.eql(u8, name, "leftJoin") or
+        std.mem.eql(u8, name, "rightJoin") or
+        std.mem.eql(u8, name, "innerJoin") or
+        std.mem.eql(u8, name, "fullJoin");
 }
 
 fn findMatchingParen(s: []const u8, open_idx: usize) ?usize {
@@ -2744,6 +2840,12 @@ fn offsetToLine(line_starts: []const usize, offset: usize) usize {
 }
 
 fn firstTopLevelArg(args: []const u8) []const u8 {
+    return nthTopLevelArg(args, 0);
+}
+
+fn nthTopLevelArg(args: []const u8, target_idx: usize) []const u8 {
+    var arg_start: usize = 0;
+    var arg_idx: usize = 0;
     var i: usize = 0;
     var paren: i32 = 0;
     var bracket: i32 = 0;
@@ -2774,12 +2876,15 @@ fn firstTopLevelArg(args: []const u8) []const u8 {
             '{' => brace += 1,
             '}' => brace -= 1,
             ',' => if (paren == 0 and bracket == 0 and brace == 0) {
-                return std.mem.trim(u8, args[0..i], " \t\r\n");
+                if (arg_idx == target_idx) return std.mem.trim(u8, args[arg_start..i], " \t\r\n");
+                arg_idx += 1;
+                arg_start = i + 1;
             },
             else => {},
         }
     }
-    return std.mem.trim(u8, args, " \t\r\n");
+    if (arg_idx == target_idx) return std.mem.trim(u8, args[arg_start..], " \t\r\n");
+    return "";
 }
 
 fn extractLookupIdent(arg: []const u8) ?[]const u8 {
@@ -2812,12 +2917,16 @@ const LiteralBindings = struct {
     allocator: std.mem.Allocator,
     scalars: std.StringHashMap(StringList),
     arrays: std.StringHashMap(StringList),
+    ast_columns: std.StringHashMap(StringList),
+    ast_tables: std.StringHashMap(StringList),
 
     fn init(allocator: std.mem.Allocator) LiteralBindings {
         return .{
             .allocator = allocator,
             .scalars = std.StringHashMap(StringList).init(allocator),
             .arrays = std.StringHashMap(StringList).init(allocator),
+            .ast_columns = std.StringHashMap(StringList).init(allocator),
+            .ast_tables = std.StringHashMap(StringList).init(allocator),
         };
     }
 
@@ -2837,6 +2946,22 @@ const LiteralBindings = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.arrays.deinit();
+
+        var it_ast_columns = self.ast_columns.iterator();
+        while (it_ast_columns.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            for (entry.value_ptr.items) |v| self.allocator.free(v);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.ast_columns.deinit();
+
+        var it_ast_tables = self.ast_tables.iterator();
+        while (it_ast_tables.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            for (entry.value_ptr.items) |v| self.allocator.free(v);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.ast_tables.deinit();
     }
 
     fn collect(allocator: std.mem.Allocator, content: []const u8) !LiteralBindings {
@@ -2908,6 +3033,28 @@ const LiteralBindings = struct {
         if (array_vals.items.len > 0) {
             for (array_vals.items) |v| {
                 try self.appendBinding(&self.arrays, binding.name, try self.allocator.dupe(u8, v));
+            }
+        }
+
+        var ast_cols = try extractAstColumnReferences(self.allocator, binding.rhs, self);
+        defer {
+            for (ast_cols.items) |v| self.allocator.free(v);
+            ast_cols.deinit(self.allocator);
+        }
+        if (ast_cols.items.len > 0) {
+            for (ast_cols.items) |v| {
+                try self.appendBinding(&self.ast_columns, binding.name, try self.allocator.dupe(u8, v));
+            }
+        }
+
+        var ast_tables = try extractAstTableReferences(self.allocator, binding.rhs, self);
+        defer {
+            for (ast_tables.items) |v| self.allocator.free(v);
+            ast_tables.deinit(self.allocator);
+        }
+        if (ast_tables.items.len > 0) {
+            for (ast_tables.items) |v| {
+                try self.appendBinding(&self.ast_tables, binding.name, try self.allocator.dupe(u8, v));
             }
         }
     }
@@ -3101,6 +3248,438 @@ fn appendUniqueOwned(list: *std.ArrayList([]const u8), allocator: std.mem.Alloca
     try list.append(allocator, try allocator.dupe(u8, value));
 }
 
+fn appendBuilderTableIdentifier(
+    tables: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !void {
+    var ident = std.mem.trim(u8, raw, " \t\r\n,;()");
+    if (ident.len == 0) return;
+
+    if (ident.len >= "only ".len and std.ascii.eqlIgnoreCase(ident[0.."only ".len], "only ")) {
+        ident = std.mem.trimStart(u8, ident["only ".len..], " \t\r\n");
+    }
+
+    const end = findBuilderTableNameEnd(ident);
+    if (end == 0) return;
+    ident = std.mem.trim(u8, ident[0..end], " \t\r\n\"`");
+    if (ident.len == 0) return;
+
+    const lower = try toLowerAlloc(allocator, ident);
+    defer allocator.free(lower);
+    if (findSqlIdentifierEnd(lower, 0) != lower.len) return;
+
+    try appendUniqueOwned(tables, allocator, ident);
+}
+
+fn findBuilderTableNameEnd(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (std.ascii.isWhitespace(s[i])) return i;
+    }
+    return s.len;
+}
+
+fn extractAstColumnReferences(
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+) !std.ArrayList([]const u8) {
+    var columns = std.ArrayList([]const u8).empty;
+    try appendAstColumnReferences(&columns, allocator, expr, bindings);
+    return columns;
+}
+
+fn extractAstTableReferences(
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+) !std.ArrayList([]const u8) {
+    var tables = std.ArrayList([]const u8).empty;
+    try appendZigFieldTableReferences(&tables, allocator, expr, bindings, &.{"table"});
+    try appendZigMergeSourceTables(&tables, allocator, expr, bindings);
+    return tables;
+}
+
+fn appendAstTableBinding(
+    tables: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+) !void {
+    if (extractLookupIdent(expr)) |ident| {
+        if (bindings.ast_tables.get(ident)) |values| {
+            for (values.items) |value| try appendBuilderTableIdentifier(tables, allocator, value);
+        }
+    }
+}
+
+fn appendAstColumnReferences(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+) !void {
+    try appendAstColumnBinding(columns, allocator, expr, bindings);
+    try appendAstMethodColumnCalls(columns, allocator, expr, bindings);
+    try appendZigFieldColumnReferences(columns, allocator, expr, bindings, &.{
+        "column",
+        "on_left",
+        "on_right",
+    });
+    try appendZigFieldStringArrayColumns(columns, allocator, expr, bindings, &.{
+        "columns",
+        "partition",
+    });
+}
+
+fn appendAstColumnBinding(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+) !void {
+    if (extractLookupIdent(expr)) |ident| {
+        if (bindings.ast_columns.get(ident)) |values| {
+            for (values.items) |value| try appendSqlColumnIdentifier(columns, allocator, value);
+        }
+    }
+}
+
+fn appendAstMethodColumnCalls(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+) !void {
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, expr, idx, ".")) |dot| {
+        const name_start = dot + 1;
+        const name_end = findIdentifierEnd(expr, name_start);
+        if (name_end <= name_start) {
+            idx = name_start;
+            continue;
+        }
+        const name = expr[name_start..name_end];
+        const open = skipWs(expr, name_end);
+        if (open >= expr.len or expr[open] != '(') {
+            idx = name_end;
+            continue;
+        }
+        const close = findMatchingParen(expr, open) orelse {
+            idx = open + 1;
+            continue;
+        };
+
+        if (isAstFirstArgColumnMethod(name)) {
+            try appendColumnFromValueExpr(columns, allocator, firstTopLevelArg(expr[open + 1 .. close]), bindings);
+        }
+        idx = close + 1;
+    }
+}
+
+fn isAstFirstArgColumnMethod(name: []const u8) bool {
+    return std.mem.eql(u8, name, "col") or
+        std.mem.eql(u8, name, "colAs") or
+        std.mem.eql(u8, name, "countCol") or
+        std.mem.eql(u8, name, "count") or
+        std.mem.eql(u8, name, "countDistinct") or
+        std.mem.eql(u8, name, "sum") or
+        std.mem.eql(u8, name, "avg") or
+        std.mem.eql(u8, name, "min") or
+        std.mem.eql(u8, name, "max") or
+        std.mem.eql(u8, name, "arrayAgg") or
+        std.mem.eql(u8, name, "def") or
+        std.mem.eql(u8, name, "defWithConstraints") or
+        std.mem.eql(u8, name, "json") or
+        std.mem.eql(u8, name, "jsonObj") or
+        std.mem.eql(u8, name, "jsonPath2") or
+        std.mem.eql(u8, name, "jsonPath3") or
+        std.mem.eql(u8, name, "fromColumn");
+}
+
+fn appendColumnFromValueExpr(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    value_expr: []const u8,
+    bindings: *const LiteralBindings,
+) !void {
+    if (extractStringLiteral(allocator, value_expr)) |col| {
+        try appendSqlColumnIdentifier(columns, allocator, col);
+        allocator.free(col);
+        return;
+    } else |err| switch (err) {
+        error.NotAStringLiteral => {},
+        else => return err,
+    }
+
+    if (extractLookupIdent(value_expr)) |ident| {
+        if (bindings.scalars.get(ident)) |values| {
+            for (values.items) |value| try appendSqlColumnIdentifier(columns, allocator, value);
+        }
+    }
+}
+
+fn appendStringArrayColumnsFromArg(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    arg: []const u8,
+    bindings: *const LiteralBindings,
+) !void {
+    var vals = try extractArrayStringLiterals(allocator, arg);
+    defer {
+        for (vals.items) |v| allocator.free(v);
+        vals.deinit(allocator);
+    }
+
+    if (vals.items.len == 0) {
+        if (extractLookupIdent(arg)) |ident| {
+            if (bindings.arrays.get(ident)) |arr| {
+                for (arr.items) |v| try appendSqlColumnIdentifier(columns, allocator, v);
+            }
+        }
+    } else {
+        for (vals.items) |v| try appendSqlColumnIdentifier(columns, allocator, v);
+    }
+}
+
+fn appendZigFieldColumnReferences(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+    field_names: []const []const u8,
+) !void {
+    var values = try extractZigFieldValueStrings(allocator, expr, bindings, field_names);
+    defer {
+        for (values.items) |v| allocator.free(v);
+        values.deinit(allocator);
+    }
+    for (values.items) |value| try appendSqlColumnIdentifier(columns, allocator, value);
+}
+
+fn appendZigFieldTableReferences(
+    tables: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+    field_names: []const []const u8,
+) !void {
+    var values = try extractZigFieldValueStrings(allocator, expr, bindings, field_names);
+    defer {
+        for (values.items) |v| allocator.free(v);
+        values.deinit(allocator);
+    }
+    for (values.items) |value| try appendBuilderTableIdentifier(tables, allocator, value);
+}
+
+fn appendZigFieldStringArrayColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+    field_names: []const []const u8,
+) !void {
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, expr, idx, ".")) |dot| {
+        const name_start = dot + 1;
+        const name_end = findIdentifierEnd(expr, name_start);
+        if (name_end <= name_start) {
+            idx = name_start;
+            continue;
+        }
+        const name = expr[name_start..name_end];
+        if (!fieldNameIn(name, field_names)) {
+            idx = name_end;
+            continue;
+        }
+        const eq = skipWs(expr, name_end);
+        if (eq >= expr.len or expr[eq] != '=') {
+            idx = name_end;
+            continue;
+        }
+        const value_start = skipWs(expr, eq + 1);
+        const value_end = findZigFieldValueEnd(expr, value_start);
+        try appendStringArrayColumnsFromArg(columns, allocator, expr[value_start..value_end], bindings);
+        idx = value_end;
+    }
+}
+
+fn extractZigFieldValueStrings(
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+    field_names: []const []const u8,
+) !std.ArrayList([]const u8) {
+    var values = std.ArrayList([]const u8).empty;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, expr, idx, ".")) |dot| {
+        const name_start = dot + 1;
+        const name_end = findIdentifierEnd(expr, name_start);
+        if (name_end <= name_start) {
+            idx = name_start;
+            continue;
+        }
+        const name = expr[name_start..name_end];
+        if (!fieldNameIn(name, field_names)) {
+            idx = name_end;
+            continue;
+        }
+        const eq = skipWs(expr, name_end);
+        if (eq >= expr.len or expr[eq] != '=') {
+            idx = name_end;
+            continue;
+        }
+        const value_start = skipWs(expr, eq + 1);
+        const value_end = findZigFieldValueEnd(expr, value_start);
+        const value_expr = expr[value_start..value_end];
+
+        if (extractStringLiteral(allocator, value_expr)) |value| {
+            try appendUniqueOwned(&values, allocator, value);
+            allocator.free(value);
+        } else |err| switch (err) {
+            error.NotAStringLiteral => {},
+            else => return err,
+        }
+
+        if (extractLookupIdent(value_expr)) |ident| {
+            if (bindings.scalars.get(ident)) |bound_values| {
+                for (bound_values.items) |value| try appendUniqueOwned(&values, allocator, value);
+            }
+        }
+
+        idx = value_end;
+    }
+    return values;
+}
+
+fn fieldNameIn(name: []const u8, field_names: []const []const u8) bool {
+    for (field_names) |field_name| {
+        if (std.mem.eql(u8, name, field_name)) return true;
+    }
+    return false;
+}
+
+fn findZigFieldValueEnd(s: []const u8, start: usize) usize {
+    var i = start;
+    var paren: i32 = 0;
+    var bracket: i32 = 0;
+    var brace: i32 = 0;
+    var in_string = false;
+    var escape = false;
+    var line_comment = false;
+    var block_comment = false;
+
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+
+        if (line_comment) {
+            if (c == '\n') line_comment = false;
+            continue;
+        }
+        if (block_comment) {
+            if (c == '*' and i + 1 < s.len and s[i + 1] == '/') {
+                block_comment = false;
+                i += 1;
+            }
+            continue;
+        }
+        if (in_string) {
+            if (escape) {
+                escape = false;
+            } else if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if (c == '/' and i + 1 < s.len and s[i + 1] == '/') {
+            line_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < s.len and s[i + 1] == '*') {
+            block_comment = true;
+            i += 1;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+            continue;
+        }
+
+        switch (c) {
+            '(' => paren += 1,
+            ')' => {
+                if (paren <= 0 and bracket == 0 and brace == 0) return i;
+                paren -= 1;
+            },
+            '[' => bracket += 1,
+            ']' => {
+                if (bracket <= 0 and paren == 0 and brace == 0) return i;
+                bracket -= 1;
+            },
+            '{' => brace += 1,
+            '}' => {
+                if (brace <= 0 and paren == 0 and bracket == 0) return i;
+                brace -= 1;
+            },
+            ',' => if (paren == 0 and bracket == 0 and brace == 0) return i,
+            else => {},
+        }
+    }
+
+    return s.len;
+}
+
+fn appendZigMergeSourceTables(
+    tables: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    expr: []const u8,
+    bindings: *const LiteralBindings,
+) !void {
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, expr, idx, ".")) |dot| {
+        const name_start = dot + 1;
+        const name_end = findIdentifierEnd(expr, name_start);
+        if (name_end <= name_start) {
+            idx = name_start;
+            continue;
+        }
+        const name = expr[name_start..name_end];
+        const open = skipWs(expr, name_end);
+        if (open >= expr.len or expr[open] != '(') {
+            idx = name_end;
+            continue;
+        }
+        const close = findMatchingParen(expr, open) orelse {
+            idx = open + 1;
+            continue;
+        };
+
+        if (std.mem.eql(u8, name, "fromTable") or std.mem.eql(u8, name, "fromTableAs")) {
+            const first_arg = firstTopLevelArg(expr[open + 1 .. close]);
+            if (extractStringLiteral(allocator, first_arg)) |table| {
+                try appendBuilderTableIdentifier(tables, allocator, table);
+                allocator.free(table);
+            } else |err| switch (err) {
+                error.NotAStringLiteral => {},
+                else => return err,
+            }
+
+            if (extractLookupIdent(first_arg)) |ident| {
+                if (bindings.scalars.get(ident)) |values| {
+                    for (values.items) |value| try appendBuilderTableIdentifier(tables, allocator, value);
+                }
+            }
+        }
+
+        idx = close + 1;
+    }
+}
+
 fn extractColumnsFromChain(
     allocator: std.mem.Allocator,
     chain: []const u8,
@@ -3136,25 +3715,39 @@ fn extractColumnsFromChain(
                 allocator.free(col);
             } else |_| {}
         } else if (std.mem.eql(u8, name, "columns") or std.mem.eql(u8, name, "returning")) {
-            var vals = try extractArrayStringLiterals(allocator, first_arg);
-            defer {
-                for (vals.items) |v| allocator.free(v);
-                vals.deinit(allocator);
-            }
-            if (vals.items.len == 0) {
-                if (extractLookupIdent(first_arg)) |ident| {
-                    if (bindings.arrays.get(ident)) |arr| {
-                        for (arr.items) |v| try appendSqlColumnIdentifier(&columns, allocator, v);
-                    }
-                }
-            } else {
-                for (vals.items) |v| try appendSqlColumnIdentifier(&columns, allocator, v);
-            }
+            try appendStringArrayColumnsFromArg(&columns, allocator, first_arg, bindings);
+        } else if (std.mem.eql(u8, name, "select") or
+            std.mem.eql(u8, name, "returningCols") or
+            std.mem.eql(u8, name, "distinctOn") or
+            std.mem.eql(u8, name, "where") or
+            std.mem.eql(u8, name, "havingClauses") or
+            std.mem.eql(u8, name, "values") or
+            std.mem.eql(u8, name, "orderBy") or
+            std.mem.eql(u8, name, "onConflictDo") or
+            std.mem.eql(u8, name, "withMerge"))
+        {
+            try appendAstColumnReferences(&columns, allocator, first_arg, bindings);
+        } else if (std.mem.eql(u8, name, "join")) {
+            try appendAstColumnReferences(&columns, allocator, first_arg, bindings);
+        } else if (isErgonomicJoinMethod(name)) {
+            try appendColumnFromValueExpr(&columns, allocator, nthTopLevelArg(args, 1), bindings);
+            try appendColumnFromValueExpr(&columns, allocator, nthTopLevelArg(args, 2), bindings);
+        } else if (std.mem.eql(u8, name, "groupBy") or std.mem.eql(u8, name, "groupByWithMode")) {
+            try appendStringArrayColumnsFromArg(&columns, allocator, first_arg, bindings);
         } else if (isSingleColumnMethod(name)) {
             if (extractStringLiteral(allocator, first_arg)) |col| {
                 try appendSqlColumnIdentifier(&columns, allocator, col);
                 allocator.free(col);
-            } else |_| {}
+            } else |err| switch (err) {
+                error.NotAStringLiteral => {
+                    if (extractLookupIdent(first_arg)) |ident| {
+                        if (bindings.scalars.get(ident)) |values| {
+                            for (values.items) |value| try appendSqlColumnIdentifier(&columns, allocator, value);
+                        }
+                    }
+                },
+                else => return err,
+            }
         }
 
         idx = close + 1;
@@ -3182,7 +3775,11 @@ fn isSingleColumnMethod(name: []const u8) bool {
         std.mem.eql(u8, name, "is_not_null") or
         std.mem.eql(u8, name, "set_value") or
         std.mem.eql(u8, name, "set_coalesce") or
-        std.mem.eql(u8, name, "set_coalesce_opt");
+        std.mem.eql(u8, name, "set_coalesce_opt") or
+        std.mem.eql(u8, name, "orderByCol") or
+        std.mem.eql(u8, name, "orderByAsc") or
+        std.mem.eql(u8, name, "orderByDesc") or
+        std.mem.eql(u8, name, "setValue");
 }
 
 /// Trim snippet to max 60 chars
@@ -3979,6 +4576,185 @@ test "scanFile extracts returning and qualified qail builder columns" {
     try expectHasColumn(ref.columns.items, "status");
     try expectHasColumn(ref.columns.items, "id");
     try expectHasColumn(ref.columns.items, "created_at");
+}
+
+test "scanFile tracks Zig QailCmd get select where and join chains" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\fn list() void {
+        \\    const cmd = qail.ast.QailCmd.get("public.users AS u")
+        \\        .select(&.{
+        \\            qail.ast.Expr.col("u.id"),
+        \\            qail.ast.Expr.col("u.email"),
+        \\            qail.ast.Expr.col("o.total"),
+        \\        })
+        \\        .join(&.{.{
+        \\            .kind = .left,
+        \\            .table = "orders o",
+        \\            .on_left = "u.id",
+        \\            .on_right = "o.user_id",
+        \\        }})
+        \\        .where(&.{.{
+        \\            .condition = .{ .column = "active", .op = .eq, .value = .{ .bool = true } },
+        \\        }})
+        \\        .orderByAsc("email");
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.zig", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.zig", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try expectHasTable(scanner.refs.items, "public.users");
+    try expectHasTable(scanner.refs.items, "orders");
+    try expectTableHasColumn(scanner.refs.items, "public.users", "id");
+    try expectTableHasColumn(scanner.refs.items, "public.users", "email");
+    try expectTableHasColumn(scanner.refs.items, "public.users", "active");
+    try expectTableHasColumn(scanner.refs.items, "orders", "total");
+    try expectTableHasColumn(scanner.refs.items, "orders", "user_id");
+}
+
+test "scanFile resolves Zig QailCmd const AST bindings" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\const ORDERS_TABLE: []const u8 = "orders";
+        \\const FILTER_COL: []const u8 = "id";
+        \\const ASSIGNS = [_]Assignment{
+        \\    .{ .column = "status", .value = .{ .string = "paid" } },
+        \\};
+        \\const WHERE = [_]WhereClause{
+        \\    .{ .condition = .{ .column = FILTER_COL, .op = .eq, .value = .{ .int = 42 } } },
+        \\};
+        \\
+        \\fn update() void {
+        \\    const cmd = QailCmd.set(ORDERS_TABLE)
+        \\        .values(&ASSIGNS)
+        \\        .where(&WHERE)
+        \\        .returningCols(&.{ Expr.col("updated_at") });
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.zig", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.zig", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    const ref = scanner.refs.items[0];
+    try std.testing.expectEqualStrings("orders", ref.table);
+    try expectHasColumn(ref.columns.items, "status");
+    try expectHasColumn(ref.columns.items, "id");
+    try expectHasColumn(ref.columns.items, "updated_at");
+    try expectMissingColumn(ref.columns.items, "paid");
+}
+
+test "scanFile resolves Zig QailCmd const join table bindings" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\const JOINS = [_]Join{
+        \\    .{ .kind = .inner, .table = "orders o", .on_left = "users.id", .on_right = "o.user_id" },
+        \\};
+        \\
+        \\fn list() void {
+        \\    const cmd = QailCmd.get("users")
+        \\        .select(&.{ Expr.col("users.email"), Expr.col("o.total") })
+        \\        .join(&JOINS);
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.zig", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.zig", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try expectHasTable(scanner.refs.items, "users");
+    try expectHasTable(scanner.refs.items, "orders");
+    try expectTableHasColumn(scanner.refs.items, "users", "email");
+    try expectTableHasColumn(scanner.refs.items, "orders", "total");
+    try expectTableHasColumn(scanner.refs.items, "orders", "user_id");
+}
+
+test "scanFile scans nested Zig QailCmd source query builders" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\fn view() void {
+        \\    const cmd = QailCmd.createViewFromQuery(
+        \\        "user_ids",
+        \\        &QailCmd.get("users").select(&.{ Expr.col("id") }),
+        \\    );
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.zig", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.zig", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    const ref = scanner.refs.items[0];
+    try std.testing.expectEqualStrings("users", ref.table);
+    try expectHasColumn(ref.columns.items, "id");
+}
+
+test "scanFile extracts Zig QailCmd make columns without data types" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\const EVENTS_TABLE = "events";
+        \\const DDL_COLS = [_]Expr{
+        \\    Expr.def("id", "uuid"),
+        \\    Expr.defWithConstraints("name", "text", &.{}),
+        \\};
+        \\
+        \\fn create() void {
+        \\    const cmd = QailCmd.make(EVENTS_TABLE).select(&DDL_COLS);
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.zig", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.zig", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    const ref = scanner.refs.items[0];
+    try std.testing.expectEqualStrings("events", ref.table);
+    try expectHasColumn(ref.columns.items, "id");
+    try expectHasColumn(ref.columns.items, "name");
+    try expectMissingColumn(ref.columns.items, "uuid");
+    try expectMissingColumn(ref.columns.items, "text");
 }
 
 fn expectHasColumn(columns: []const []const u8, target: []const u8) !void {
