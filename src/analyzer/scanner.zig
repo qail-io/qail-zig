@@ -165,9 +165,24 @@ pub const CodebaseScanner = struct {
         try self.findSqlMerge(file_path, line_num, line);
         try self.findSqlCopy(file_path, line_num, line);
         try self.findSqlCreateIndex(file_path, line_num, line);
+        try self.findSqlCreateTableReferences(file_path, line_num, line);
+        try self.findSqlCreatePolicyCommand(file_path, line_num, line);
+        try self.findSqlCreateTriggerCommand(file_path, line_num, line);
+        try self.findSqlPublicationCommand(file_path, line_num, line, "create");
+        try self.findSqlCreateStatisticsCommand(file_path, line_num, line);
         try self.findSqlTableCommand(file_path, line_num, line, "create", "table");
-        try self.findSqlTableCommand(file_path, line_num, line, "alter", "table");
+        try self.findSqlAlterTableCommand(file_path, line_num, line);
+        try self.findSqlAlterPolicyCommand(file_path, line_num, line);
+        try self.findSqlPublicationCommand(file_path, line_num, line, "alter");
+        try self.findSqlAlterViewCommand(file_path, line_num, line);
+        try self.findSqlAlterTriggerCommand(file_path, line_num, line);
         try self.findSqlTableCommand(file_path, line_num, line, "drop", "table");
+        try self.findSqlDropObjectListCommand(file_path, line_num, line, "view");
+        try self.findSqlDropObjectListCommand(file_path, line_num, line, "materialized view");
+        try self.findSqlDropObjectListCommand(file_path, line_num, line, "foreign table");
+        try self.findSqlDropOnTableCommand(file_path, line_num, line, "policy");
+        try self.findSqlDropOnTableCommand(file_path, line_num, line, "trigger");
+        try self.findSqlDropOnTableCommand(file_path, line_num, line, "rule");
         try self.findSqlTableCommand(file_path, line_num, line, "truncate", "table");
         try self.findSqlPrivilegeCommand(file_path, line_num, line, "grant");
         try self.findSqlPrivilegeCommand(file_path, line_num, line, "revoke");
@@ -608,6 +623,85 @@ pub const CodebaseScanner = struct {
         }
     }
 
+    fn appendSqlPublicationTableRefs(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        sanitized: []const u8,
+        lower_scan_line: []const u8,
+        list_start: usize,
+        list_end: usize,
+    ) !void {
+        var start = list_start;
+        while (start < list_end) {
+            const comma = findTopLevelComma(lower_scan_line[0..list_end], start) orelse list_end;
+            var table_start = skipSqlWs(lower_scan_line, start);
+            if (keywordAt(lower_scan_line, "only", table_start)) {
+                table_start = skipSqlWs(lower_scan_line, table_start + "only".len);
+            }
+            if (table_start < comma and lower_scan_line[table_start] != '(') {
+                const table_end = findSqlIdentifierEnd(lower_scan_line, table_start);
+                if (table_end > table_start and table_end <= comma) {
+                    var columns: std.ArrayList([]const u8) = .empty;
+                    defer freeStringList(self.allocator, &columns);
+
+                    var cursor = table_end;
+                    const after_table = skipSqlWs(lower_scan_line, table_end);
+                    if (after_table < comma and lower_scan_line[after_table] == '(') {
+                        if (findMatchingParen(lower_scan_line, after_table)) |close| {
+                            if (close <= comma) {
+                                try appendSqlColumnList(&columns, self.allocator, sanitized[after_table + 1 .. close]);
+                                cursor = close + 1;
+                            }
+                        }
+                    }
+                    if (findKeyword(lower_scan_line[0..comma], "where", cursor)) |where_pos| {
+                        try appendSqlWhereColumns(&columns, self.allocator, sanitized[0..comma], lower_scan_line[0..comma], where_pos, &.{});
+                    }
+                    try self.appendRawSqlTableRefRange(file_path, line_num, line, table_start, table_end, columns.items);
+                }
+            }
+            start = comma + 1;
+        }
+    }
+
+    fn appendSqlReferencedTableRefs(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        sanitized: []const u8,
+        lower_scan_line: []const u8,
+        start: usize,
+    ) !void {
+        var cursor = start;
+        while (findKeyword(lower_scan_line, "references", cursor)) |references_pos| {
+            const table_start = skipSqlWs(lower_scan_line, references_pos + "references".len);
+            const table_end = findSqlIdentifierEnd(lower_scan_line, table_start);
+            if (table_end <= table_start) {
+                cursor = references_pos + "references".len;
+                continue;
+            }
+
+            var columns: std.ArrayList([]const u8) = .empty;
+            defer freeStringList(self.allocator, &columns);
+            const after_table = skipSqlWs(lower_scan_line, table_end);
+            if (after_table < lower_scan_line.len and lower_scan_line[after_table] == '(') {
+                if (findMatchingParen(lower_scan_line, after_table)) |close| {
+                    try appendSqlColumnList(&columns, self.allocator, sanitized[after_table + 1 .. close]);
+                    cursor = close + 1;
+                } else {
+                    cursor = table_end;
+                }
+            } else {
+                cursor = table_end;
+            }
+
+            try self.appendRawSqlTableRefRange(file_path, line_num, line, table_start, table_end, columns.items);
+        }
+    }
+
     fn findSqlCreateIndex(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
         const scan_line = lineBeforeSourceComment(line);
         const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
@@ -648,6 +742,269 @@ pub const CodebaseScanner = struct {
         try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
     }
 
+    fn findSqlCreateTableReferences(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const create_pos = findKeyword(lower, "create", 0) orelse return;
+        const table_pos = findKeyword(lower, "table", create_pos + "create".len) orelse return;
+        var table_start = skipSqlWs(lower, table_pos + "table".len);
+        table_start = skipSqlIfExists(lower, table_start);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var cursor = table_end;
+        while (findKeyword(lower, "like", cursor)) |like_pos| {
+            const ref_start = skipSqlWs(lower, like_pos + "like".len);
+            if (ref_start >= lower.len) break;
+            const ref_end = findSqlIdentifierEnd(lower, ref_start);
+            if (ref_end > ref_start) {
+                try self.appendRawSqlTableRefRange(file_path, line_num, line, ref_start, ref_end, &.{});
+                cursor = ref_end;
+            } else {
+                cursor = like_pos + "like".len;
+            }
+        }
+
+        cursor = table_end;
+        while (findKeyword(lower, "references", cursor)) |references_pos| {
+            const ref_start = skipSqlWs(lower, references_pos + "references".len);
+            if (ref_start >= lower.len) break;
+            const ref_end = findSqlIdentifierEnd(lower, ref_start);
+            if (ref_end <= ref_start) {
+                cursor = references_pos + "references".len;
+                continue;
+            }
+
+            var columns: std.ArrayList([]const u8) = .empty;
+            defer freeStringList(self.allocator, &columns);
+            const after_ref = skipSqlWs(lower, ref_end);
+            if (after_ref < lower.len and lower[after_ref] == '(') {
+                if (findMatchingParen(lower, after_ref)) |close| {
+                    try appendSqlColumnList(&columns, self.allocator, sanitized[after_ref + 1 .. close]);
+                    cursor = close + 1;
+                } else {
+                    cursor = ref_end;
+                }
+            } else {
+                cursor = ref_end;
+            }
+            try self.appendRawSqlTableRefRange(file_path, line_num, line, ref_start, ref_end, columns.items);
+        }
+    }
+
+    fn findSqlCreatePolicyCommand(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const create_pos = findKeyword(lower, "create", 0) orelse return;
+        const policy_pos = findKeyword(lower, "policy", create_pos + "create".len) orelse return;
+        const on_pos = findKeyword(lower, "on", policy_pos + "policy".len) orelse return;
+        const table_start = skipSqlWs(lower, on_pos + "on".len);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "using");
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "with check");
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+    }
+
+    fn findSqlCreateTriggerCommand(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const create_pos = findKeyword(lower, "create", 0) orelse return;
+        const trigger_pos = findKeyword(lower, "trigger", create_pos + "create".len) orelse return;
+        const on_pos = findKeyword(lower, "on", trigger_pos + "trigger".len) orelse return;
+        const table_start = skipSqlWs(lower, on_pos + "on".len);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+
+        if (findKeyword(lower, "update", trigger_pos + "trigger".len)) |update_pos| {
+            if (update_pos < on_pos) {
+                const of_pos = findKeyword(lower, "of", update_pos + "update".len);
+                if (of_pos != null and of_pos.? < on_pos) {
+                    try appendSqlColumnList(&columns, self.allocator, sanitized[of_pos.? + "of".len .. on_pos]);
+                }
+            }
+        }
+        try appendSqlTriggerWhenColumns(&columns, self.allocator, sanitized, lower, table_end);
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+    }
+
+    fn findSqlPublicationCommand(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        command_keyword: []const u8,
+    ) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const command_pos = findKeyword(lower, command_keyword, 0) orelse return;
+        const publication_pos = findKeyword(lower, "publication", command_pos + command_keyword.len) orelse return;
+        const table_pos = findKeyword(lower, "table", publication_pos + "publication".len) orelse return;
+        const list_start = table_pos + "table".len;
+        const list_end = minKeywordPos(lower, list_start, &.{"with"}) orelse lower.len;
+        try self.appendSqlPublicationTableRefs(file_path, line_num, line, sanitized, lower, list_start, list_end);
+    }
+
+    fn findSqlCreateStatisticsCommand(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const create_pos = findKeyword(lower, "create", 0) orelse return;
+        const stats_pos = findKeyword(lower, "statistics", create_pos + "create".len) orelse return;
+        const on_pos = findKeyword(lower, "on", stats_pos + "statistics".len) orelse return;
+        const from_pos = findKeyword(lower, "from", on_pos + "on".len) orelse return;
+        const table_start = skipSqlWs(lower, from_pos + "from".len);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        try appendSqlExpressionColumns(&columns, self.allocator, sanitized[on_pos + "on".len .. from_pos]);
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+    }
+
+    fn findSqlAlterTableCommand(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const alter_pos = findKeyword(lower, "alter", 0) orelse return;
+        const table_pos = findKeyword(lower, "table", alter_pos + "alter".len) orelse return;
+        var table_start = skipSqlWs(lower, table_pos + "table".len);
+        table_start = skipSqlIfExists(lower, table_start);
+        if (keywordAt(lower, "only", table_start)) table_start = skipSqlWs(lower, table_start + "only".len);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        try appendSqlColumnsAfterKeyword(&columns, self.allocator, sanitized, lower, table_end, "drop column");
+        try appendSqlColumnsAfterKeyword(&columns, self.allocator, sanitized, lower, table_end, "rename column");
+        try appendSqlColumnsAfterKeyword(&columns, self.allocator, sanitized, lower, table_end, "alter column");
+        try appendSqlColumnsAfterKeyword(&columns, self.allocator, sanitized, lower, table_end, "add column");
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "foreign key");
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "unique");
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "primary key");
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "check");
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+        try self.appendSqlReferencedTableRefs(file_path, line_num, line, sanitized, lower, table_end);
+    }
+
+    fn findSqlAlterPolicyCommand(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const alter_pos = findKeyword(lower, "alter", 0) orelse return;
+        const policy_pos = findKeyword(lower, "policy", alter_pos + "alter".len) orelse return;
+        const on_pos = findKeyword(lower, "on", policy_pos + "policy".len) orelse return;
+        const table_start = skipSqlWs(lower, on_pos + "on".len);
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "using");
+        try appendSqlParenthesizedClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "with check");
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+    }
+
+    fn findSqlAlterViewCommand(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
+        defer self.allocator.free(lower);
+
+        const alter_pos = findKeyword(lower, "alter", 0) orelse return;
+        const view_pos = findKeyword(lower, "materialized view", alter_pos + "alter".len) orelse
+            findKeyword(lower, "view", alter_pos + "alter".len) orelse return;
+        var table_start = skipSqlWs(lower, view_pos + if (keywordAt(lower, "materialized view", view_pos)) "materialized view".len else "view".len);
+        table_start = skipSqlIfExists(lower, table_start);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
+    }
+
+    fn findSqlAlterTriggerCommand(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
+        defer self.allocator.free(lower);
+
+        const alter_pos = findKeyword(lower, "alter", 0) orelse return;
+        const trigger_pos = findKeyword(lower, "trigger", alter_pos + "alter".len) orelse return;
+        const on_pos = findKeyword(lower, "on", trigger_pos + "trigger".len) orelse return;
+        const table_start = skipSqlWs(lower, on_pos + "on".len);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
+    }
+
+    fn findSqlDropObjectListCommand(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        object_keyword: []const u8,
+    ) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
+        defer self.allocator.free(lower);
+
+        const drop_pos = findKeyword(lower, "drop", 0) orelse return;
+        const object_pos = findKeyword(lower, object_keyword, drop_pos + "drop".len) orelse return;
+        var list_start = skipSqlWs(lower, object_pos + object_keyword.len);
+        list_start = skipSqlIfExists(lower, list_start);
+        const list_end = minKeywordPos(lower, list_start, &.{ "cascade", "restrict" }) orelse lower.len;
+        try self.appendSqlTableListRefs(file_path, line_num, line, lower, list_start, list_end, &.{});
+    }
+
+    fn findSqlDropOnTableCommand(
+        self: *CodebaseScanner,
+        file_path: []const u8,
+        line_num: usize,
+        line: []const u8,
+        object_keyword: []const u8,
+    ) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const lower = try toLowerAlloc(self.allocator, scan_line);
+        defer self.allocator.free(lower);
+
+        const drop_pos = findKeyword(lower, "drop", 0) orelse return;
+        const object_pos = findKeyword(lower, object_keyword, drop_pos + "drop".len) orelse return;
+        const on_pos = findKeyword(lower, "on", object_pos + object_keyword.len) orelse return;
+        const table_start = skipSqlWs(lower, on_pos + "on".len);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
+    }
+
     fn findSqlTableCommand(
         self: *CodebaseScanner,
         file_path: []const u8,
@@ -665,6 +1022,17 @@ pub const CodebaseScanner = struct {
         var table_start = skipSqlWs(lower, second_pos + second_keyword.len);
         table_start = skipSqlIfExists(lower, table_start);
         if (table_start >= lower.len or lower[table_start] == '(') return;
+
+        if (std.mem.eql(u8, first_keyword, "drop")) {
+            const table_end = minKeywordPos(lower, table_start, &.{ "cascade", "restrict" }) orelse lower.len;
+            try self.appendSqlTableListRefs(file_path, line_num, line, lower, table_start, table_end, &.{});
+            return;
+        }
+        if (std.mem.eql(u8, first_keyword, "truncate")) {
+            const table_end = minKeywordPos(lower, table_start, &.{ "restart", "continue", "cascade", "restrict" }) orelse lower.len;
+            try self.appendSqlTableListRefs(file_path, line_num, line, lower, table_start, table_end, &.{});
+            return;
+        }
 
         try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
     }
@@ -1453,6 +1821,83 @@ fn appendSqlWhereColumns(
     const where_end = minKeywordPos(lower, where_start, end_keywords) orelse lower.len;
     if (where_end <= where_start) return;
     try appendSqlExpressionColumns(columns, allocator, sql[where_start..where_end]);
+}
+
+fn appendSqlParenthesizedClauseColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    sql: []const u8,
+    lower: []const u8,
+    search_start: usize,
+    keyword: []const u8,
+) !void {
+    var cursor = search_start;
+    while (findKeyword(lower, keyword, cursor)) |keyword_pos| {
+        const open = skipSqlWs(lower, keyword_pos + keyword.len);
+        if (open < lower.len and lower[open] == '(') {
+            if (findMatchingParen(lower, open)) |close| {
+                try appendSqlExpressionColumns(columns, allocator, sql[open + 1 .. close]);
+                cursor = close + 1;
+                continue;
+            }
+        }
+        cursor = keyword_pos + keyword.len;
+    }
+}
+
+fn appendSqlColumnsAfterKeyword(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    sql: []const u8,
+    lower: []const u8,
+    search_start: usize,
+    keyword: []const u8,
+) !void {
+    var cursor = search_start;
+    while (findKeyword(lower, keyword, cursor)) |keyword_pos| {
+        var column_start = skipSqlWs(lower, keyword_pos + keyword.len);
+        column_start = skipSqlIfExists(lower, column_start);
+        const column_end = findSqlIdentifierEnd(lower, column_start);
+        if (column_end > column_start) {
+            try appendSqlColumnReference(columns, allocator, sql[column_start..column_end]);
+            cursor = column_end;
+        } else {
+            cursor = keyword_pos + keyword.len;
+        }
+    }
+}
+
+fn appendSqlTriggerWhenColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    sql: []const u8,
+    lower: []const u8,
+    search_start: usize,
+) !void {
+    var cursor = search_start;
+    while (findKeyword(lower, "when", cursor)) |when_pos| {
+        const open = skipSqlWs(lower, when_pos + "when".len);
+        if (open < lower.len and lower[open] == '(') {
+            if (findMatchingParen(lower, open)) |close| {
+                var raw_columns: std.ArrayList([]const u8) = .empty;
+                defer freeStringList(allocator, &raw_columns);
+                try appendSqlExpressionColumns(&raw_columns, allocator, sql[open + 1 .. close]);
+                for (raw_columns.items) |raw| {
+                    if (std.mem.indexOfScalar(u8, raw, '.')) |dot| {
+                        const qualifier = std.mem.trim(u8, raw[0..dot], " \t\r\n\"`");
+                        if (std.ascii.eqlIgnoreCase(qualifier, "old") or std.ascii.eqlIgnoreCase(qualifier, "new")) {
+                            try appendSqlColumnReference(columns, allocator, raw[dot + 1 ..]);
+                            continue;
+                        }
+                    }
+                    try appendSqlColumnReference(columns, allocator, raw);
+                }
+                cursor = close + 1;
+                continue;
+            }
+        }
+        cursor = when_pos + "when".len;
+    }
 }
 
 fn appendSqlExpressionColumns(
@@ -3270,6 +3715,86 @@ test "sql scanner tracks raw utility table references" {
     try std.testing.expectEqualStrings("active_users", scanner.refs.items[6].table);
 }
 
+test "sql scanner tracks raw ddl dependency references" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"CREATE TABLE invoices (LIKE invoice_template INCLUDING ALL, org_id uuid REFERENCES orgs(id))\")",
+    );
+    try scanner.scanLine(
+        "test.rs",
+        2,
+        "sqlx::query(\"ALTER TABLE users ADD CONSTRAINT users_org_fk FOREIGN KEY (org_id) REFERENCES orgs(id)\")",
+    );
+
+    try expectHasTable(scanner.refs.items, "invoices");
+    try expectHasTable(scanner.refs.items, "invoice_template");
+    try expectHasTable(scanner.refs.items, "orgs");
+    try expectTableHasColumn(scanner.refs.items, "users", "org_id");
+    try expectTableHasColumn(scanner.refs.items, "orgs", "id");
+}
+
+test "sql scanner tracks raw policy publication and statistics columns" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"CREATE POLICY tenant_users ON users USING (tenant_id = current_setting('app.tenant_id')::uuid) WITH CHECK (tenant_id = current_setting('app.tenant_id')::uuid AND active = true)\")",
+    );
+    try scanner.scanLine(
+        "test.rs",
+        2,
+        "sqlx::query(\"ALTER POLICY tenant_users ON users USING (tenant_id = current_setting('app.tenant_id')::uuid)\")",
+    );
+    try scanner.scanLine(
+        "test.rs",
+        3,
+        "sqlx::query(\"CREATE PUBLICATION tenant_pub FOR TABLE users (email) WHERE (active), orders WHERE (status = 'paid')\")",
+    );
+    try scanner.scanLine(
+        "test.rs",
+        4,
+        "sqlx::query(\"CREATE STATISTICS users_stats ON lower(email), status FROM users\")",
+    );
+
+    try expectTableHasColumn(scanner.refs.items, "users", "tenant_id");
+    try expectTableHasColumn(scanner.refs.items, "users", "active");
+    try expectTableHasColumn(scanner.refs.items, "users", "email");
+    try expectTableHasColumn(scanner.refs.items, "users", "status");
+    try expectTableHasColumn(scanner.refs.items, "orders", "status");
+}
+
+test "sql scanner tracks raw trigger and drop object references" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"CREATE TRIGGER order_status_changed BEFORE UPDATE OF status ON orders FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status AND NEW.total > 0) EXECUTE FUNCTION audit_order()\")",
+    );
+    try scanner.scanLine("test.rs", 2, "sqlx::query(\"DROP TABLE IF EXISTS users, orders CASCADE\")");
+    try scanner.scanLine("test.rs", 3, "sqlx::query(\"DROP VIEW IF EXISTS active_users\")");
+    try scanner.scanLine("test.rs", 4, "sqlx::query(\"DROP MATERIALIZED VIEW IF EXISTS active_orders\")");
+    try scanner.scanLine("test.rs", 5, "sqlx::query(\"DROP FOREIGN TABLE IF EXISTS remote_users\")");
+    try scanner.scanLine("test.rs", 6, "sqlx::query(\"DROP TRIGGER IF EXISTS sync_users ON users\")");
+
+    try expectTableHasColumn(scanner.refs.items, "orders", "status");
+    try expectTableHasColumn(scanner.refs.items, "orders", "total");
+    try expectHasTable(scanner.refs.items, "users");
+    try expectHasTable(scanner.refs.items, "active_users");
+    try expectHasTable(scanner.refs.items, "active_orders");
+    try expectHasTable(scanner.refs.items, "remote_users");
+}
+
 test "isSourceFile" {
     try std.testing.expect(isSourceFile("main.rs"));
     try std.testing.expect(isSourceFile("app.ts"));
@@ -3406,4 +3931,14 @@ fn expectHasTable(refs: []const CodeReference, target: []const u8) !void {
         if (std.mem.eql(u8, ref.table, target)) return;
     }
     return error.ExpectedTableMissing;
+}
+
+fn expectTableHasColumn(refs: []const CodeReference, table: []const u8, column: []const u8) !void {
+    for (refs) |ref| {
+        if (!std.mem.eql(u8, ref.table, table)) continue;
+        for (ref.columns.items) |col| {
+            if (std.mem.eql(u8, col, column)) return;
+        }
+    }
+    return error.ExpectedColumnMissing;
 }

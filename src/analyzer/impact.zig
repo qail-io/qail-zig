@@ -508,6 +508,98 @@ test "impact detects dropped table from raw maintenance statements" {
     try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
 }
 
+test "impact detects dropped table from raw create table reference" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "schema.sql",
+        .data = "CREATE TABLE invoices (org_id uuid REFERENCES orgs(id));",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "schema.sql", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "orgs",
+        .action = .drop_table,
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+}
+
+test "impact detects dropped column from raw policy predicate" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "policy.sql",
+        .data = "ALTER POLICY tenant_users ON users USING (tenant_id = current_setting('app.tenant_id')::uuid);",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "policy.sql", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "users",
+        .action = .drop_column,
+        .column = .{
+            .name = "tenant_id",
+            .typ = "uuid",
+        },
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+}
+
+test "impact detects dropped column from raw trigger update" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "trigger.sql",
+        .data = "CREATE TRIGGER order_status_changed BEFORE UPDATE OF status ON orders FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION audit_order();",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "trigger.sql", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "orders",
+        .action = .drop_column,
+        .column = .{
+            .name = "status",
+            .typ = "text",
+        },
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+}
+
 test "impact detects dropped merge source and target columns" {
     const allocator = std.testing.allocator;
 
