@@ -252,6 +252,11 @@ fn renderTable(writer: anytype, table: *const parser.TableDef) !void {
         }
         try writer.writeAll("\n");
     }
+    for (table.foreign_keys.items) |fk| {
+        try writer.writeAll("  ");
+        try schema_types.writeMultiColumnForeignKeyQail(writer, &fk);
+        try writer.writeAll("\n");
+    }
     if (table.enable_rls) try writer.writeAll("  enable_rls\n");
     if (table.force_rls) try writer.writeAll("  force_rls\n");
     try writer.writeAll(")\n\n");

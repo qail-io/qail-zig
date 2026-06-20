@@ -144,6 +144,41 @@ fn checkPrivilege(field: []const u8, value: []const u8) ?SanitizeError {
     };
 }
 
+fn isKnownForeignKeyAction(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    return std.ascii.eqlIgnoreCase(trimmed, "CASCADE") or
+        std.ascii.eqlIgnoreCase(trimmed, "SET NULL") or
+        std.ascii.eqlIgnoreCase(trimmed, "SET DEFAULT") or
+        std.ascii.eqlIgnoreCase(trimmed, "RESTRICT") or
+        std.ascii.eqlIgnoreCase(trimmed, "NO ACTION");
+}
+
+fn checkForeignKeyAction(field: []const u8, value: []const u8) ?SanitizeError {
+    if (isKnownForeignKeyAction(value)) return null;
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "foreign key actions must be known PostgreSQL action keywords",
+    };
+}
+
+fn isKnownForeignKeyDeferrable(value: []const u8) bool {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    return std.ascii.eqlIgnoreCase(trimmed, "DEFERRABLE") or
+        std.ascii.eqlIgnoreCase(trimmed, "DEFERRABLE INITIALLY DEFERRED") or
+        std.ascii.eqlIgnoreCase(trimmed, "DEFERRABLE INITIALLY IMMEDIATE") or
+        std.ascii.eqlIgnoreCase(trimmed, "NOT DEFERRABLE");
+}
+
+fn checkForeignKeyDeferrable(field: []const u8, value: []const u8) ?SanitizeError {
+    if (isKnownForeignKeyDeferrable(value)) return null;
+    return .{
+        .field = field,
+        .value = shortValue(value),
+        .reason = "foreign key deferrability must be a known PostgreSQL deferrability clause",
+    };
+}
+
 fn actionAllowsTableAlias(kind: ast.CmdKind) bool {
     return switch (kind) {
         .get, .cnt, .set, .del, .search, .over, .with, .explain, .explain_analyze => true,
@@ -678,12 +713,24 @@ fn checkConstraint(constraint: TableConstraint) ?SanitizeError {
             break :blk null;
         },
         .foreign_key => |fk| blk: {
+            if (fk.name) |name| {
+                if (checkIdent("constraint.name", name)) |err| break :blk err;
+            }
             for (fk.columns) |c| {
                 if (checkIdent("constraint.column", c)) |err| break :blk err;
             }
-            if (checkIdent("constraint.ref_table", fk.ref_table)) |err| break :blk err;
+            if (checkTableRef("constraint.ref_table", fk.ref_table)) |err| break :blk err;
             for (fk.ref_columns) |c| {
                 if (checkIdent("constraint.ref_column", c)) |err| break :blk err;
+            }
+            if (fk.on_delete) |action| {
+                if (checkForeignKeyAction("constraint.on_delete", action)) |err| break :blk err;
+            }
+            if (fk.on_update) |action| {
+                if (checkForeignKeyAction("constraint.on_update", action)) |err| break :blk err;
+            }
+            if (fk.deferrable) |mode| {
+                if (checkForeignKeyDeferrable("constraint.deferrable", mode)) |err| break :blk err;
             }
             break :blk null;
         },

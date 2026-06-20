@@ -341,9 +341,13 @@ pub const TableConstraint = union(enum) {
     primary_key: []const []const u8,
     /// FOREIGN KEY
     foreign_key: struct {
+        name: ?[]const u8 = null,
         columns: []const []const u8,
         ref_table: []const u8,
         ref_columns: []const []const u8,
+        on_delete: ?[]const u8 = null,
+        on_update: ?[]const u8 = null,
+        deferrable: ?[]const u8 = null,
     },
     /// CHECK constraint
     check: []const u8,

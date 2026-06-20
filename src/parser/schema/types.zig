@@ -105,9 +105,59 @@ pub fn writeReferenceOptionsSql(
     }
 }
 
+pub const MultiColumnForeignKey = struct {
+    name: ?[]const u8 = null,
+    columns: []const []const u8,
+    ref_table: []const u8,
+    ref_columns: []const []const u8,
+    on_delete: ?[]const u8 = null,
+    on_update: ?[]const u8 = null,
+    deferrable: ?[]const u8 = null,
+
+    pub fn deinit(self: *const MultiColumnForeignKey, allocator: Allocator) void {
+        if (self.name) |name| allocator.free(name);
+        for (self.columns) |column| allocator.free(column);
+        allocator.free(self.columns);
+        allocator.free(self.ref_table);
+        for (self.ref_columns) |column| allocator.free(column);
+        allocator.free(self.ref_columns);
+        if (self.on_delete) |action| allocator.free(action);
+        if (self.on_update) |action| allocator.free(action);
+        if (self.deferrable) |mode| allocator.free(mode);
+    }
+};
+
+pub fn writeIdentifierList(writer: anytype, identifiers: []const []const u8) !void {
+    for (identifiers, 0..) |identifier, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.writeAll(identifier);
+    }
+}
+
+pub fn writeMultiColumnForeignKeyQail(writer: anytype, fk: *const MultiColumnForeignKey) !void {
+    try writer.writeAll("foreign_key (");
+    try writeIdentifierList(writer, fk.columns);
+    try writer.print(") references {s}(", .{fk.ref_table});
+    try writeIdentifierList(writer, fk.ref_columns);
+    try writer.writeByte(')');
+    if (fk.name) |name| try writer.print(" constraint {s}", .{name});
+    try writeReferenceOptionsQail(writer, fk.on_delete, fk.on_update, fk.deferrable);
+}
+
+pub fn writeMultiColumnForeignKeySql(writer: anytype, fk: *const MultiColumnForeignKey) !void {
+    if (fk.name) |name| try writer.print("CONSTRAINT {s} ", .{name});
+    try writer.writeAll("FOREIGN KEY (");
+    try writeIdentifierList(writer, fk.columns);
+    try writer.print(") REFERENCES {s}(", .{fk.ref_table});
+    try writeIdentifierList(writer, fk.ref_columns);
+    try writer.writeByte(')');
+    try writeReferenceOptionsSql(writer, fk.on_delete, fk.on_update, fk.deferrable);
+}
+
 pub const TableDef = struct {
     name: []const u8,
     columns: std.ArrayList(ColumnDef),
+    foreign_keys: std.ArrayList(MultiColumnForeignKey),
     enable_rls: bool = false,
     force_rls: bool = false,
 
@@ -115,6 +165,7 @@ pub const TableDef = struct {
         return .{
             .name = name,
             .columns = std.ArrayList(ColumnDef).initCapacity(allocator, 0) catch unreachable,
+            .foreign_keys = std.ArrayList(MultiColumnForeignKey).initCapacity(allocator, 0) catch unreachable,
         };
     }
 
@@ -122,7 +173,11 @@ pub const TableDef = struct {
         for (self.columns.items) |*col| {
             col.deinit(allocator);
         }
+        for (self.foreign_keys.items) |*fk| {
+            fk.deinit(allocator);
+        }
         self.columns.deinit(allocator);
+        self.foreign_keys.deinit(allocator);
         allocator.free(self.name);
     }
 
@@ -180,9 +235,16 @@ pub const TableDef = struct {
                 try writer.print(" CHECK({s})", .{check_expr});
             }
 
-            if (i < self.columns.items.len - 1) {
+            if (i < self.columns.items.len - 1 or self.foreign_keys.items.len > 0) {
                 try writer.writeAll(",");
             }
+            try writer.writeAll("\n");
+        }
+
+        for (self.foreign_keys.items, 0..) |fk, i| {
+            try writer.writeAll("    ");
+            try writeMultiColumnForeignKeySql(writer, &fk);
+            if (i < self.foreign_keys.items.len - 1) try writer.writeAll(",");
             try writer.writeAll("\n");
         }
 

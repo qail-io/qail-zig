@@ -23,6 +23,7 @@ const QailCmd = ast.QailCmd;
 const Expr = ast.Expr;
 const Value = ast.Value;
 const Operator = ast.Operator;
+const TableConstraint = ast.cmd.TableConstraint;
 const ColumnDef = @TypeOf(@as(Expr, undefined).column_def);
 const WindowExpr = @TypeOf(@as(Expr, undefined).window);
 const FrontendMessage = wire.FrontendMessage;
@@ -455,11 +456,15 @@ pub const AstEncoder = struct {
             .make => {
                 try writer.writeAll("CREATE TABLE IF NOT EXISTS ");
                 try writeIdentifierOrError(writer, cmd.table);
-                if (cmd.columns.len > 0) {
+                if (cmd.columns.len > 0 or cmd.table_constraints.len > 0) {
                     try writer.writeAll(" (");
                     for (cmd.columns, 0..) |col, i| {
                         if (i > 0) try writer.writeAll(", ");
                         try writeExpr(writer, &col, null);
+                    }
+                    for (cmd.table_constraints, 0..) |constraint, i| {
+                        if (cmd.columns.len > 0 or i > 0) try writer.writeAll(", ");
+                        try writeTableConstraint(writer, constraint);
                     }
                     try writer.writeAll(")");
                 }
@@ -478,17 +483,25 @@ pub const AstEncoder = struct {
                 }
             },
             .alter_add_constraint => {
-                const name = cmd.channel orelse return error.MissingConstraintName;
-                const expr = cmd.payload orelse return error.MissingConstraintExpression;
-                if (!isSafeSqlExprFragment(expr)) return error.UnsafeSqlFragment;
-
                 try writer.writeAll("ALTER TABLE ");
                 try writeIdentifierOrError(writer, cmd.table);
-                try writer.writeAll(" ADD CONSTRAINT ");
-                try writeIdentifierOrError(writer, name);
-                try writer.writeAll(" CHECK (");
-                try writer.writeAll(std.mem.trim(u8, expr, " \t\r\n"));
-                try writer.writeByte(')');
+                if (cmd.table_constraints.len > 0) {
+                    for (cmd.table_constraints, 0..) |constraint, i| {
+                        if (i > 0) try writer.writeAll(",");
+                        try writer.writeAll(" ADD ");
+                        try writeTableConstraint(writer, constraint);
+                    }
+                } else {
+                    const name = cmd.channel orelse return error.MissingConstraintName;
+                    const expr = cmd.payload orelse return error.MissingConstraintExpression;
+                    if (!isSafeSqlExprFragment(expr)) return error.UnsafeSqlFragment;
+
+                    try writer.writeAll(" ADD CONSTRAINT ");
+                    try writeIdentifierOrError(writer, name);
+                    try writer.writeAll(" CHECK (");
+                    try writer.writeAll(std.mem.trim(u8, expr, " \t\r\n"));
+                    try writer.writeByte(')');
+                }
             },
             .alter_drop_constraint => {
                 const name = cmd.channel orelse return error.MissingConstraintName;
@@ -3175,6 +3188,83 @@ fn writeColumnDefExpr(writer: anytype, def: ColumnDef) !void {
                 try writer.writeByte(')');
             }
         }
+    }
+}
+
+fn writeIdentifierList(writer: anytype, values: []const []const u8) !void {
+    for (values, 0..) |value, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeIdentifierOrError(writer, value);
+    }
+}
+
+fn checkedForeignKeyAction(action: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, action, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "CASCADE")) return "CASCADE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "SET NULL")) return "SET NULL";
+    if (std.ascii.eqlIgnoreCase(trimmed, "SET DEFAULT")) return "SET DEFAULT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "RESTRICT")) return "RESTRICT";
+    if (std.ascii.eqlIgnoreCase(trimmed, "NO ACTION")) return "NO ACTION";
+    return null;
+}
+
+fn checkedForeignKeyDeferrable(mode: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, mode, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "DEFERRABLE")) return "DEFERRABLE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "DEFERRABLE INITIALLY DEFERRED")) return "DEFERRABLE INITIALLY DEFERRED";
+    if (std.ascii.eqlIgnoreCase(trimmed, "DEFERRABLE INITIALLY IMMEDIATE")) return "DEFERRABLE INITIALLY IMMEDIATE";
+    if (std.ascii.eqlIgnoreCase(trimmed, "NOT DEFERRABLE")) return "NOT DEFERRABLE";
+    return null;
+}
+
+fn writeForeignKeyOptions(writer: anytype, on_delete: ?[]const u8, on_update: ?[]const u8, deferrable: ?[]const u8) !void {
+    if (on_delete) |action| {
+        const checked = checkedForeignKeyAction(action) orelse return error.UnsafeSqlFragment;
+        try writer.print(" ON DELETE {s}", .{checked});
+    }
+    if (on_update) |action| {
+        const checked = checkedForeignKeyAction(action) orelse return error.UnsafeSqlFragment;
+        try writer.print(" ON UPDATE {s}", .{checked});
+    }
+    if (deferrable) |mode| {
+        const checked = checkedForeignKeyDeferrable(mode) orelse return error.UnsafeSqlFragment;
+        try writer.print(" {s}", .{checked});
+    }
+}
+
+fn writeTableConstraint(writer: anytype, constraint: TableConstraint) !void {
+    switch (constraint) {
+        .unique => |columns| {
+            try writer.writeAll("UNIQUE (");
+            try writeIdentifierList(writer, columns);
+            try writer.writeByte(')');
+        },
+        .primary_key => |columns| {
+            try writer.writeAll("PRIMARY KEY (");
+            try writeIdentifierList(writer, columns);
+            try writer.writeByte(')');
+        },
+        .foreign_key => |fk| {
+            if (fk.name) |name| {
+                try writer.writeAll("CONSTRAINT ");
+                try writeIdentifierOrError(writer, name);
+                try writer.writeByte(' ');
+            }
+            try writer.writeAll("FOREIGN KEY (");
+            try writeIdentifierList(writer, fk.columns);
+            try writer.writeAll(") REFERENCES ");
+            try writeIdentifierOrError(writer, fk.ref_table);
+            try writer.writeByte('(');
+            try writeIdentifierList(writer, fk.ref_columns);
+            try writer.writeByte(')');
+            try writeForeignKeyOptions(writer, fk.on_delete, fk.on_update, fk.deferrable);
+        },
+        .check => |expr| {
+            if (!isSafeSqlExprFragment(expr)) return error.UnsafeSqlFragment;
+            try writer.writeAll("CHECK (");
+            try writer.writeAll(std.mem.trim(u8, expr, " \t\r\n"));
+            try writer.writeByte(')');
+        },
     }
 }
 

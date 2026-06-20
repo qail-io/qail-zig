@@ -14,6 +14,7 @@ pub const IndexDef = schema.IndexDef;
 pub const PolicyDef = schema.PolicyDef;
 pub const GrantDef = schema.GrantDef;
 pub const GrantAction = schema.GrantAction;
+pub const MultiColumnForeignKey = schema.MultiColumnForeignKey;
 
 pub const MigrationCmd = differ.MigrationCmd;
 pub const diffSchemas = differ.diffSchemas;

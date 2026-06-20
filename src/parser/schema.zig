@@ -29,6 +29,7 @@ pub const GrantDef = schema_types.GrantDef;
 pub const IndexDef = schema_types.IndexDef;
 pub const TableDef = schema_types.TableDef;
 pub const ColumnDef = schema_types.ColumnDef;
+pub const MultiColumnForeignKey = schema_types.MultiColumnForeignKey;
 
 fn deinitPolicyDef(allocator: Allocator, policy: *const PolicyDef) void {
     allocator.free(policy.name);
@@ -996,6 +997,117 @@ const Parser = struct {
         };
     }
 
+    fn deinitIdentifierList(allocator: Allocator, values: []const []const u8) void {
+        for (values) |value| allocator.free(value);
+        allocator.free(values);
+    }
+
+    fn identifierListContains(values: []const []const u8, needle: []const u8) bool {
+        for (values) |value| {
+            if (std.ascii.eqlIgnoreCase(value, needle)) return true;
+        }
+        return false;
+    }
+
+    fn parseForeignKeyIdentifierList(self: *Parser) ![]const []const u8 {
+        try self.expectChar('(');
+        var values = std.ArrayList([]const u8).initCapacity(self.allocator, 0) catch unreachable;
+        errdefer {
+            for (values.items) |value| self.allocator.free(value);
+            values.deinit(self.allocator);
+        }
+
+        while (true) {
+            self.skipWhitespace();
+            if (self.current() == ')') {
+                if (values.items.len == 0) return error.InvalidForeignKeyReference;
+                self.advance();
+                break;
+            }
+
+            const identifier = try self.parseBareIdentifier();
+            errdefer self.allocator.free(identifier);
+            if (identifierListContains(values.items, identifier)) return error.DuplicateColumnConstraint;
+            try values.append(self.allocator, identifier);
+
+            self.skipWhitespace();
+            if (self.current() == ',') {
+                self.advance();
+                continue;
+            }
+            if (self.current() == ')') {
+                self.advance();
+                break;
+            }
+            return error.InvalidForeignKeyReference;
+        }
+
+        return try values.toOwnedSlice(self.allocator);
+    }
+
+    fn parseMultiColumnForeignKey(self: *Parser, close_char: u8) !MultiColumnForeignKey {
+        const columns = try self.parseForeignKeyIdentifierList();
+        errdefer deinitIdentifierList(self.allocator, columns);
+
+        if (!self.matchKeyword("references")) return error.InvalidForeignKeyReference;
+        const ref_table = try self.parseIdentifier();
+        errdefer self.allocator.free(ref_table);
+
+        const ref_columns = try self.parseForeignKeyIdentifierList();
+        errdefer deinitIdentifierList(self.allocator, ref_columns);
+        if (columns.len != ref_columns.len) return error.InvalidForeignKeyReference;
+
+        var fk = MultiColumnForeignKey{
+            .columns = columns,
+            .ref_table = ref_table,
+            .ref_columns = ref_columns,
+        };
+        errdefer fk.deinit(self.allocator);
+
+        var seen_name = false;
+        var seen_on_delete = false;
+        var seen_on_update = false;
+        var seen_deferrable = false;
+
+        while (true) {
+            self.skipInlineWhitespace();
+            const c = self.current() orelse break;
+            if (c == ',' or c == close_char or c == '\n' or c == '\r') break;
+            if (c == '#') break;
+            if (c == '-' and self.pos + 1 < self.input.len and self.input[self.pos + 1] == '-') break;
+
+            if (self.matchKeyword("constraint") or self.matchKeyword("name")) {
+                if (seen_name) return error.DuplicateColumnConstraint;
+                seen_name = true;
+                fk.name = try self.parseBareIdentifier();
+            } else if (self.matchKeyword("on_delete")) {
+                if (seen_on_delete) return error.DuplicateColumnConstraint;
+                seen_on_delete = true;
+                fk.on_delete = try self.parseForeignKeyAction();
+            } else if (self.matchKeyword("on_update")) {
+                if (seen_on_update) return error.DuplicateColumnConstraint;
+                seen_on_update = true;
+                fk.on_update = try self.parseForeignKeyAction();
+            } else if (self.matchKeyword("deferrable")) {
+                if (seen_deferrable) return error.DuplicateColumnConstraint;
+                seen_deferrable = true;
+                fk.deferrable = try self.dupForeignKeyDeferrable("deferrable");
+            } else if (self.matchKeyword("initially_deferred")) {
+                if (seen_deferrable) return error.DuplicateColumnConstraint;
+                seen_deferrable = true;
+                fk.deferrable = try self.dupForeignKeyDeferrable("initially_deferred");
+            } else if (self.matchKeyword("initially_immediate")) {
+                if (seen_deferrable) return error.DuplicateColumnConstraint;
+                seen_deferrable = true;
+                fk.deferrable = try self.dupForeignKeyDeferrable("initially_immediate");
+            } else {
+                return error.InvalidColumnConstraint;
+            }
+        }
+
+        return fk;
+    }
+
     fn parseTableRlsDirective(self: *Parser, table: *TableDef) !bool {
         if (self.matchKeyword("enable_rls")) {
             if (table.enable_rls) return error.DuplicateTableDirective;
@@ -1031,6 +1143,16 @@ const Parser = struct {
             if (self.current() == null) break;
 
             if (try self.parseTableRlsDirective(&table)) {
+                self.skipWhitespace();
+                if (self.current() == ',') {
+                    self.advance();
+                }
+                continue;
+            }
+
+            if (self.matchKeyword("foreign_key")) {
+                const fk = try self.parseMultiColumnForeignKey(close_char);
+                try table.foreign_keys.append(self.allocator, fk);
                 self.skipWhitespace();
                 if (self.current() == ',') {
                     self.advance();
@@ -1195,8 +1317,8 @@ const Parser = struct {
             }
         }
 
-        try validateSchemaForeignKeys(&schema);
         try validateSchemaIndexes(&schema);
+        try validateSchemaForeignKeys(&schema);
         return schema;
     }
 };
@@ -1384,7 +1506,46 @@ fn validateSchemaForeignKeys(schema: *const Schema) !void {
                 return error.InvalidForeignKeyReference;
             }
         }
+        for (table.foreign_keys.items) |fk| {
+            for (fk.columns) |column_name| {
+                if (table.findColumn(column_name) == null) return error.InvalidForeignKeyReference;
+            }
+            const target_table = schema.findTable(fk.ref_table) orelse return error.InvalidForeignKeyReference;
+            for (fk.ref_columns) |column_name| {
+                if (target_table.findColumn(column_name) == null) return error.InvalidForeignKeyReference;
+            }
+            if (!targetColumnSetIsUnique(schema, target_table, fk.ref_columns)) {
+                return error.InvalidForeignKeyReference;
+            }
+        }
     }
+}
+
+fn targetColumnSetIsUnique(schema: *const Schema, table: *const TableDef, columns: []const []const u8) bool {
+    if (columns.len == 1) {
+        const col = table.findColumn(columns[0]) orelse return false;
+        if (col.primary_key or col.unique) return true;
+    }
+
+    for (schema.indexes.items) |index| {
+        if (!index.unique) continue;
+        if (!std.ascii.eqlIgnoreCase(index.table, table.name)) continue;
+        if (index.include != null or index.where_clause != null) continue;
+        if (uniqueIndexColumnsMatch(index.columns, columns)) return true;
+    }
+    return false;
+}
+
+fn uniqueIndexColumnsMatch(fragment: []const u8, columns: []const []const u8) bool {
+    var parts = std.mem.splitScalar(u8, fragment, ',');
+    var idx: usize = 0;
+    while (parts.next()) |part| {
+        if (idx >= columns.len) return false;
+        const column_name = indexElementColumnName(std.mem.trim(u8, part, " \t\r\n")) orelse return false;
+        if (!std.ascii.eqlIgnoreCase(column_name, columns[idx])) return false;
+        idx += 1;
+    }
+    return idx == columns.len;
 }
 
 fn parseForeignKeyReference(refs: []const u8) !ForeignKeyReference {
@@ -3060,6 +3221,82 @@ test "schema parser rejects malformed foreign key action options" {
         \\)
     ;
     try std.testing.expectError(error.InvalidColumnConstraint, Schema.parse(allocator, unknown_action));
+}
+
+test "schema parser preserves composite foreign keys" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table schedules (
+        \\    route_id text,
+        \\    schedule_id text
+        \\)
+        \\
+        \\unique index idx_schedules_route_schedule on schedules (route_id, schedule_id)
+        \\
+        \\table trips (
+        \\    route_id text,
+        \\    schedule_id text,
+        \\    foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id) constraint fk_trips_schedule on_delete cascade on_update restrict initially_deferred
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const trips = schema.findTable("trips").?;
+    try std.testing.expectEqual(@as(usize, 1), trips.foreign_keys.items.len);
+    const fk = trips.foreign_keys.items[0];
+    try std.testing.expectEqualStrings("fk_trips_schedule", fk.name.?);
+    try std.testing.expectEqualStrings("route_id", fk.columns[0]);
+    try std.testing.expectEqualStrings("schedule_id", fk.columns[1]);
+    try std.testing.expectEqualStrings("schedules", fk.ref_table);
+    try std.testing.expectEqualStrings("route_id", fk.ref_columns[0]);
+    try std.testing.expectEqualStrings("schedule_id", fk.ref_columns[1]);
+    try std.testing.expectEqualStrings("cascade", fk.on_delete.?);
+    try std.testing.expectEqualStrings("restrict", fk.on_update.?);
+    try std.testing.expectEqualStrings("initially_deferred", fk.deferrable.?);
+}
+
+test "schema parser rejects malformed composite foreign keys" {
+    const allocator = std.testing.allocator;
+
+    const duplicate_local =
+        \\table schedules (
+        \\    route_id text unique,
+        \\    schedule_id text unique
+        \\)
+        \\table trips (
+        \\    route_id text,
+        \\    foreign_key (route_id, route_id) references schedules(route_id, schedule_id)
+        \\)
+    ;
+    try std.testing.expectError(error.DuplicateColumnConstraint, Schema.parse(allocator, duplicate_local));
+
+    const arity_mismatch =
+        \\table schedules (
+        \\    route_id text unique
+        \\)
+        \\table trips (
+        \\    route_id text,
+        \\    schedule_id text,
+        \\    foreign_key (route_id, schedule_id) references schedules(route_id)
+        \\)
+    ;
+    try std.testing.expectError(error.InvalidForeignKeyReference, Schema.parse(allocator, arity_mismatch));
+
+    const missing_unique_target =
+        \\table schedules (
+        \\    route_id text,
+        \\    schedule_id text
+        \\)
+        \\table trips (
+        \\    route_id text,
+        \\    schedule_id text,
+        \\    foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id)
+        \\)
+    ;
+    try std.testing.expectError(error.InvalidForeignKeyReference, Schema.parse(allocator, missing_unique_target));
 }
 
 test "parse policy block" {

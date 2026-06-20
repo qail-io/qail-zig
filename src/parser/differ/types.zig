@@ -7,10 +7,12 @@ const schema_types = @import("../schema/types.zig");
 const ast_expr = @import("../../ast/expr.zig");
 
 const ColumnDef = schema.ColumnDef;
+const MultiColumnForeignKey = schema.MultiColumnForeignKey;
 const PolicyDef = schema.PolicyDef;
 const GrantDef = schema.GrantDef;
 const Expr = ast_expr.Expr;
 const Constraint = ast_expr.Constraint;
+const TableConstraint = @import("../../ast/cmd.zig").TableConstraint;
 
 pub const MigrationCmd = struct {
     action: Action,
@@ -19,6 +21,7 @@ pub const MigrationCmd = struct {
     index: ?IndexInfo = null,
     policy: ?PolicyDef = null,
     grant: ?GrantDef = null,
+    foreign_key: ?MultiColumnForeignKey = null,
     table_columns: []const ColumnDef = &.{}, // For CREATE TABLE (AST-native, no raw SQL!)
     ddl_sql: ?[]const u8 = null, // DEPRECATED: only for backwards compatibility
 
@@ -30,6 +33,7 @@ pub const MigrationCmd = struct {
         alter_column,
         create_index,
         drop_index,
+        add_table_constraint,
         create_policy,
         drop_policy,
         grant,
@@ -121,6 +125,48 @@ pub const MigrationCmd = struct {
         freeColumnConstraints(allocator, expr.column_def.constraints);
     }
 
+    fn deinitTableConstraintSlices(allocator: Allocator, constraint: TableConstraint) void {
+        switch (constraint) {
+            .foreign_key => |fk| {
+                allocator.free(fk.columns);
+                allocator.free(fk.ref_columns);
+            },
+            .unique => |columns| allocator.free(columns),
+            .primary_key => |columns| allocator.free(columns),
+            .check => {},
+        }
+    }
+
+    fn fkActionSql(action: ?[]const u8) ?[]const u8 {
+        const value = action orelse return null;
+        return schema_types.referenceActionSql(value);
+    }
+
+    fn fkDeferrableSql(deferrable: ?[]const u8) ?[]const u8 {
+        const value = deferrable orelse return null;
+        return schema_types.referenceDeferrableSql(value);
+    }
+
+    fn allocForeignKeyTableConstraint(allocator: Allocator, fk: MultiColumnForeignKey) !TableConstraint {
+        const columns = try allocator.alloc([]const u8, fk.columns.len);
+        errdefer allocator.free(columns);
+        @memcpy(columns, fk.columns);
+
+        const ref_columns = try allocator.alloc([]const u8, fk.ref_columns.len);
+        errdefer allocator.free(ref_columns);
+        @memcpy(ref_columns, fk.ref_columns);
+
+        return .{ .foreign_key = .{
+            .name = fk.name,
+            .columns = columns,
+            .ref_table = fk.ref_table,
+            .ref_columns = ref_columns,
+            .on_delete = fkActionSql(fk.on_delete),
+            .on_update = fkActionSql(fk.on_update),
+            .deferrable = fkDeferrableSql(fk.deferrable),
+        } };
+    }
+
     fn allocColumnDefExpr(allocator: Allocator, col: ColumnDef, include_constraints: bool) !Expr {
         const type_buf = try allocColumnType(allocator, col);
         errdefer allocator.free(type_buf);
@@ -170,6 +216,15 @@ pub const MigrationCmd = struct {
                 const include_many: [*][]const u8 = @constCast(include_ptr);
                 allocator.free(include_many[0..idx.include.len]);
             }
+        }
+
+        if (cmd.table_constraints.len > 0) {
+            for (cmd.table_constraints) |constraint| {
+                deinitTableConstraintSlices(allocator, constraint);
+            }
+            const constraints_ptr: [*]const TableConstraint = cmd.table_constraints.ptr;
+            const constraints_many: [*]TableConstraint = @constCast(constraints_ptr);
+            allocator.free(constraints_many[0..cmd.table_constraints.len]);
         }
     }
 
@@ -268,6 +323,18 @@ pub const MigrationCmd = struct {
                     break :blk QailCmd.dropIndex(idx.name);
                 }
                 break :blk QailCmd.dropIndex(self.table);
+            },
+            .add_table_constraint => blk: {
+                const fk = self.foreign_key orelse return error.MissingTableConstraint;
+                var cmd = QailCmd{
+                    .kind = .alter_add_constraint,
+                    .table = self.table,
+                };
+                const constraints = try allocator.alloc(TableConstraint, 1);
+                errdefer allocator.free(constraints);
+                constraints[0] = try allocForeignKeyTableConstraint(allocator, fk);
+                cmd.table_constraints = constraints;
+                break :blk cmd;
             },
             .create_policy => blk: {
                 if (self.policy) |policy| {
@@ -404,6 +471,11 @@ pub const MigrationCmd = struct {
                     }
                 }
             },
+            .add_table_constraint => {
+                const fk = self.foreign_key orelse return error.MissingTableConstraint;
+                try w.print("ALTER TABLE {s} ADD ", .{self.table});
+                try schema_types.writeMultiColumnForeignKeySql(w, &fk);
+            },
             .drop_index => {
                 if (self.index) |idx| {
                     try w.print("DROP INDEX {s}", .{idx.name});
@@ -502,6 +574,17 @@ pub const MigrationCmd = struct {
             },
             .drop_index => {
                 try w.print("-- Cannot auto-rollback DROP INDEX (need original definition)", .{});
+            },
+            .add_table_constraint => {
+                if (self.foreign_key) |fk| {
+                    if (fk.name) |name| {
+                        try w.print("ALTER TABLE {s} DROP CONSTRAINT IF EXISTS {s}", .{ self.table, name });
+                    } else {
+                        try w.print("-- Cannot auto-rollback unnamed table constraint on {s}", .{self.table});
+                    }
+                } else {
+                    try w.print("-- Cannot auto-rollback ADD TABLE CONSTRAINT on {s} (definition missing)", .{self.table});
+                }
             },
             .create_policy => {
                 if (self.policy) |policy| {

@@ -107,6 +107,23 @@ fn deinitLiveForeignKeyReferenceMap(allocator: Allocator, map: *std.StringHashMa
     map.deinit();
 }
 
+fn deinitLiveMultiColumnForeignKeyMap(allocator: Allocator, map: *std.StringHashMap(std.ArrayList(schema_types.MultiColumnForeignKey))) void {
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        for (entry.value_ptr.items) |*fk| fk.deinit(allocator);
+        entry.value_ptr.deinit(allocator);
+    }
+    map.deinit();
+}
+
+fn deinitIndexDefList(allocator: Allocator, indexes: *std.ArrayList(schema_types.IndexDef)) void {
+    for (indexes.items) |*index| {
+        index.deinit(allocator);
+    }
+    indexes.deinit(allocator);
+}
+
 fn putOwnedStringMapValue(
     allocator: Allocator,
     map: *std.StringHashMap([]u8),
@@ -144,6 +161,33 @@ fn putOwnedLiveForeignKeyReference(
     }
 
     gop.value_ptr.* = owned_value;
+}
+
+fn appendOwnedLiveMultiColumnForeignKey(
+    allocator: Allocator,
+    map: *std.StringHashMap(std.ArrayList(schema_types.MultiColumnForeignKey)),
+    key: []u8,
+    value: schema_types.MultiColumnForeignKey,
+) !void {
+    var owned_value = value;
+    errdefer owned_value.deinit(allocator);
+
+    const gop = try map.getOrPut(key);
+    if (gop.found_existing) {
+        allocator.free(key);
+        try gop.value_ptr.append(allocator, owned_value);
+    } else {
+        gop.value_ptr.* = std.ArrayList(schema_types.MultiColumnForeignKey).initCapacity(allocator, 0) catch unreachable;
+        errdefer {
+            const removed = map.fetchRemove(key);
+            if (removed) |entry| {
+                allocator.free(entry.key);
+                var removed_list = entry.value;
+                removed_list.deinit(allocator);
+            }
+        }
+        try gop.value_ptr.append(allocator, owned_value);
+    }
 }
 
 fn deinitCheckMap(allocator: Allocator, checks: *std.StringHashMap(std.ArrayList([]u8))) void {
@@ -407,6 +451,73 @@ fn collectConstrainedColumns(
     }
 }
 
+fn collectUniqueConstraints(
+    allocator: Allocator,
+    pg: *@import("../driver/driver.zig").PgDriver,
+    base_tables: *const std.StringHashMap(void),
+    unique_columns: *std.StringHashMap(void),
+    unique_constraint_indexes: *std.ArrayList(schema_types.IndexDef),
+) !void {
+    const constraints_cmd = QailCmd.get("information_schema.table_constraints")
+        .select(&.{
+            Expr.col("table_name"),
+            Expr.col("constraint_name"),
+        }).where(&.{
+            .{ .condition = .{ .column = "table_schema", .op = .eq, .value = .{ .string = "public" } } },
+            .{ .condition = .{ .column = "constraint_type", .op = .eq, .value = .{ .string = "UNIQUE" } } },
+        }).orderBy(&.{
+        .{ .column = "table_name", .order = .asc },
+        .{ .column = "constraint_name", .order = .asc },
+    });
+    const constraints = try pg.fetchAll(&constraints_cmd);
+    defer deinitFetchedRows(allocator, constraints);
+
+    for (constraints) |constraint| {
+        const table_name = constraint.getByName("table_name") orelse continue;
+        const constraint_name = constraint.getByName("constraint_name") orelse continue;
+        if (!base_tables.contains(table_name)) continue;
+        if (!isLiveSchemaIdentifier(table_name) or !isLiveSchemaIdentifier(constraint_name)) {
+            return error.UnsupportedLiveIndexIdentifier;
+        }
+
+        const kcu_cmd = QailCmd.get("information_schema.key_column_usage")
+            .select(&.{
+                Expr.col("column_name"),
+            }).where(&.{
+                .{ .condition = .{ .column = "table_schema", .op = .eq, .value = .{ .string = "public" } } },
+                .{ .condition = .{ .column = "table_name", .op = .eq, .value = .{ .string = table_name } } },
+                .{ .condition = .{ .column = "constraint_name", .op = .eq, .value = .{ .string = constraint_name } } },
+            }).orderBy(&.{
+            .{ .column = "ordinal_position", .order = .asc },
+        });
+        const key_columns = try pg.fetchAll(&kcu_cmd);
+        defer deinitFetchedRows(allocator, key_columns);
+
+        const columns = try liveConstraintColumnList(allocator, key_columns);
+        defer freeLiveIdentifierList(allocator, columns);
+        if (columns.len == 0) continue;
+
+        if (columns.len == 1) {
+            const composite = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, columns[0] });
+            try putOwnedStringSetKey(allocator, unique_columns, composite);
+            continue;
+        }
+
+        const index_name = try allocator.dupe(u8, constraint_name);
+        errdefer allocator.free(index_name);
+        const index_table = try allocator.dupe(u8, table_name);
+        errdefer allocator.free(index_table);
+        const column_list = try allocLiveIdentifierList(allocator, columns);
+        errdefer allocator.free(column_list);
+        try unique_constraint_indexes.append(allocator, .{
+            .name = index_name,
+            .table = index_table,
+            .columns = column_list,
+            .unique = true,
+        });
+    }
+}
+
 fn collectColumnAttnums(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
@@ -537,6 +648,7 @@ fn collectForeignKeyReferences(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
     refs: *std.StringHashMap(LiveForeignKeyReference),
+    composite_refs: *std.StringHashMap(std.ArrayList(schema_types.MultiColumnForeignKey)),
 ) !void {
     const fk_constraints_cmd = QailCmd.get("information_schema.table_constraints")
         .select(&.{
@@ -595,7 +707,6 @@ fn collectForeignKeyReferences(
             table_name,
         );
         defer deinitFetchedRows(allocator, source_cols);
-        if (source_cols.len != 1) return error.UnsupportedCompositeForeignKey;
 
         const target_cols = try collectForeignKeyColumns(
             pg,
@@ -604,23 +715,59 @@ fn collectForeignKeyReferences(
             null,
         );
         defer deinitFetchedRows(allocator, target_cols);
-        if (target_cols.len != 1) return error.UnsupportedCompositeForeignKey;
+        if (source_cols.len != target_cols.len or source_cols.len == 0) return error.InvalidLiveForeignKeyMetadata;
 
-        const source_column = source_cols[0].getByName("column_name") orelse continue;
         const target_schema = target_cols[0].getByName("table_schema") orelse continue;
         const target_table = target_cols[0].getByName("table_name") orelse continue;
-        const target_column = target_cols[0].getByName("column_name") orelse continue;
         if (!std.mem.eql(u8, target_schema, "public")) return error.UnsupportedCrossSchemaForeignKey;
+        if (!isLiveSchemaIdentifier(target_table)) return error.UnsupportedLiveForeignKeyIdentifier;
 
-        const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, source_column });
-        var value = LiveForeignKeyReference{
-            .reference = try std.fmt.allocPrint(allocator, "{s}({s})", .{ target_table, target_column }),
+        if (source_cols.len == 1) {
+            const source_column = source_cols[0].getByName("column_name") orelse continue;
+            const target_column = target_cols[0].getByName("column_name") orelse continue;
+            if (!isLiveSchemaIdentifier(source_column) or !isLiveSchemaIdentifier(target_column)) {
+                return error.UnsupportedLiveForeignKeyIdentifier;
+            }
+
+            const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, source_column });
+            var value = LiveForeignKeyReference{
+                .reference = try std.fmt.allocPrint(allocator, "{s}({s})", .{ target_table, target_column }),
+            };
+            errdefer value.deinit(allocator);
+            if (on_delete) |action| value.on_delete = try allocator.dupe(u8, action);
+            if (on_update) |action| value.on_update = try allocator.dupe(u8, action);
+            if (deferrable) |mode| value.deferrable = try allocator.dupe(u8, mode);
+            try putOwnedLiveForeignKeyReference(allocator, refs, key, value);
+            continue;
+        }
+
+        if (!isLiveSchemaIdentifier(constraint_name)) return error.UnsupportedLiveForeignKeyIdentifier;
+        const columns = try liveForeignKeyColumnList(allocator, source_cols);
+        var columns_moved = false;
+        errdefer if (!columns_moved) freeLiveForeignKeyColumnList(allocator, columns);
+        const ref_columns = try liveForeignKeyColumnList(allocator, target_cols);
+        var ref_columns_moved = false;
+        errdefer if (!ref_columns_moved) freeLiveForeignKeyColumnList(allocator, ref_columns);
+
+        var fk = schema_types.MultiColumnForeignKey{
+            .name = try allocator.dupe(u8, constraint_name),
+            .columns = columns,
+            .ref_table = try allocator.dupe(u8, target_table),
+            .ref_columns = ref_columns,
         };
-        errdefer value.deinit(allocator);
-        if (on_delete) |action| value.on_delete = try allocator.dupe(u8, action);
-        if (on_update) |action| value.on_update = try allocator.dupe(u8, action);
-        if (deferrable) |mode| value.deferrable = try allocator.dupe(u8, mode);
-        try putOwnedLiveForeignKeyReference(allocator, refs, key, value);
+        columns_moved = true;
+        ref_columns_moved = true;
+        errdefer fk.deinit(allocator);
+        if (on_delete) |action| fk.on_delete = try allocator.dupe(u8, action);
+        if (on_update) |action| fk.on_update = try allocator.dupe(u8, action);
+        if (deferrable) |mode| fk.deferrable = try allocator.dupe(u8, mode);
+
+        try appendOwnedLiveMultiColumnForeignKey(
+            allocator,
+            composite_refs,
+            try allocator.dupe(u8, table_name),
+            fk,
+        );
     }
 }
 
@@ -662,6 +809,63 @@ fn collectForeignKeyColumns(
         .{ .column = "ordinal_position", .order = .asc },
     });
     return try pg.fetchAll(&cmd);
+}
+
+fn freeLiveForeignKeyColumnList(allocator: Allocator, columns: []const []const u8) void {
+    for (columns) |column| allocator.free(column);
+    allocator.free(columns);
+}
+
+fn freeLiveIdentifierList(allocator: Allocator, identifiers: []const []const u8) void {
+    for (identifiers) |identifier| allocator.free(identifier);
+    allocator.free(identifiers);
+}
+
+fn allocLiveIdentifierList(allocator: Allocator, identifiers: []const []const u8) ![]u8 {
+    var out = io_compat.AllocatingWriter.init(allocator);
+    defer out.deinit();
+    try schema_types.writeIdentifierList(out.writer(), identifiers);
+    return try out.toOwnedSlice();
+}
+
+fn liveConstraintColumnList(
+    allocator: Allocator,
+    rows: []@import("../driver/row.zig").PgRow,
+) ![]const []const u8 {
+    const columns = try allocator.alloc([]const u8, rows.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (columns[0..initialized]) |column| allocator.free(column);
+        allocator.free(columns);
+    }
+
+    for (rows, 0..) |row, i| {
+        const column_name = row.getByName("column_name") orelse return error.InvalidLiveConstraintMetadata;
+        if (!isLiveSchemaIdentifier(column_name)) return error.UnsupportedLiveIndexIdentifier;
+        columns[i] = try allocator.dupe(u8, column_name);
+        initialized += 1;
+    }
+    return columns;
+}
+
+fn liveForeignKeyColumnList(
+    allocator: Allocator,
+    rows: []@import("../driver/row.zig").PgRow,
+) ![]const []const u8 {
+    const columns = try allocator.alloc([]const u8, rows.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (columns[0..initialized]) |column| allocator.free(column);
+        allocator.free(columns);
+    }
+
+    for (rows, 0..) |row, i| {
+        const column_name = row.getByName("column_name") orelse return error.InvalidLiveForeignKeyMetadata;
+        if (!isLiveSchemaIdentifier(column_name)) return error.UnsupportedLiveForeignKeyIdentifier;
+        columns[i] = try allocator.dupe(u8, column_name);
+        initialized += 1;
+    }
+    return columns;
 }
 
 fn liveForeignKeyActionToken(rule: []const u8) !?[]const u8 {
@@ -901,6 +1105,19 @@ fn writeLiveColumnReference(
     }
 }
 
+fn writeLiveTableForeignKeys(
+    writer: anytype,
+    refs: *const std.StringHashMap(std.ArrayList(schema_types.MultiColumnForeignKey)),
+    table_name: []const u8,
+) !void {
+    const foreign_keys = refs.get(table_name) orelse return;
+    for (foreign_keys.items) |fk| {
+        try writer.writeAll("    ");
+        try schema_types.writeMultiColumnForeignKeyQail(writer, &fk);
+        try writer.writeAll("\n");
+    }
+}
+
 fn writeLiveTableRls(
     writer: anytype,
     table_rls: *const std.StringHashMap(LiveTableRls),
@@ -998,6 +1215,30 @@ fn writeLiveIndexLine(writer: anytype, index_name: []const u8, table_name: []con
         if (predicate.len > 0) try writer.print(" where {s}", .{predicate});
     }
     try writer.writeByte('\n');
+}
+
+fn writeLiveUniqueConstraintIndexes(
+    writer: anytype,
+    indexes: []const schema_types.IndexDef,
+    prefix_blank: bool,
+) !bool {
+    var wrote_any = false;
+    for (indexes) |index| {
+        if (!index.unique) return error.UnsupportedLiveIndexDefinition;
+        if (!isLiveSchemaIdentifier(index.name) or !isLiveSchemaIdentifier(index.table)) {
+            return error.UnsupportedLiveIndexIdentifier;
+        }
+        if (!isSafeLiveIndexIdentifierList(index.columns)) return error.UnsupportedLiveIndexDefinition;
+
+        if (!wrote_any and prefix_blank) try writer.writeByte('\n');
+        wrote_any = true;
+        try writer.print("unique index {s} on {s} ({s})\n", .{
+            index.name,
+            index.table,
+            index.columns,
+        });
+    }
+    return wrote_any;
 }
 
 fn writeLivePolicies(
@@ -1445,7 +1686,9 @@ pub fn renderLiveSchemaSnapshot(
 
     var unique_columns = std.StringHashMap(void).init(allocator);
     defer deinitStringSet(allocator, &unique_columns);
-    try collectConstrainedColumns(allocator, pg, "UNIQUE", &unique_columns);
+    var unique_constraint_indexes = std.ArrayList(schema_types.IndexDef).initCapacity(allocator, 0) catch unreachable;
+    defer deinitIndexDefList(allocator, &unique_constraint_indexes);
+    try collectUniqueConstraints(allocator, pg, &base_tables, &unique_columns, &unique_constraint_indexes);
 
     var attnum_columns = std.StringHashMap([]u8).init(allocator);
     defer deinitStringMap(allocator, &attnum_columns);
@@ -1457,7 +1700,9 @@ pub fn renderLiveSchemaSnapshot(
 
     var foreign_keys = std.StringHashMap(LiveForeignKeyReference).init(allocator);
     defer deinitLiveForeignKeyReferenceMap(allocator, &foreign_keys);
-    try collectForeignKeyReferences(allocator, pg, &foreign_keys);
+    var composite_foreign_keys = std.StringHashMap(std.ArrayList(schema_types.MultiColumnForeignKey)).init(allocator);
+    defer deinitLiveMultiColumnForeignKeyMap(allocator, &composite_foreign_keys);
+    try collectForeignKeyReferences(allocator, pg, &foreign_keys, &composite_foreign_keys);
 
     var table_rls = std.StringHashMap(LiveTableRls).init(allocator);
     defer deinitTableRlsMap(allocator, &table_rls);
@@ -1497,6 +1742,7 @@ pub fn renderLiveSchemaSnapshot(
 
         if (current_table == null or !std.mem.eql(u8, current_table.?, table_name)) {
             if (current_table != null) {
+                try writeLiveTableForeignKeys(writer, &composite_foreign_keys, current_table.?);
                 try writeLiveTableRls(writer, &table_rls, current_table.?);
                 try writer.writeAll(")\n\n");
             }
@@ -1563,11 +1809,23 @@ pub fn renderLiveSchemaSnapshot(
     }
 
     if (current_table != null) {
+        try writeLiveTableForeignKeys(writer, &composite_foreign_keys, current_table.?);
         try writeLiveTableRls(writer, &table_rls, current_table.?);
         try writer.writeAll(")\n");
     }
     const wrote_indexes = try writeLiveIndexes(allocator, pg, &base_tables, writer, current_table != null);
-    try writeLivePolicies(allocator, pg, &base_tables, writer, current_table != null or wrote_indexes);
+    const wrote_unique_constraint_indexes = try writeLiveUniqueConstraintIndexes(
+        writer,
+        unique_constraint_indexes.items,
+        current_table != null or wrote_indexes,
+    );
+    try writeLivePolicies(
+        allocator,
+        pg,
+        &base_tables,
+        writer,
+        current_table != null or wrote_indexes or wrote_unique_constraint_indexes,
+    );
 
     return .{
         .schema = try out.toOwnedSlice(),
@@ -1690,6 +1948,39 @@ test "live snapshot renders supported index definitions" {
     );
 }
 
+test "live snapshot renders multi-column unique constraints as indexes" {
+    const allocator = std.testing.allocator;
+    var indexes = std.ArrayList(schema_types.IndexDef).initCapacity(allocator, 0) catch unreachable;
+    defer deinitIndexDefList(allocator, &indexes);
+
+    {
+        const name = try allocator.dupe(u8, "schedules_route_schedule_unique");
+        errdefer allocator.free(name);
+        const table = try allocator.dupe(u8, "schedules");
+        errdefer allocator.free(table);
+        const columns = try allocator.dupe(u8, "route_id, schedule_id");
+        errdefer allocator.free(columns);
+        try indexes.append(allocator, .{
+            .name = name,
+            .table = table,
+            .columns = columns,
+            .unique = true,
+        });
+    }
+
+    var out = io_compat.AllocatingWriter.init(allocator);
+    defer out.deinit();
+    const wrote = try writeLiveUniqueConstraintIndexes(out.writer(), indexes.items, true);
+    try std.testing.expect(wrote);
+    const rendered = try out.toOwnedSlice();
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "\nunique index schedules_route_schedule_unique on schedules (route_id, schedule_id)\n",
+        rendered,
+    );
+}
+
 test "live snapshot rejects unsupported expression indexes" {
     var out = io_compat.AllocatingWriter.init(std.testing.allocator);
     defer out.deinit();
@@ -1750,6 +2041,46 @@ test "live foreign key helpers render references with actions" {
     defer allocator.free(rendered);
 
     try std.testing.expectEqualStrings(" references users(id) on_delete cascade on_update restrict initially_deferred", rendered);
+}
+
+test "live foreign key helpers render composite references" {
+    const allocator = std.testing.allocator;
+
+    var refs = std.StringHashMap(std.ArrayList(schema_types.MultiColumnForeignKey)).init(allocator);
+    defer deinitLiveMultiColumnForeignKeyMap(allocator, &refs);
+
+    const columns = try allocator.alloc([]const u8, 2);
+    columns[0] = try allocator.dupe(u8, "route_id");
+    columns[1] = try allocator.dupe(u8, "schedule_id");
+    const ref_columns = try allocator.alloc([]const u8, 2);
+    ref_columns[0] = try allocator.dupe(u8, "route_id");
+    ref_columns[1] = try allocator.dupe(u8, "schedule_id");
+
+    try appendOwnedLiveMultiColumnForeignKey(
+        allocator,
+        &refs,
+        try allocator.dupe(u8, "trips"),
+        .{
+            .name = try allocator.dupe(u8, "fk_trips_schedule"),
+            .columns = columns,
+            .ref_table = try allocator.dupe(u8, "schedules"),
+            .ref_columns = ref_columns,
+            .on_delete = try allocator.dupe(u8, "cascade"),
+            .on_update = try allocator.dupe(u8, "restrict"),
+            .deferrable = try allocator.dupe(u8, "deferrable"),
+        },
+    );
+
+    var out = io_compat.AllocatingWriter.init(allocator);
+    defer out.deinit();
+    try writeLiveTableForeignKeys(out.writer(), &refs, "trips");
+    const rendered = try out.toOwnedSlice();
+    defer allocator.free(rendered);
+
+    try std.testing.expectEqualStrings(
+        "    foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id) constraint fk_trips_schedule on_delete cascade on_update restrict deferrable\n",
+        rendered,
+    );
 }
 
 test "live policy helpers map targets roles and predicate safety" {

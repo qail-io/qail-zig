@@ -234,6 +234,31 @@ fn columnDefaultsEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef
     return optionalTrimmedTextEquivalent(old_col.default_value, new_col.default_value);
 }
 
+fn stringListEquivalent(left: []const []const u8, right: []const []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |left_value, right_value| {
+        if (!std.ascii.eqlIgnoreCase(left_value, right_value)) return false;
+    }
+    return true;
+}
+
+fn multiColumnForeignKeysEquivalent(left: *const schema.MultiColumnForeignKey, right: *const schema.MultiColumnForeignKey) bool {
+    return optionalTextEquivalent(left.name, right.name) and
+        stringListEquivalent(left.columns, right.columns) and
+        std.ascii.eqlIgnoreCase(left.ref_table, right.ref_table) and
+        stringListEquivalent(left.ref_columns, right.ref_columns) and
+        optionalTextEquivalent(left.on_delete, right.on_delete) and
+        optionalTextEquivalent(left.on_update, right.on_update) and
+        optionalTextEquivalent(left.deferrable, right.deferrable);
+}
+
+fn findEquivalentMultiColumnForeignKey(table: *const TableDef, fk: *const schema.MultiColumnForeignKey) ?*const schema.MultiColumnForeignKey {
+    for (table.foreign_keys.items) |*existing| {
+        if (multiColumnForeignKeysEquivalent(existing, fk)) return existing;
+    }
+    return null;
+}
+
 fn validateExistingColumnConstraintDrift(old_col: *const ColumnDef, new_col: *const ColumnDef) !void {
     if (old_col.primary_key != new_col.primary_key) return error.UnsupportedPrimaryKeyConstraintDrift;
     if (old_col.unique != new_col.unique) return error.UnsupportedUniqueConstraintDrift;
@@ -637,7 +662,35 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
         }
     }
 
-    // 5. Detect policy changes
+    // 5. Detect table-level composite foreign keys after indexes exist.
+    for (new.tables.items) |*new_table| {
+        if (old.findTable(new_table.name)) |old_table| {
+            for (old_table.foreign_keys.items) |*old_fk| {
+                if (findEquivalentMultiColumnForeignKey(new_table, old_fk) == null) {
+                    return error.UnsupportedReferenceConstraintDrift;
+                }
+            }
+            for (new_table.foreign_keys.items) |*new_fk| {
+                if (findEquivalentMultiColumnForeignKey(old_table, new_fk) == null) {
+                    try cmds.append(allocator, MigrationCmd{
+                        .action = .add_table_constraint,
+                        .table = new_table.name,
+                        .foreign_key = new_fk.*,
+                    });
+                }
+            }
+        } else {
+            for (new_table.foreign_keys.items) |*new_fk| {
+                try cmds.append(allocator, MigrationCmd{
+                    .action = .add_table_constraint,
+                    .table = new_table.name,
+                    .foreign_key = new_fk.*,
+                });
+            }
+        }
+    }
+
+    // 6. Detect policy changes
     for (new.policies.items) |*new_policy| {
         if (old.findPolicy(new_policy.name, new_policy.table)) |old_policy| {
             if (!compare.policyEquals(old_policy, new_policy)) {
@@ -671,7 +724,7 @@ pub fn diffSchemas(allocator: Allocator, old: *const Schema, new: *const Schema)
         }
     }
 
-    // 6. Detect grant/revoke changes
+    // 7. Detect grant/revoke changes
     for (new.grants.items) |*new_grant| {
         var exists = false;
         for (old.grants.items) |*old_grant| {
@@ -841,7 +894,12 @@ test "diff existing table enables row level security only upward" {
     defer new.deinit();
 
     var cmds = try diffSchemas(allocator, &old, &new);
-    defer cmds.deinit(allocator);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) allocator.free(cmd.table_columns);
+        }
+        cmds.deinit(allocator);
+    }
 
     try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
     try std.testing.expectEqual(MigrationCmd.Action.enable_rls, cmds.items[0].action);
@@ -872,7 +930,12 @@ test "diff existing table forces row level security only upward" {
     defer new.deinit();
 
     var cmds = try diffSchemas(allocator, &old, &new);
-    defer cmds.deinit(allocator);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) allocator.free(cmd.table_columns);
+        }
+        cmds.deinit(allocator);
+    }
 
     try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
     try std.testing.expectEqual(MigrationCmd.Action.force_rls, cmds.items[0].action);
@@ -1610,6 +1673,68 @@ test "diff new nullable reference column preserves fk actions" {
         "tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED",
         qail_cmd.columns[0].column_def.references.?,
     );
+}
+
+test "diff new table preserves composite foreign key" {
+    const allocator = std.testing.allocator;
+
+    const old_input = "";
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table schedules (
+        \\    route_id text,
+        \\    schedule_id text
+        \\)
+        \\
+        \\unique index idx_schedules_route_schedule on schedules (route_id, schedule_id)
+        \\
+        \\table trips (
+        \\    route_id text,
+        \\    schedule_id text,
+        \\    foreign_key (route_id, schedule_id) references schedules(route_id, schedule_id) constraint fk_trips_schedule on_delete cascade on_update restrict initially_deferred
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer {
+        for (cmds.items) |cmd| {
+            if (cmd.table_columns.len > 0) allocator.free(cmd.table_columns);
+        }
+        cmds.deinit(allocator);
+    }
+
+    var index_pos: ?usize = null;
+    var fk_pos: ?usize = null;
+    for (cmds.items, 0..) |cmd, i| {
+        if (cmd.action == .create_index) index_pos = i;
+        if (cmd.action == .add_table_constraint) fk_pos = i;
+    }
+    try std.testing.expect(index_pos != null);
+    try std.testing.expect(fk_pos != null);
+    try std.testing.expect(index_pos.? < fk_pos.?);
+
+    const sql = try cmds.items[fk_pos.?].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE trips ADD CONSTRAINT fk_trips_schedule FOREIGN KEY (route_id, schedule_id) REFERENCES schedules(route_id, schedule_id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+        sql,
+    );
+
+    const qail_cmd = try cmds.items[fk_pos.?].toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+    try std.testing.expectEqual(@as(usize, 1), qail_cmd.table_constraints.len);
+    const fk = qail_cmd.table_constraints[0].foreign_key;
+    try std.testing.expectEqualStrings("fk_trips_schedule", fk.name.?);
+    try std.testing.expectEqualStrings("route_id", fk.columns[0]);
+    try std.testing.expectEqualStrings("schedule_id", fk.columns[1]);
+    try std.testing.expectEqualStrings("schedules", fk.ref_table);
+    try std.testing.expectEqualStrings("CASCADE", fk.on_delete.?);
+    try std.testing.expectEqualStrings("RESTRICT", fk.on_update.?);
+    try std.testing.expectEqualStrings("DEFERRABLE INITIALLY DEFERRED", fk.deferrable.?);
 }
 
 test "diff existing column constraint drift fails closed" {
