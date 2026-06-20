@@ -162,6 +162,7 @@ pub const CodebaseScanner = struct {
         try self.findSqlInsert(file_path, line_num, line);
         try self.findSqlUpdate(file_path, line_num, line);
         try self.findSqlDelete(file_path, line_num, line);
+        try self.findSqlCreateIndex(file_path, line_num, line);
         try self.findSqlTableCommand(file_path, line_num, line, "create", "table");
         try self.findSqlTableCommand(file_path, line_num, line, "alter", "table");
         try self.findSqlTableCommand(file_path, line_num, line, "drop", "table");
@@ -512,6 +513,46 @@ pub const CodebaseScanner = struct {
             }
             start = comma + 1;
         }
+    }
+
+    fn findSqlCreateIndex(self: *CodebaseScanner, file_path: []const u8, line_num: usize, line: []const u8) !void {
+        const scan_line = lineBeforeSourceComment(line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
+        defer self.allocator.free(lower);
+
+        const create_pos = findKeyword(lower, "create", 0) orelse return;
+        const index_pos = findKeyword(lower, "index", create_pos + "create".len) orelse return;
+        const on_pos = findKeyword(lower, "on", index_pos + "index".len) orelse return;
+        var table_start = skipSqlWs(lower, on_pos + "on".len);
+        if (keywordAt(lower, "only", table_start)) {
+            table_start = skipSqlWs(lower, table_start + "only".len);
+        }
+        const table_end = findSqlIdentifierEnd(lower, table_start);
+        if (table_end <= table_start) return;
+
+        var columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &columns);
+
+        if (findTopLevelOpenParen(lower, table_end)) |open| {
+            if (findMatchingParen(lower, open)) |close| {
+                try appendSqlIndexKeyColumns(&columns, self.allocator, sanitized[open + 1 .. close]);
+                if (findKeyword(lower, "include", close)) |include_pos| {
+                    const include_open = skipSqlWs(lower, include_pos + "include".len);
+                    if (include_open < lower.len and lower[include_open] == '(') {
+                        if (findMatchingParen(lower, include_open)) |include_close| {
+                            try appendSqlColumnList(&columns, self.allocator, sanitized[include_open + 1 .. include_close]);
+                        }
+                    }
+                }
+                if (findKeyword(lower, "where", close)) |where_pos| {
+                    try appendSqlExpressionColumns(&columns, self.allocator, sanitized[where_pos + "where".len ..]);
+                }
+            }
+        }
+
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
     }
 
     fn findSqlTableCommand(
@@ -1278,6 +1319,86 @@ fn appendSqlConflictTargetColumns(
     }
 }
 
+fn appendSqlIndexKeyColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !void {
+    var start: usize = 0;
+    while (start < raw.len) {
+        const comma = findTopLevelComma(raw, start) orelse raw.len;
+        const item = std.mem.trim(u8, raw[start..comma], " \t\r\n");
+        const expr = sqlIndexKeyExpression(item);
+        if (expr.len > 0) {
+            try appendSqlExpressionColumns(columns, allocator, expr);
+        }
+        start = comma + 1;
+    }
+}
+
+fn sqlIndexKeyExpression(item: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, item, " \t\r\n");
+    if (trimmed.len == 0) return trimmed;
+
+    if (trimmed[0] == '(') {
+        if (findMatchingParen(trimmed, 0)) |close| {
+            return std.mem.trim(u8, trimmed[1..close], " \t\r\n");
+        }
+    }
+
+    var i: usize = 0;
+    var depth: i32 = 0;
+    var saw_expression = false;
+    var in_single = false;
+    var in_double = false;
+    while (i < trimmed.len) : (i += 1) {
+        const c = trimmed[i];
+        if (in_single) {
+            if (c == '\'' and i + 1 < trimmed.len and trimmed[i + 1] == '\'') {
+                i += 1;
+            } else if (c == '\'') {
+                in_single = false;
+            }
+            continue;
+        }
+        if (in_double) {
+            if (c == '"' and i + 1 < trimmed.len and trimmed[i + 1] == '"') {
+                i += 1;
+            } else if (c == '"') {
+                in_double = false;
+            }
+            continue;
+        }
+
+        switch (c) {
+            '\'' => {
+                in_single = true;
+                saw_expression = true;
+            },
+            '"' => {
+                in_double = true;
+                saw_expression = true;
+            },
+            '(' => {
+                depth += 1;
+                saw_expression = true;
+            },
+            ')' => {
+                if (depth > 0) depth -= 1;
+                saw_expression = true;
+            },
+            else => {
+                if (std.ascii.isWhitespace(c) and depth == 0 and saw_expression) {
+                    return std.mem.trim(u8, trimmed[0..i], " \t\r\n");
+                }
+                if (!std.ascii.isWhitespace(c)) saw_expression = true;
+            },
+        }
+    }
+
+    return trimmed;
+}
+
 fn findSqlDoUpdateSet(lower: []const u8, start: usize) ?usize {
     const do_pos = findKeyword(lower, "do", start) orelse return null;
     const update_pos = findKeyword(lower, "update", do_pos + "do".len) orelse return null;
@@ -1512,6 +1633,46 @@ fn findTopLevelComma(s: []const u8, start: usize) ?usize {
 
 fn findTopLevelScalar(s: []const u8, target: u8) ?usize {
     return findTopLevelByte(s, 0, target);
+}
+
+fn findTopLevelOpenParen(s: []const u8, start: usize) ?usize {
+    var paren: i32 = 0;
+    var in_single = false;
+    var in_double = false;
+    var i = start;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        if (in_single) {
+            if (c == '\'' and i + 1 < s.len and s[i + 1] == '\'') {
+                i += 1;
+            } else if (c == '\'') {
+                in_single = false;
+            }
+            continue;
+        }
+        if (in_double) {
+            if (c == '"' and i + 1 < s.len and s[i + 1] == '"') {
+                i += 1;
+            } else if (c == '"') {
+                in_double = false;
+            }
+            continue;
+        }
+
+        switch (c) {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => {
+                if (paren == 0) return i;
+                paren += 1;
+            },
+            ')' => {
+                if (paren > 0) paren -= 1;
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn findTopLevelByte(s: []const u8, start: usize, target: u8) ?usize {
@@ -2559,6 +2720,34 @@ test "sql scanner tracks raw ddl table references" {
     try std.testing.expectEqualStrings("archive.logs", scanner.refs.items[1].table);
     try std.testing.expectEqualStrings("audit.events", scanner.refs.items[2].table);
     try std.testing.expectEqualStrings("sessions", scanner.refs.items[3].table);
+}
+
+test "sql scanner tracks create index columns without opclasses" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"CREATE INDEX users_payload_idx ON users USING gin (payload jsonb_path_ops)\")",
+    );
+    try scanner.scanLine(
+        "test.rs",
+        2,
+        "sqlx::query(\"CREATE INDEX users_email_idx ON users (lower(email) text_pattern_ops, created_at DESC NULLS LAST) INCLUDE (tenant_id) WHERE active\")",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "payload");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "jsonb_path_ops");
+
+    try expectHasColumn(scanner.refs.items[1].columns.items, "email");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "created_at");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "tenant_id");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "active");
+    try expectMissingColumn(scanner.refs.items[1].columns.items, "text_pattern_ops");
 }
 
 test "sql scanner tracks raw table privilege references" {
