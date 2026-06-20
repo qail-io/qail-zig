@@ -600,6 +600,70 @@ test "impact detects dropped column from raw trigger update" {
     try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
 }
 
+test "impact detects dropped column from raw update only" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "update_only.sql",
+        .data = "UPDATE ONLY users SET email = $1 WHERE id = $2;",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "update_only.sql", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "users",
+        .action = .drop_column,
+        .column = .{
+            .name = "email",
+            .typ = "text",
+        },
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+}
+
+test "impact detects dropped column from raw update from source value" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "update_from.sql",
+        .data = "UPDATE orders SET status = state FROM payments WHERE orders.payment_id = payments.id;",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "update_from.sql", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "payments",
+        .action = .drop_column,
+        .column = .{
+            .name = "state",
+            .typ = "text",
+        },
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+}
+
 test "impact detects dropped merge source and target columns" {
     const allocator = std.testing.allocator;
 

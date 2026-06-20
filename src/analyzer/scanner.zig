@@ -456,23 +456,34 @@ pub const CodebaseScanner = struct {
         if (previousSqlKeywordIs(lower, update_pos, "do")) return;
         if (previousSqlKeywordIs(lower, update_pos, "then")) return;
         const set_pos = findKeyword(lower, "set", update_pos + "update".len) orelse return;
-        const table_start = skipSqlWs(lower, update_pos + "update".len);
+        var table_start = skipSqlWs(lower, update_pos + "update".len);
+        if (keywordAt(lower, "only", table_start)) {
+            table_start = skipSqlWs(lower, table_start + "only".len);
+        }
         const table_end = findSqlIdentifierEnd(lower, table_start);
         if (table_end <= table_start) return;
 
-        var columns: std.ArrayList([]const u8) = .empty;
-        defer freeStringList(self.allocator, &columns);
-        try appendSqlUpdateColumns(&columns, self.allocator, sanitized, lower, set_pos);
+        var target_columns: std.ArrayList([]const u8) = .empty;
+        defer freeStringList(self.allocator, &target_columns);
+        try appendSqlUpdateColumns(&target_columns, self.allocator, sanitized, lower, set_pos);
         if (findKeyword(lower, "where", set_pos + "set".len)) |where_pos| {
-            try appendSqlWhereColumns(&columns, self.allocator, sanitized, lower, where_pos, &.{"returning"});
+            try appendSqlWhereColumns(&target_columns, self.allocator, sanitized, lower, where_pos, &.{"returning"});
         }
-        try appendSqlReturningColumns(&columns, self.allocator, sanitized, lower, table_end);
+        try appendSqlReturningColumns(&target_columns, self.allocator, sanitized, lower, table_end);
 
-        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
+        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, target_columns.items);
         if (findKeyword(lower, "from", set_pos + "set".len)) |from_pos| {
+            var source_columns: std.ArrayList([]const u8) = .empty;
+            defer freeStringList(self.allocator, &source_columns);
+            try appendSqlUpdateAssignmentValueColumns(&source_columns, self.allocator, sanitized, lower, set_pos);
+            if (findKeyword(lower, "where", set_pos + "set".len)) |where_pos| {
+                try appendSqlWhereColumns(&source_columns, self.allocator, sanitized, lower, where_pos, &.{"returning"});
+            }
+            try appendSqlReturningColumns(&source_columns, self.allocator, sanitized, lower, table_end);
+
             const from_start = from_pos + "from".len;
             const from_end = minKeywordPos(lower, from_start, &.{ "where", "returning" }) orelse lower.len;
-            try self.appendSqlTableListRefs(file_path, line_num, line, lower, from_start, from_end, columns.items);
+            try self.appendSqlTableListRefs(file_path, line_num, line, lower, from_start, from_end, source_columns.items);
         }
     }
 
@@ -486,7 +497,10 @@ pub const CodebaseScanner = struct {
 
         const delete_pos = findKeyword(lower, "delete", 0) orelse return;
         const from_pos = findKeyword(lower, "from", delete_pos + "delete".len) orelse return;
-        const table_start = skipSqlWs(lower, from_pos + "from".len);
+        var table_start = skipSqlWs(lower, from_pos + "from".len);
+        if (keywordAt(lower, "only", table_start)) {
+            table_start = skipSqlWs(lower, table_start + "only".len);
+        }
         const table_end = findSqlIdentifierEnd(lower, table_start);
         if (table_end <= table_start) return;
 
@@ -2244,6 +2258,26 @@ fn appendSqlUpdateColumns(
     }
 }
 
+fn appendSqlUpdateAssignmentValueColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    lower: []const u8,
+    set_pos: usize,
+) !void {
+    const set_start = set_pos + "set".len;
+    const set_end = minKeywordPos(lower, set_start, &.{ "from", "where", "returning" }) orelse lower.len;
+    var start = set_start;
+    while (start < set_end) {
+        const comma = findTopLevelComma(line[0..set_end], start) orelse set_end;
+        const assignment = line[start..comma];
+        if (findTopLevelScalar(assignment, '=')) |eq| {
+            try appendSqlExpressionColumns(columns, allocator, assignment[eq + 1 ..]);
+        }
+        start = comma + 1;
+    }
+}
+
 fn appendSqlPredicateColumns(
     columns: *std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
@@ -3417,6 +3451,40 @@ test "sql scanner tracks update from and delete using sources" {
     try std.testing.expectEqualStrings("users", scanner.refs.items[1].table);
     try std.testing.expectEqualStrings("order_items", scanner.refs.items[2].table);
     try std.testing.expectEqualStrings("orders", scanner.refs.items[3].table);
+}
+
+test "sql scanner tracks update and delete only targets" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine("test.rs", 1, "sqlx::query(\"UPDATE ONLY users SET email = $1 WHERE id = $2\")");
+    try scanner.scanLine("test.rs", 2, "sqlx::query(\"DELETE FROM ONLY users WHERE email = $1\")");
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "email");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "id");
+    try std.testing.expectEqualStrings("users", scanner.refs.items[1].table);
+    try expectHasColumn(scanner.refs.items[1].columns.items, "email");
+}
+
+test "sql scanner tracks update from assignment source values" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"UPDATE orders SET status = state FROM payments WHERE orders.payment_id = payments.id\")",
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("orders", scanner.refs.items[0].table);
+    try std.testing.expectEqualStrings("payments", scanner.refs.items[1].table);
+    try expectHasColumn(scanner.refs.items[1].columns.items, "state");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "id");
 }
 
 test "sql scanner does not leak qualified update source columns into target" {
