@@ -391,7 +391,7 @@ const Parser = struct {
     fn parsePolicy(self: *Parser) !PolicyDef {
         if (!self.matchKeyword("policy")) return error.ExpectedPolicy;
 
-        const name = try self.parseIdentifier();
+        const name = try self.parseBareIdentifier();
         var name_owned = true;
         errdefer if (name_owned) self.allocator.free(name);
 
@@ -2820,6 +2820,31 @@ test "schema parser rejects malformed identifiers" {
         \\    profile.id uuid
         \\)
         ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\index 1idx on users (id)
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\index idx on 1users (id)
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\policy 1policy on users using (id = 1)
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\policy users.policy on users using (id = 1)
+        ,
+        \\table users (
+        \\    id uuid
+        \\)
+        \\policy users_policy on 1users using (id = 1)
+        ,
     };
 
     for (invalid_inputs) |input| {
@@ -2849,6 +2874,13 @@ test "schema parser rejects empty tables and duplicate schema objects" {
         \\)
         \\policy users_filter on users using (id = 1)
         \\policy users_filter on users using (id = 2)
+        ,
+        \\table users (
+        \\    id uuid,
+        \\    email text
+        \\)
+        \\index idx_users on users (id)
+        \\index idx_users on users (email)
         ,
     };
 
