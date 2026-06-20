@@ -30,12 +30,6 @@ const FrontendMessage = wire.FrontendMessage;
 const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 const max_wire_message_len: usize = std.math.maxInt(i32);
 
-const INVALID_EXISTS_CONDITION =
-    "FALSE /* ERROR: EXISTS condition requires subquery value */";
-const INVALID_IN_CONDITION =
-    "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */";
-const INVALID_BETWEEN_CONDITION =
-    "FALSE /* ERROR: BETWEEN condition requires exactly two array values */";
 const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
 const INVALID_FUNCTION_KEYWORD = "/* ERROR: Invalid function keyword */";
 const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */";
@@ -1696,7 +1690,7 @@ fn writeCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*
     switch (condition.op) {
         .in, .not_in => return writeInCondition(writer, condition, cmd),
         .between, .not_between => return writeBetweenCondition(writer, condition, cmd),
-        .exists, .not_exists => return writer.writeAll(INVALID_EXISTS_CONDITION),
+        .exists, .not_exists => return error.InvalidExistsCondition,
         else => {},
     }
 
@@ -1763,7 +1757,7 @@ fn writeConditionFunctionReference(writer: anytype, value: []const u8, cmd: ?*co
 fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: ?*const QailCmd) !void {
     switch (condition.value) {
         .array => |values| {
-            if (values.len == 0) return writer.writeAll(INVALID_IN_CONDITION);
+            if (values.len == 0) return error.InvalidInCondition;
 
             try writeConditionLeft(writer, condition, cmd);
             try writer.print(" {s} (", .{condition.op.toSql()});
@@ -1779,7 +1773,7 @@ fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition, cmd: 
             try writeValue(writer, &condition.value, cmd);
             try writer.writeByte(')');
         },
-        else => try writer.writeAll(INVALID_IN_CONDITION),
+        else => return error.InvalidInCondition,
     }
 }
 
@@ -1790,7 +1784,7 @@ fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition, 
             try writer.print(" {s} {d} AND {d}", .{ condition.op.toSql(), range.low, range.high });
         },
         .array => |values| {
-            if (values.len != 2) return writer.writeAll(INVALID_BETWEEN_CONDITION);
+            if (values.len != 2) return error.InvalidBetweenCondition;
 
             try writeConditionLeft(writer, condition, cmd);
             try writer.print(" {s} ", .{condition.op.toSql()});
@@ -1798,7 +1792,7 @@ fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition, 
             try writer.writeAll(" AND ");
             try writeValue(writer, &values[1], cmd);
         },
-        else => try writer.writeAll(INVALID_BETWEEN_CONDITION),
+        else => return error.InvalidBetweenCondition,
     }
 }
 
@@ -5129,11 +5123,7 @@ test "ast encoder malformed condition shapes fail closed" {
 
     var in_buf: [256]u8 = undefined;
     var in_writer = io.FixedBufferWriter.init(&in_buf);
-    try encoder.writeAstToSql(in_writer.writer(), &empty_in_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT * FROM users WHERE FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */",
-        in_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidInCondition, encoder.writeAstToSql(in_writer.writer(), &empty_in_cmd));
 
     const bad_exists = [_]ast.cmd.WhereClause{.{
         .condition = .{
@@ -5146,11 +5136,21 @@ test "ast encoder malformed condition shapes fail closed" {
 
     var exists_buf: [256]u8 = undefined;
     var exists_writer = io.FixedBufferWriter.init(&exists_buf);
-    try encoder.writeAstToSql(exists_writer.writer(), &bad_exists_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT * FROM users WHERE FALSE /* ERROR: EXISTS condition requires subquery value */",
-        exists_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidExistsCondition, encoder.writeAstToSql(exists_writer.writer(), &bad_exists_cmd));
+
+    const one_between_value = [_]Value{Value.fromInt(1)};
+    const bad_between = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "age",
+            .op = .between,
+            .value = .{ .array = &one_between_value },
+        },
+    }};
+    const bad_between_cmd = QailCmd.get("users").where(&bad_between);
+
+    var between_buf: [256]u8 = undefined;
+    var between_writer = io.FixedBufferWriter.init(&between_buf);
+    try std.testing.expectError(error.InvalidBetweenCondition, encoder.writeAstToSql(between_writer.writer(), &bad_between_cmd));
 }
 
 test "ast encoder expression fragments fail closed" {
