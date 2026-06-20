@@ -9,19 +9,7 @@ const ast = struct {
 const Expr = ast.expr.Expr;
 const Value = ast.values.Value;
 const WindowExpr = @TypeOf(@as(Expr, undefined).window);
-
-const INVALID_EXISTS_CONDITION =
-    "FALSE /* ERROR: EXISTS condition requires subquery value */";
-const INVALID_IN_CONDITION =
-    "FALSE /* ERROR: IN condition requires a non-empty array, subquery, or array parameter */";
-const INVALID_BETWEEN_CONDITION =
-    "FALSE /* ERROR: BETWEEN condition requires exactly two array values */";
-const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
-const INVALID_WINDOW_FUNCTION_NAME = "/* ERROR: Invalid window function name */";
-const INVALID_CAST_TARGET = "/* ERROR: Invalid cast target type */";
-const INVALID_IDENTIFIER = "/* ERROR: Invalid identifier */";
-const INVALID_INSERT_COLUMN = "/* ERROR: Invalid insert column */";
-const INVALID_RAW_FRAGMENT = "/* ERROR: Invalid raw SQL fragment */";
+const MAX_RAW_FUNCTION_VALUE_LEN: usize = 1024;
 
 pub fn writeWhereClauses(writer: anytype, clauses: []const ast.cmd.WhereClause) !void {
     var has_and = false;
@@ -75,7 +63,7 @@ pub fn writeCondition(writer: anytype, condition: *const ast.expr.Condition) any
     switch (condition.op) {
         .in, .not_in => return writeInCondition(writer, condition),
         .between, .not_between => return writeBetweenCondition(writer, condition),
-        .exists, .not_exists => return writer.writeAll(INVALID_EXISTS_CONDITION),
+        .exists, .not_exists => return error.InvalidExistsCondition,
         else => {},
     }
 
@@ -142,7 +130,7 @@ fn writeConditionFunctionReference(writer: anytype, value: []const u8) !bool {
 fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition) !void {
     switch (condition.value) {
         .array => |values| {
-            if (values.len == 0) return writer.writeAll(INVALID_IN_CONDITION);
+            if (values.len == 0) return error.InvalidInCondition;
 
             try writeConditionLeft(writer, condition);
             try writer.print(" {s} (", .{condition.op.toSql()});
@@ -158,7 +146,7 @@ fn writeInCondition(writer: anytype, condition: *const ast.expr.Condition) !void
             try writeValue(writer, &condition.value);
             try writer.writeByte(')');
         },
-        else => try writer.writeAll(INVALID_IN_CONDITION),
+        else => return error.InvalidInCondition,
     }
 }
 
@@ -169,7 +157,7 @@ fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition) 
             try writer.print(" {s} {d} AND {d}", .{ condition.op.toSql(), range.low, range.high });
         },
         .array => |values| {
-            if (values.len != 2) return writer.writeAll(INVALID_BETWEEN_CONDITION);
+            if (values.len != 2) return error.InvalidBetweenCondition;
 
             try writeConditionLeft(writer, condition);
             try writer.print(" {s} ", .{condition.op.toSql()});
@@ -177,7 +165,7 @@ fn writeBetweenCondition(writer: anytype, condition: *const ast.expr.Condition) 
             try writer.writeAll(" AND ");
             try writeValue(writer, &values[1]);
         },
-        else => try writer.writeAll(INVALID_BETWEEN_CONDITION),
+        else => return error.InvalidBetweenCondition,
     }
 }
 
@@ -217,10 +205,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
             }
         },
         .func_call => |fc| {
-            if (!isSafeFunctionName(fc.name)) {
-                try writer.writeAll(INVALID_FUNCTION_NAME);
-                return;
-            }
+            if (!isSafeFunctionName(fc.name)) return error.InvalidFunctionName;
             try writer.writeAll(fc.name);
             try writer.writeAll("(");
             for (fc.args, 0..) |arg, i| {
@@ -273,10 +258,7 @@ pub fn writeExpr(writer: anytype, ex: *const Expr) anyerror!void {
             }
         },
         .cast => |c| {
-            const target_type = checkedSqlTypeFragment(c.target_type) orelse {
-                try writer.writeAll(INVALID_CAST_TARGET);
-                return;
-            };
+            const target_type = checkedSqlTypeFragment(c.target_type) orelse return error.InvalidCastTarget;
             try writeExpr(writer, c.expr);
             try writer.writeAll("::");
             try writer.writeAll(target_type);
@@ -394,6 +376,15 @@ fn isSafeFunctionName(name: []const u8) bool {
     return true;
 }
 
+fn isSafeRawFunctionValue(value: []const u8) bool {
+    return value.len <= MAX_RAW_FUNCTION_VALUE_LEN and
+        std.mem.indexOfScalar(u8, value, 0) == null and
+        std.mem.indexOfScalar(u8, value, ';') == null and
+        std.mem.indexOf(u8, value, "--") == null and
+        std.mem.indexOf(u8, value, "/*") == null and
+        std.mem.indexOf(u8, value, "*/") == null;
+}
+
 fn checkedSqlTypeFragment(fragment: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, fragment, " \t\r\n");
     if (trimmed.len == 0 or
@@ -492,15 +483,12 @@ fn startsWithSqlKeyword(value: []const u8, keyword: []const u8) bool {
 }
 
 fn writeCheckedRawExpression(writer: anytype, fragment: []const u8) !void {
-    const checked = checkedSqlExprFragment(fragment) orelse {
-        try writer.writeAll(INVALID_RAW_FRAGMENT);
-        return;
-    };
+    const checked = checkedSqlExprFragment(fragment) orelse return error.UnsafeSqlFragment;
     try writer.writeAll(checked);
 }
 
 fn writeCheckedSubquerySql(writer: anytype, sql: []const u8) !void {
-    const checked = checkedReadOnlySubquerySql(sql) orelse "SELECT NULL WHERE FALSE";
+    const checked = checkedReadOnlySubquerySql(sql) orelse return error.InvalidReadOnlySubquery;
     try writer.writeAll(checked);
 }
 
@@ -513,10 +501,7 @@ fn isValidQualifiedIdentifier(value: []const u8) bool {
 }
 
 pub fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
-    if (!isValidQualifiedIdentifier(value)) {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
-    }
+    if (!isValidQualifiedIdentifier(value)) return error.InvalidIdentifier;
 
     var parts = std.mem.splitScalar(u8, value, '.');
     var first = true;
@@ -528,10 +513,7 @@ pub fn writeIdentifierOrError(writer: anytype, value: []const u8) !void {
 }
 
 pub fn writeSingleIdentifierOrError(writer: anytype, value: []const u8) !void {
-    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) {
-        try writer.writeAll(INVALID_IDENTIFIER);
-        return;
-    }
+    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidIdentifier;
     try writeIdentifierMaybeQuoted(writer, value);
 }
 
@@ -581,7 +563,7 @@ pub fn writeTableReferenceOrError(writer: anytype, value: []const u8) !void {
 pub fn writeInsertTargetColumn(writer: anytype, ex: *const Expr) !void {
     switch (ex.*) {
         .named => |name| try writeIdentifierOrError(writer, name),
-        else => try writer.writeAll(INVALID_INSERT_COLUMN),
+        else => return error.InvalidInsertColumn,
     }
 }
 
@@ -631,10 +613,7 @@ fn writeEscapedSqlString(writer: anytype, value: []const u8) !void {
 }
 
 fn writeWindowExpr(writer: anytype, w: WindowExpr) !void {
-    if (!isSafeFunctionName(w.func)) {
-        try writer.writeAll(INVALID_WINDOW_FUNCTION_NAME);
-        return;
-    }
+    if (!isSafeFunctionName(w.func)) return error.InvalidWindowFunctionName;
 
     try writer.writeAll(w.func);
     try writer.writeAll("() OVER (");
@@ -686,6 +665,15 @@ pub fn writeValue(writer: anytype, val: *const Value) !void {
     try val.validateFinite();
     switch (val.*) {
         .column => |column| try writeIdentifierOrError(writer, column),
+        .named_param => return error.UnresolvedNamedParameter,
+        .function => |function| {
+            if (!isSafeRawFunctionValue(function)) return error.UnsafeSqlFragment;
+            try writer.writeAll(function);
+        },
+        .string, .uuid, .timestamp, .json => |text| {
+            if (std.mem.indexOfScalar(u8, text, 0) != null) return error.NullByte;
+            try val.format(writer);
+        },
         .array => |values| {
             try writer.writeAll("ARRAY[");
             for (values, 0..) |value, i| {

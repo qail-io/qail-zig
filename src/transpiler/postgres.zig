@@ -899,33 +899,18 @@ test "trusted transpiler expression fragments fail closed" {
         .args = &[_]Expr{name},
     } }};
     const bad_function_cmd = QailCmd.get("users").select(&bad_function_cols);
-    const bad_function_sql = try toSqlTrusted(std.testing.allocator, &bad_function_cmd);
-    defer std.testing.allocator.free(bad_function_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid function name */ FROM users",
-        bad_function_sql,
-    );
+    try std.testing.expectError(error.InvalidFunctionName, toSqlTrusted(std.testing.allocator, &bad_function_cmd));
 
     const bad_cast_cols = [_]Expr{.{ .cast = .{
         .expr = &name,
         .target_type = "text); DROP TABLE users; --",
     } }};
     const bad_cast_cmd = QailCmd.get("users").select(&bad_cast_cols);
-    const bad_cast_sql = try toSqlTrusted(std.testing.allocator, &bad_cast_cmd);
-    defer std.testing.allocator.free(bad_cast_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid cast target type */ FROM users",
-        bad_cast_sql,
-    );
+    try std.testing.expectError(error.InvalidCastTarget, toSqlTrusted(std.testing.allocator, &bad_cast_cmd));
 
     const raw_cols = [_]Expr{.{ .raw = "pg_sleep(1); DROP TABLE users; --" }};
     const raw_cmd = QailCmd.get("users").select(&raw_cols);
-    const raw_sql = try toSqlTrusted(std.testing.allocator, &raw_cmd);
-    defer std.testing.allocator.free(raw_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid raw SQL fragment */ FROM users",
-        raw_sql,
-    );
+    try std.testing.expectError(error.UnsafeSqlFragment, toSqlTrusted(std.testing.allocator, &raw_cmd));
 
     const safe_subquery_cols = [_]Expr{.{ .subquery = .{
         .sql = "SELECT count(*) FROM pg_class",
@@ -944,48 +929,28 @@ test "trusted transpiler expression fragments fail closed" {
         .alias = "safe_alias",
     } }};
     const subquery_cmd = QailCmd.get("users").select(&subquery_cols);
-    const subquery_sql = try toSqlTrusted(std.testing.allocator, &subquery_cmd);
-    defer std.testing.allocator.free(subquery_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT (SELECT NULL WHERE FALSE) AS safe_alias FROM users",
-        subquery_sql,
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, toSqlTrusted(std.testing.allocator, &subquery_cmd));
 
     const mutating_subquery_cols = [_]Expr{.{ .subquery = .{
         .sql = "DELETE FROM users RETURNING id",
         .alias = "deleted_id",
     } }};
     const mutating_subquery_cmd = QailCmd.get("users").select(&mutating_subquery_cols);
-    const mutating_subquery_sql = try toSqlTrusted(std.testing.allocator, &mutating_subquery_cmd);
-    defer std.testing.allocator.free(mutating_subquery_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT (SELECT NULL WHERE FALSE) AS deleted_id FROM users",
-        mutating_subquery_sql,
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, toSqlTrusted(std.testing.allocator, &mutating_subquery_cmd));
 
     const exists_cols = [_]Expr{.{ .exists_subquery = .{
         .sql = "SELECT 1; DROP TABLE users; --",
         .alias = "safe_exists",
     } }};
     const exists_cmd = QailCmd.get("users").select(&exists_cols);
-    const exists_sql = try toSqlTrusted(std.testing.allocator, &exists_cmd);
-    defer std.testing.allocator.free(exists_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_exists FROM users",
-        exists_sql,
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, toSqlTrusted(std.testing.allocator, &exists_cmd));
 
     const mutating_cte_exists_cols = [_]Expr{.{ .exists_subquery = .{
         .sql = "WITH deleted AS (DELETE FROM users RETURNING id) SELECT id FROM deleted",
         .alias = "safe_cte",
     } }};
     const mutating_cte_exists_cmd = QailCmd.get("users").select(&mutating_cte_exists_cols);
-    const mutating_cte_exists_sql = try toSqlTrusted(std.testing.allocator, &mutating_cte_exists_cmd);
-    defer std.testing.allocator.free(mutating_cte_exists_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_cte FROM users",
-        mutating_cte_exists_sql,
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, toSqlTrusted(std.testing.allocator, &mutating_cte_exists_cmd));
 }
 
 test "trusted transpiler rejects mutation target identifiers" {
@@ -1020,10 +985,7 @@ test "trusted transpiler quotes condition column identifiers" {
 }
 
 test "trusted transpiler quotes column value identifiers" {
-    const column_values = [_]Value{
-        Value.fromColumn("accounts.2nd_owner"),
-        Value.fromColumn("accounts..broken"),
-    };
+    const column_values = [_]Value{Value.fromColumn("accounts.2nd_owner")};
     const wheres = [_]ast.cmd.WhereClause{
         ast.cmd.filter("owner_id", .eq, Value.fromColumn("accounts.1st_owner")),
         ast.cmd.filter("backup_owner_id", .in, .{ .array = &column_values }),
@@ -1033,9 +995,14 @@ test "trusted transpiler quotes column value identifiers" {
     defer std.testing.allocator.free(sql);
 
     try std.testing.expectEqualStrings(
-        "SELECT * FROM orders WHERE owner_id = accounts.\"1st_owner\" AND backup_owner_id IN (accounts.\"2nd_owner\", /* ERROR: Invalid identifier */)",
+        "SELECT * FROM orders WHERE owner_id = accounts.\"1st_owner\" AND backup_owner_id IN (accounts.\"2nd_owner\")",
         sql,
     );
+
+    const invalid_column_values = [_]Value{Value.fromColumn("accounts..broken")};
+    const invalid_wheres = [_]ast.cmd.WhereClause{ast.cmd.filter("backup_owner_id", .in, .{ .array = &invalid_column_values })};
+    const invalid_cmd = QailCmd.get("orders").where(&invalid_wheres);
+    try std.testing.expectError(error.InvalidIdentifier, toSqlTrusted(std.testing.allocator, &invalid_cmd));
 }
 
 test "trusted transpiler quotes expression identifiers and escapes json paths" {
@@ -1080,12 +1047,7 @@ test "trusted transpiler hardens window expressions" {
         .func = "row_number); DROP TABLE users; --",
     } }};
     const bad_window_cmd = QailCmd.get("users").select(&bad_window_cols);
-    const bad_window_sql = try toSqlTrusted(std.testing.allocator, &bad_window_cmd);
-    defer std.testing.allocator.free(bad_window_sql);
-    try std.testing.expectEqualStrings(
-        "SELECT /* ERROR: Invalid window function name */ FROM users",
-        bad_window_sql,
-    );
+    try std.testing.expectError(error.InvalidWindowFunctionName, toSqlTrusted(std.testing.allocator, &bad_window_cmd));
 
     const window_cols = [_]Expr{.{ .window = .{
         .name = "rn",

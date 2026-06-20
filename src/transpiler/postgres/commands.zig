@@ -195,7 +195,7 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd, include_conflict: bool)
         try writeNestedQueryableCmd(writer, source_query);
     } else if (cmd.raw_sql) |source_sql| {
         try writer.writeByte(' ');
-        const checked_source = render.checkedReadOnlySubquerySql(source_sql) orelse "SELECT NULL WHERE FALSE";
+        const checked_source = render.checkedReadOnlySubquerySql(source_sql) orelse return error.InvalidReadOnlySubquery;
         try writer.writeAll(checked_source);
     } else if (cmd.insert_values.len > 0) {
         try writer.writeAll(" VALUES (");
