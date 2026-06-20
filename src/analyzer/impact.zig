@@ -147,17 +147,18 @@ pub const MigrationImpact = struct {
                     if (cmd.column) |col_def| {
                         var key_buf: [256]u8 = undefined;
                         const key = try std.fmt.bufPrint(&key_buf, "{s}.{s}", .{ cmd.table, col_def.name });
-                        if (column_ref_counts.get(key)) |count| {
-                            if (count > 0) {
-                                try impact.breaking_changes.append(allocator, .{
-                                    .dropped_column = .{
-                                        .table = cmd.table,
-                                        .column = col_def.name,
-                                        .reference_count = count,
-                                    },
-                                });
-                                impact.safe_to_run = false;
-                            }
+                        var star_key_buf: [256]u8 = undefined;
+                        const star_key = try std.fmt.bufPrint(&star_key_buf, "{s}.*", .{cmd.table});
+                        const count = (column_ref_counts.get(key) orelse 0) + (column_ref_counts.get(star_key) orelse 0);
+                        if (count > 0) {
+                            try impact.breaking_changes.append(allocator, .{
+                                .dropped_column = .{
+                                    .table = cmd.table,
+                                    .column = col_def.name,
+                                    .reference_count = count,
+                                },
+                            });
+                            impact.safe_to_run = false;
                         }
                     }
                 },
@@ -166,15 +167,16 @@ pub const MigrationImpact = struct {
                     if (cmd.column) |col_def| {
                         var key_buf: [256]u8 = undefined;
                         const key = try std.fmt.bufPrint(&key_buf, "{s}.{s}", .{ cmd.table, col_def.name });
-                        if (column_ref_counts.get(key)) |count| {
-                            if (count > 0) {
-                                try impact.warnings.append(allocator, .{
-                                    .orphaned_reference = .{
-                                        .table = cmd.table,
-                                        .reference_count = count,
-                                    },
-                                });
-                            }
+                        var star_key_buf: [256]u8 = undefined;
+                        const star_key = try std.fmt.bufPrint(&star_key_buf, "{s}.*", .{cmd.table});
+                        const count = (column_ref_counts.get(key) orelse 0) + (column_ref_counts.get(star_key) orelse 0);
+                        if (count > 0) {
+                            try impact.warnings.append(allocator, .{
+                                .orphaned_reference = .{
+                                    .table = cmd.table,
+                                    .reference_count = count,
+                                },
+                            });
                         }
                     }
                 },
@@ -306,6 +308,39 @@ test "impact analyze detects dropped column referenced from raw sql" {
 
     var commands = [_]MigrationCmd{.{
         .table = "public.users",
+        .action = .drop_column,
+        .column = .{
+            .name = "email",
+            .typ = "text",
+        },
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+    try std.testing.expectEqualStrings("email", impact.breaking_changes.items[0].dropped_column.column);
+}
+
+test "impact treats raw sql select star as dropped column reference" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "report.rs",
+        .data = "fn report() { sqlx::query(\"SELECT * FROM users WHERE active = true\"); }",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "report.rs", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "users",
         .action = .drop_column,
         .column = .{
             .name = "email",
