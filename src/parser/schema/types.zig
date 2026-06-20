@@ -45,6 +45,66 @@ pub const IndexDef = struct {
     }
 };
 
+pub fn referenceActionSql(action: []const u8) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(action, "cascade")) return "CASCADE";
+    if (std.ascii.eqlIgnoreCase(action, "set_null")) return "SET NULL";
+    if (std.ascii.eqlIgnoreCase(action, "set_default")) return "SET DEFAULT";
+    if (std.ascii.eqlIgnoreCase(action, "restrict")) return "RESTRICT";
+    if (std.ascii.eqlIgnoreCase(action, "no_action")) return null;
+    return null;
+}
+
+pub fn referenceDeferrableSql(deferrable: []const u8) ?[]const u8 {
+    if (std.ascii.eqlIgnoreCase(deferrable, "deferrable")) return "DEFERRABLE";
+    if (std.ascii.eqlIgnoreCase(deferrable, "initially_deferred")) return "DEFERRABLE INITIALLY DEFERRED";
+    if (std.ascii.eqlIgnoreCase(deferrable, "initially_immediate")) return "DEFERRABLE INITIALLY IMMEDIATE";
+    return null;
+}
+
+pub fn writeReferenceOptionsQail(
+    writer: anytype,
+    on_delete: ?[]const u8,
+    on_update: ?[]const u8,
+    deferrable: ?[]const u8,
+) !void {
+    if (on_delete) |action| {
+        if (!std.ascii.eqlIgnoreCase(action, "no_action")) {
+            try writer.print(" on_delete {s}", .{action});
+        }
+    }
+    if (on_update) |action| {
+        if (!std.ascii.eqlIgnoreCase(action, "no_action")) {
+            try writer.print(" on_update {s}", .{action});
+        }
+    }
+    if (deferrable) |mode| {
+        try writer.print(" {s}", .{mode});
+    }
+}
+
+pub fn writeReferenceOptionsSql(
+    writer: anytype,
+    on_delete: ?[]const u8,
+    on_update: ?[]const u8,
+    deferrable: ?[]const u8,
+) !void {
+    if (on_delete) |action| {
+        if (referenceActionSql(action)) |sql| {
+            try writer.print(" ON DELETE {s}", .{sql});
+        }
+    }
+    if (on_update) |action| {
+        if (referenceActionSql(action)) |sql| {
+            try writer.print(" ON UPDATE {s}", .{sql});
+        }
+    }
+    if (deferrable) |mode| {
+        if (referenceDeferrableSql(mode)) |sql| {
+            try writer.print(" {s}", .{sql});
+        }
+    }
+}
+
 pub const TableDef = struct {
     name: []const u8,
     columns: std.ArrayList(ColumnDef),
@@ -106,6 +166,12 @@ pub const TableDef = struct {
             }
             if (col.references) |refs| {
                 try writer.print(" REFERENCES {s}", .{refs});
+                try writeReferenceOptionsSql(
+                    writer,
+                    col.reference_on_delete,
+                    col.reference_on_update,
+                    col.reference_deferrable,
+                );
             }
             if (col.check) |check_expr| {
                 try writer.print(" CHECK({s})", .{check_expr});
@@ -135,6 +201,9 @@ pub const ColumnDef = struct {
     primary_key: bool = false,
     unique: bool = false,
     references: ?[]const u8 = null,
+    reference_on_delete: ?[]const u8 = null,
+    reference_on_update: ?[]const u8 = null,
+    reference_deferrable: ?[]const u8 = null,
     default_value: ?[]const u8 = null,
     check: ?[]const u8 = null,
     extra_checks: []const []const u8 = &.{},
@@ -144,6 +213,9 @@ pub const ColumnDef = struct {
         allocator.free(self.typ);
         if (self.type_params) |p| allocator.free(p);
         if (self.references) |r| allocator.free(r);
+        if (self.reference_on_delete) |action| allocator.free(action);
+        if (self.reference_on_update) |action| allocator.free(action);
+        if (self.reference_deferrable) |mode| allocator.free(mode);
         if (self.default_value) |d| allocator.free(d);
         if (self.check) |c| allocator.free(c);
         for (self.extra_checks) |check_expr| allocator.free(check_expr);

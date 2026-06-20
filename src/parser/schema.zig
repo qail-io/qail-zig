@@ -653,12 +653,18 @@ const Parser = struct {
         nullable: bool = true,
         unique: bool = false,
         references: ?[]const u8 = null,
+        reference_on_delete: ?[]const u8 = null,
+        reference_on_update: ?[]const u8 = null,
+        reference_deferrable: ?[]const u8 = null,
         default_value: ?[]const u8 = null,
         check: ?[]const u8 = null,
         extra_checks: []const []const u8 = &.{},
 
         fn deinit(self: *ConstraintResult, allocator: Allocator) void {
             if (self.references) |refs| allocator.free(refs);
+            if (self.reference_on_delete) |action| allocator.free(action);
+            if (self.reference_on_update) |action| allocator.free(action);
+            if (self.reference_deferrable) |mode| allocator.free(mode);
             if (self.default_value) |default_value| allocator.free(default_value);
             if (self.check) |check| allocator.free(check);
             for (self.extra_checks) |check| allocator.free(check);
@@ -680,6 +686,45 @@ const Parser = struct {
         }
     };
 
+    fn parseConstraintIdentifierToken(self: *Parser) ![]const u8 {
+        self.skipWhitespace();
+        const start = self.pos;
+        const first = self.current() orelse return error.InvalidColumnConstraint;
+        if (!isIdentifierStart(first)) return error.InvalidColumnConstraint;
+        self.advance();
+
+        while (self.pos < self.input.len) {
+            const c = self.input[self.pos];
+            if (isIdentifierPart(c)) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        return self.input[start..self.pos];
+    }
+
+    fn canonicalForeignKeyAction(token: []const u8) ?[]const u8 {
+        if (std.ascii.eqlIgnoreCase(token, "cascade")) return "cascade";
+        if (std.ascii.eqlIgnoreCase(token, "set_null")) return "set_null";
+        if (std.ascii.eqlIgnoreCase(token, "set_default")) return "set_default";
+        if (std.ascii.eqlIgnoreCase(token, "restrict")) return "restrict";
+        if (std.ascii.eqlIgnoreCase(token, "no_action")) return "no_action";
+        return null;
+    }
+
+    fn parseForeignKeyAction(self: *Parser) !?[]const u8 {
+        const token = try self.parseConstraintIdentifierToken();
+        const canonical = canonicalForeignKeyAction(token) orelse return error.InvalidColumnConstraint;
+        if (std.mem.eql(u8, canonical, "no_action")) return null;
+        return try self.allocator.dupe(u8, canonical);
+    }
+
+    fn dupForeignKeyDeferrable(self: *Parser, canonical: []const u8) ![]const u8 {
+        return try self.allocator.dupe(u8, canonical);
+    }
+
     fn parseConstraints(self: *Parser) !ConstraintResult {
         var result = ConstraintResult{};
         errdefer result.deinit(self.allocator);
@@ -688,6 +733,9 @@ const Parser = struct {
         var seen_nullable = false;
         var seen_unique = false;
         var seen_references = false;
+        var seen_on_delete = false;
+        var seen_on_update = false;
+        var seen_deferrable = false;
         var seen_default = false;
 
         // Parse constraint keywords until we hit , or ) or } or newline
@@ -760,6 +808,31 @@ const Parser = struct {
                 if (refs.len == 0) return error.InvalidColumnConstraint;
                 if (std.mem.indexOfAny(u8, refs, "\r\n") != null) return error.InvalidColumnConstraint;
                 result.references = try self.allocator.dupe(u8, refs);
+            } else if (self.matchKeyword("on_delete")) {
+                if (!seen_references) return error.InvalidColumnConstraint;
+                if (seen_on_delete) return error.DuplicateColumnConstraint;
+                seen_on_delete = true;
+                result.reference_on_delete = try self.parseForeignKeyAction();
+            } else if (self.matchKeyword("on_update")) {
+                if (!seen_references) return error.InvalidColumnConstraint;
+                if (seen_on_update) return error.DuplicateColumnConstraint;
+                seen_on_update = true;
+                result.reference_on_update = try self.parseForeignKeyAction();
+            } else if (self.matchKeyword("deferrable")) {
+                if (!seen_references) return error.InvalidColumnConstraint;
+                if (seen_deferrable) return error.DuplicateColumnConstraint;
+                seen_deferrable = true;
+                result.reference_deferrable = try self.dupForeignKeyDeferrable("deferrable");
+            } else if (self.matchKeyword("initially_deferred")) {
+                if (!seen_references) return error.InvalidColumnConstraint;
+                if (seen_deferrable) return error.DuplicateColumnConstraint;
+                seen_deferrable = true;
+                result.reference_deferrable = try self.dupForeignKeyDeferrable("initially_deferred");
+            } else if (self.matchKeyword("initially_immediate")) {
+                if (!seen_references) return error.InvalidColumnConstraint;
+                if (seen_deferrable) return error.DuplicateColumnConstraint;
+                seen_deferrable = true;
+                result.reference_deferrable = try self.dupForeignKeyDeferrable("initially_immediate");
             } else if (self.matchKeyword("default")) {
                 if (seen_default) return error.DuplicateColumnConstraint;
                 seen_default = true;
@@ -914,6 +987,9 @@ const Parser = struct {
             .primary_key = constraints.primary_key,
             .unique = constraints.unique,
             .references = constraints.references,
+            .reference_on_delete = constraints.reference_on_delete,
+            .reference_on_update = constraints.reference_on_update,
+            .reference_deferrable = constraints.reference_deferrable,
             .default_value = constraints.default_value,
             .check = constraints.check,
             .extra_checks = constraints.extra_checks,
@@ -2918,6 +2994,72 @@ test "schema parser validates foreign key references" {
     for (invalid_inputs) |input| {
         try std.testing.expectError(error.InvalidForeignKeyReference, Schema.parse(allocator, input));
     }
+}
+
+test "schema parser preserves foreign key actions and deferrability" {
+    const allocator = std.testing.allocator;
+
+    const input =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+        \\
+        \\table posts (
+        \\    id uuid primary_key,
+        \\    user_id uuid references users(id) on_delete cascade on_update restrict initially_immediate
+        \\)
+    ;
+
+    var schema = try Schema.parse(allocator, input);
+    defer schema.deinit();
+
+    const posts = schema.findTable("posts").?;
+    const user_id = posts.findColumn("user_id").?;
+    try std.testing.expectEqualStrings("users(id)", user_id.references.?);
+    try std.testing.expectEqualStrings("cascade", user_id.reference_on_delete.?);
+    try std.testing.expectEqualStrings("restrict", user_id.reference_on_update.?);
+    try std.testing.expectEqualStrings("initially_immediate", user_id.reference_deferrable.?);
+}
+
+test "schema parser rejects malformed foreign key action options" {
+    const allocator = std.testing.allocator;
+
+    const invalid_without_reference =
+        \\table posts (
+        \\    user_id uuid on_delete cascade
+        \\)
+    ;
+    try std.testing.expectError(error.InvalidColumnConstraint, Schema.parse(allocator, invalid_without_reference));
+
+    const duplicate_action =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+        \\table posts (
+        \\    user_id uuid references users(id) on_delete cascade on_delete restrict
+        \\)
+    ;
+    try std.testing.expectError(error.DuplicateColumnConstraint, Schema.parse(allocator, duplicate_action));
+
+    const duplicate_deferrable =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+        \\table posts (
+        \\    user_id uuid references users(id) deferrable initially_deferred
+        \\)
+    ;
+    try std.testing.expectError(error.DuplicateColumnConstraint, Schema.parse(allocator, duplicate_deferrable));
+
+    const unknown_action =
+        \\table users (
+        \\    id uuid primary_key
+        \\)
+        \\table posts (
+        \\    user_id uuid references users(id) on_update explode
+        \\)
+    ;
+    try std.testing.expectError(error.InvalidColumnConstraint, Schema.parse(allocator, unknown_action));
 }
 
 test "parse policy block" {

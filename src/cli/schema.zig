@@ -4,6 +4,7 @@ const QailCmd = @import("../ast/cmd.zig").QailCmd;
 const Expr = @import("../ast/expr.zig").Expr;
 const Join = @import("../ast/cmd.zig").Join;
 const MigrationCmd = @import("../parser/mod.zig").MigrationCmd;
+const schema_types = @import("../parser/schema/types.zig");
 const io_compat = @import("../runtime/io.zig");
 
 const print = std.debug.print;
@@ -23,6 +24,20 @@ pub const RenderedSchemaSnapshot = struct {
 const LiveTableRls = struct {
     enable: bool = false,
     force: bool = false,
+};
+
+const LiveForeignKeyReference = struct {
+    reference: []u8,
+    on_delete: ?[]u8 = null,
+    on_update: ?[]u8 = null,
+    deferrable: ?[]u8 = null,
+
+    fn deinit(self: *LiveForeignKeyReference, allocator: Allocator) void {
+        allocator.free(self.reference);
+        if (self.on_delete) |action| allocator.free(action);
+        if (self.on_update) |action| allocator.free(action);
+        if (self.deferrable) |mode| allocator.free(mode);
+    }
 };
 
 fn deinitFetchedRows(allocator: Allocator, rows: []@import("../driver/row.zig").PgRow) void {
@@ -83,6 +98,15 @@ fn deinitTableRlsMap(allocator: Allocator, map: *std.StringHashMap(LiveTableRls)
     map.deinit();
 }
 
+fn deinitLiveForeignKeyReferenceMap(allocator: Allocator, map: *std.StringHashMap(LiveForeignKeyReference)) void {
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        entry.value_ptr.deinit(allocator);
+    }
+    map.deinit();
+}
+
 fn putOwnedStringMapValue(
     allocator: Allocator,
     map: *std.StringHashMap([]u8),
@@ -100,6 +124,26 @@ fn putOwnedStringMapValue(
     }
 
     gop.value_ptr.* = value;
+}
+
+fn putOwnedLiveForeignKeyReference(
+    allocator: Allocator,
+    map: *std.StringHashMap(LiveForeignKeyReference),
+    key: []u8,
+    value: LiveForeignKeyReference,
+) !void {
+    var owned_value = value;
+    errdefer allocator.free(key);
+    errdefer owned_value.deinit(allocator);
+
+    const gop = try map.getOrPut(key);
+    if (gop.found_existing) {
+        allocator.free(key);
+        owned_value.deinit(allocator);
+        return;
+    }
+
+    gop.value_ptr.* = owned_value;
 }
 
 fn deinitCheckMap(allocator: Allocator, checks: *std.StringHashMap(std.ArrayList([]u8))) void {
@@ -215,12 +259,14 @@ fn livePgBool(value: []const u8) !bool {
     const trimmed = std.mem.trim(u8, value, " \t\r\n");
     if (std.ascii.eqlIgnoreCase(trimmed, "t") or
         std.ascii.eqlIgnoreCase(trimmed, "true") or
+        std.ascii.eqlIgnoreCase(trimmed, "yes") or
         std.mem.eql(u8, trimmed, "1"))
     {
         return true;
     }
     if (std.ascii.eqlIgnoreCase(trimmed, "f") or
         std.ascii.eqlIgnoreCase(trimmed, "false") or
+        std.ascii.eqlIgnoreCase(trimmed, "no") or
         std.mem.eql(u8, trimmed, "0"))
     {
         return false;
@@ -490,13 +536,15 @@ fn collectCheckConstraints(
 fn collectForeignKeyReferences(
     allocator: Allocator,
     pg: *@import("../driver/driver.zig").PgDriver,
-    refs: *std.StringHashMap([]u8),
+    refs: *std.StringHashMap(LiveForeignKeyReference),
 ) !void {
     const fk_constraints_cmd = QailCmd.get("information_schema.table_constraints")
         .select(&.{
             Expr.col("constraint_schema"),
             Expr.col("constraint_name"),
             Expr.col("table_name"),
+            Expr.col("is_deferrable"),
+            Expr.col("initially_deferred"),
         }).where(&.{
             .{ .condition = .{ .column = "table_schema", .op = .eq, .value = .{ .string = "public" } } },
             .{ .condition = .{ .column = "constraint_type", .op = .eq, .value = .{ .string = "FOREIGN KEY" } } },
@@ -511,6 +559,8 @@ fn collectForeignKeyReferences(
         const constraint_schema = fk_constraint.getByName("constraint_schema") orelse continue;
         const constraint_name = fk_constraint.getByName("constraint_name") orelse continue;
         const table_name = fk_constraint.getByName("table_name") orelse continue;
+        const is_deferrable = fk_constraint.getByName("is_deferrable") orelse "NO";
+        const initially_deferred = fk_constraint.getByName("initially_deferred") orelse "NO";
         if (std.mem.startsWith(u8, table_name, "_qail_")) continue;
 
         const rc_cmd = QailCmd.get("information_schema.referential_constraints")
@@ -533,9 +583,10 @@ fn collectForeignKeyReferences(
         const match_option = refs_rows[0].getByName("match_option") orelse "";
         const update_rule = refs_rows[0].getByName("update_rule") orelse "";
         const delete_rule = refs_rows[0].getByName("delete_rule") orelse "";
-        if (!isSupportedLiveForeignKeyAction(match_option, update_rule, delete_rule)) {
-            return error.UnsupportedLiveForeignKeyAction;
-        }
+        if (!std.ascii.eqlIgnoreCase(match_option, "NONE")) return error.UnsupportedLiveForeignKeyAction;
+        const on_update = try liveForeignKeyActionToken(update_rule);
+        const on_delete = try liveForeignKeyActionToken(delete_rule);
+        const deferrable = try liveForeignKeyDeferrableToken(is_deferrable, initially_deferred);
 
         const source_cols = try collectForeignKeyColumns(
             pg,
@@ -562,8 +613,14 @@ fn collectForeignKeyReferences(
         if (!std.mem.eql(u8, target_schema, "public")) return error.UnsupportedCrossSchemaForeignKey;
 
         const key = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ table_name, source_column });
-        const value = try std.fmt.allocPrint(allocator, "{s}({s})", .{ target_table, target_column });
-        try putOwnedStringMapValue(allocator, refs, key, value);
+        var value = LiveForeignKeyReference{
+            .reference = try std.fmt.allocPrint(allocator, "{s}({s})", .{ target_table, target_column }),
+        };
+        errdefer value.deinit(allocator);
+        if (on_delete) |action| value.on_delete = try allocator.dupe(u8, action);
+        if (on_update) |action| value.on_update = try allocator.dupe(u8, action);
+        if (deferrable) |mode| value.deferrable = try allocator.dupe(u8, mode);
+        try putOwnedLiveForeignKeyReference(allocator, refs, key, value);
     }
 }
 
@@ -607,14 +664,23 @@ fn collectForeignKeyColumns(
     return try pg.fetchAll(&cmd);
 }
 
-fn isSupportedLiveForeignKeyAction(
-    match_option: []const u8,
-    update_rule: []const u8,
-    delete_rule: []const u8,
-) bool {
-    return std.ascii.eqlIgnoreCase(match_option, "NONE") and
-        std.ascii.eqlIgnoreCase(update_rule, "NO ACTION") and
-        std.ascii.eqlIgnoreCase(delete_rule, "NO ACTION");
+fn liveForeignKeyActionToken(rule: []const u8) !?[]const u8 {
+    const trimmed = std.mem.trim(u8, rule, " \t\r\n");
+    if (std.ascii.eqlIgnoreCase(trimmed, "NO ACTION")) return null;
+    if (std.ascii.eqlIgnoreCase(trimmed, "CASCADE")) return "cascade";
+    if (std.ascii.eqlIgnoreCase(trimmed, "SET NULL")) return "set_null";
+    if (std.ascii.eqlIgnoreCase(trimmed, "SET DEFAULT")) return "set_default";
+    if (std.ascii.eqlIgnoreCase(trimmed, "RESTRICT")) return "restrict";
+    return error.UnsupportedLiveForeignKeyAction;
+}
+
+fn liveForeignKeyDeferrableToken(is_deferrable: []const u8, initially_deferred: []const u8) !?[]const u8 {
+    const can_defer = try livePgBool(is_deferrable);
+    const starts_deferred = try livePgBool(initially_deferred);
+    if (!can_defer and starts_deferred) return error.InvalidLiveForeignKeyMetadata;
+    if (starts_deferred) return "initially_deferred";
+    if (can_defer) return "deferrable";
+    return null;
 }
 
 fn checkConstraintAnchorColumn(
@@ -821,11 +887,17 @@ fn writeLiveColumnChecks(
 
 fn writeLiveColumnReference(
     writer: anytype,
-    refs: *const std.StringHashMap([]u8),
+    refs: *const std.StringHashMap(LiveForeignKeyReference),
     composite: []const u8,
 ) !void {
     if (refs.get(composite)) |reference| {
-        try writer.print(" references {s}", .{reference});
+        try writer.print(" references {s}", .{reference.reference});
+        try schema_types.writeReferenceOptionsQail(
+            writer,
+            reference.on_delete,
+            reference.on_update,
+            reference.deferrable,
+        );
     }
 }
 
@@ -1383,8 +1455,8 @@ pub fn renderLiveSchemaSnapshot(
     defer deinitCheckMap(allocator, &column_checks);
     try collectCheckConstraints(allocator, pg, &attnum_columns, &column_checks);
 
-    var foreign_keys = std.StringHashMap([]u8).init(allocator);
-    defer deinitStringMap(allocator, &foreign_keys);
+    var foreign_keys = std.StringHashMap(LiveForeignKeyReference).init(allocator);
+    defer deinitLiveForeignKeyReferenceMap(allocator, &foreign_keys);
     try collectForeignKeyReferences(allocator, pg, &foreign_keys);
 
     var table_rls = std.StringHashMap(LiveTableRls).init(allocator);
@@ -1636,24 +1708,39 @@ test "live snapshot rejects unsupported expression indexes" {
 test "live postgres boolean parser accepts catalog boolean encodings" {
     try std.testing.expect(try livePgBool("t"));
     try std.testing.expect(try livePgBool("true"));
+    try std.testing.expect(try livePgBool("YES"));
     try std.testing.expect(!try livePgBool("f"));
     try std.testing.expect(!try livePgBool("false"));
+    try std.testing.expect(!try livePgBool("NO"));
     try std.testing.expectError(error.InvalidLiveBoolean, livePgBool("maybe"));
 }
 
-test "live foreign key helpers render default references and reject actions" {
-    try std.testing.expect(isSupportedLiveForeignKeyAction("NONE", "NO ACTION", "NO ACTION"));
-    try std.testing.expect(!isSupportedLiveForeignKeyAction("NONE", "CASCADE", "NO ACTION"));
-    try std.testing.expect(!isSupportedLiveForeignKeyAction("FULL", "NO ACTION", "NO ACTION"));
+test "live foreign key helpers render references with actions" {
+    try std.testing.expect((try liveForeignKeyActionToken("NO ACTION")) == null);
+    try std.testing.expectEqualStrings("cascade", (try liveForeignKeyActionToken("CASCADE")).?);
+    try std.testing.expectEqualStrings("set_null", (try liveForeignKeyActionToken("SET NULL")).?);
+    try std.testing.expectEqualStrings("set_default", (try liveForeignKeyActionToken("SET DEFAULT")).?);
+    try std.testing.expectEqualStrings("restrict", (try liveForeignKeyActionToken("RESTRICT")).?);
+    try std.testing.expectError(error.UnsupportedLiveForeignKeyAction, liveForeignKeyActionToken("DO NOTHING"));
+
+    try std.testing.expect((try liveForeignKeyDeferrableToken("NO", "NO")) == null);
+    try std.testing.expectEqualStrings("deferrable", (try liveForeignKeyDeferrableToken("YES", "NO")).?);
+    try std.testing.expectEqualStrings("initially_deferred", (try liveForeignKeyDeferrableToken("YES", "YES")).?);
+    try std.testing.expectError(error.InvalidLiveForeignKeyMetadata, liveForeignKeyDeferrableToken("NO", "YES"));
 
     const allocator = std.testing.allocator;
-    var refs = std.StringHashMap([]u8).init(allocator);
-    defer deinitStringMap(allocator, &refs);
-    try putOwnedStringMapValue(
+    var refs = std.StringHashMap(LiveForeignKeyReference).init(allocator);
+    defer deinitLiveForeignKeyReferenceMap(allocator, &refs);
+    try putOwnedLiveForeignKeyReference(
         allocator,
         &refs,
         try allocator.dupe(u8, "orders.user_id"),
-        try allocator.dupe(u8, "users(id)"),
+        .{
+            .reference = try allocator.dupe(u8, "users(id)"),
+            .on_delete = try allocator.dupe(u8, "cascade"),
+            .on_update = try allocator.dupe(u8, "restrict"),
+            .deferrable = try allocator.dupe(u8, "initially_deferred"),
+        },
     );
 
     var out = io_compat.AllocatingWriter.init(allocator);
@@ -1662,7 +1749,7 @@ test "live foreign key helpers render default references and reject actions" {
     const rendered = try out.toOwnedSlice();
     defer allocator.free(rendered);
 
-    try std.testing.expectEqualStrings(" references users(id)", rendered);
+    try std.testing.expectEqualStrings(" references users(id) on_delete cascade on_update restrict initially_deferred", rendered);
 }
 
 test "live policy helpers map targets roles and predicate safety" {

@@ -224,7 +224,10 @@ fn optionalTrimmedTextEquivalent(left: ?[]const u8, right: ?[]const u8) bool {
 }
 
 fn columnReferencesEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
-    return optionalTextEquivalent(old_col.references, new_col.references);
+    return optionalTextEquivalent(old_col.references, new_col.references) and
+        optionalTextEquivalent(old_col.reference_on_delete, new_col.reference_on_delete) and
+        optionalTextEquivalent(old_col.reference_on_update, new_col.reference_on_update) and
+        optionalTextEquivalent(old_col.reference_deferrable, new_col.reference_deferrable);
 }
 
 fn columnDefaultsEquivalent(old_col: *const ColumnDef, new_col: *const ColumnDef) bool {
@@ -1562,6 +1565,53 @@ test "diff new nullable reference column preserves reference constraint" {
     );
 }
 
+test "diff new nullable reference column preserves fk actions" {
+    const allocator = std.testing.allocator;
+
+    const old_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
+        \\table orders (
+        \\    id uuid primary_key
+        \\)
+    ;
+    var old = try Schema.parse(allocator, old_input);
+    defer old.deinit();
+
+    const new_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
+        \\table orders (
+        \\    id uuid primary_key,
+        \\    tenant_id uuid references tenants(id) on_delete cascade on_update restrict initially_deferred
+        \\)
+    ;
+    var new = try Schema.parse(allocator, new_input);
+    defer new.deinit();
+
+    var cmds = try diffSchemas(allocator, &old, &new);
+    defer cmds.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), cmds.items.len);
+    const sql = try cmds.items[0].toSql(allocator);
+    defer allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "ALTER TABLE orders ADD COLUMN tenant_id uuid REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+        sql,
+    );
+
+    const qail_cmd = try cmds.items[0].toQailCmd(allocator);
+    defer MigrationCmd.deinitQailCmd(allocator, &qail_cmd);
+    try std.testing.expectEqualStrings(
+        "tenants(id) ON DELETE CASCADE ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+        qail_cmd.columns[0].column_def.references.?,
+    );
+}
+
 test "diff existing column constraint drift fails closed" {
     const allocator = std.testing.allocator;
 
@@ -1624,6 +1674,31 @@ test "diff existing column constraint drift fails closed" {
     var reference_new = try Schema.parse(allocator, reference_new_input);
     defer reference_new.deinit();
     try std.testing.expectError(error.UnsupportedReferenceConstraintDrift, diffSchemas(allocator, &reference_old, &reference_new));
+
+    const reference_action_old_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
+        \\table orders (
+        \\    tenant_id uuid references tenants(id)
+        \\)
+    ;
+    var reference_action_old = try Schema.parse(allocator, reference_action_old_input);
+    defer reference_action_old.deinit();
+
+    const reference_action_new_input =
+        \\table tenants (
+        \\    id uuid primary_key
+        \\)
+        \\
+        \\table orders (
+        \\    tenant_id uuid references tenants(id) on_delete cascade
+        \\)
+    ;
+    var reference_action_new = try Schema.parse(allocator, reference_action_new_input);
+    defer reference_action_new.deinit();
+    try std.testing.expectError(error.UnsupportedReferenceConstraintDrift, diffSchemas(allocator, &reference_action_old, &reference_action_new));
 }
 
 test "diff new column preserves full type in SQL and AST" {

@@ -6,6 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const io_compat = @import("../runtime/io.zig");
 const parser = @import("../parser/mod.zig");
+const schema_types = @import("../parser/schema/types.zig");
 const render = @import("../transpiler/postgres/render.zig");
 
 const print = std.debug.print;
@@ -236,6 +237,12 @@ fn renderTable(writer: anytype, table: *const parser.TableDef) !void {
         }
         if (col.references) |refs| {
             try writer.print(" references {s}", .{refs});
+            try schema_types.writeReferenceOptionsQail(
+                writer,
+                col.reference_on_delete,
+                col.reference_on_update,
+                col.reference_deferrable,
+            );
         }
         if (col.check) |check_expr| {
             try writer.print(" check ({s})", .{check_expr});

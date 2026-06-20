@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const io = @import("../../runtime/io.zig");
 const render = @import("../../transpiler/postgres/render.zig");
 const schema = @import("../schema.zig");
+const schema_types = @import("../schema/types.zig");
 const ast_expr = @import("../../ast/expr.zig");
 
 const ColumnDef = schema.ColumnDef;
@@ -61,6 +62,33 @@ pub const MigrationCmd = struct {
         return writer.toOwnedSlice();
     }
 
+    fn writeColumnReferenceSql(writer: anytype, col: ColumnDef) !void {
+        if (col.references) |ref| {
+            try writer.print(" REFERENCES {s}", .{ref});
+            try schema_types.writeReferenceOptionsSql(
+                writer,
+                col.reference_on_delete,
+                col.reference_on_update,
+                col.reference_deferrable,
+            );
+        }
+    }
+
+    fn allocColumnReferenceSql(allocator: Allocator, col: ColumnDef) !?[]const u8 {
+        const refs = col.references orelse return null;
+        var writer = io.AllocatingWriter.init(allocator);
+        defer writer.deinit();
+        try writer.writer().writeAll(refs);
+        try schema_types.writeReferenceOptionsSql(
+            writer.writer(),
+            col.reference_on_delete,
+            col.reference_on_update,
+            col.reference_deferrable,
+        );
+        const owned = try writer.toOwnedSlice();
+        return owned;
+    }
+
     fn allocColumnConstraints(allocator: Allocator, col: ColumnDef) ![]const Constraint {
         const check_count = col.checkCount();
         if (check_count == 0) return &.{};
@@ -89,6 +117,7 @@ pub const MigrationCmd = struct {
     fn deinitColumnDefExpr(allocator: Allocator, expr: Expr) void {
         if (expr != .column_def) return;
         allocator.free(expr.column_def.data_type);
+        if (expr.column_def.references) |ref| allocator.free(ref);
         freeColumnConstraints(allocator, expr.column_def.constraints);
     }
 
@@ -102,6 +131,9 @@ pub const MigrationCmd = struct {
             &.{};
         errdefer freeColumnConstraints(allocator, constraints);
 
+        const references = try allocColumnReferenceSql(allocator, col);
+        errdefer if (references) |ref| allocator.free(ref);
+
         return .{
             .column_def = .{
                 .name = col.name,
@@ -111,7 +143,7 @@ pub const MigrationCmd = struct {
                 .is_unique = col.unique,
                 .is_not_null = !col.nullable,
                 .default_value = col.default_value,
-                .references = col.references,
+                .references = references,
             },
         };
     }
@@ -288,9 +320,7 @@ pub const MigrationCmd = struct {
                         if (col.default_value) |dv| {
                             try w.print(" DEFAULT {s}", .{dv});
                         }
-                        if (col.references) |ref| {
-                            try w.print(" REFERENCES {s}", .{ref});
-                        }
+                        try writeColumnReferenceSql(w, col);
                         try writeColumnCheckConstraints(w, col);
                     }
                     try w.writeAll("\n)");
@@ -315,9 +345,7 @@ pub const MigrationCmd = struct {
                     if (col.default_value) |def| {
                         try w.print(" DEFAULT {s}", .{def});
                     }
-                    if (col.references) |ref| {
-                        try w.print(" REFERENCES {s}", .{ref});
-                    }
+                    try writeColumnReferenceSql(w, col);
                     try writeColumnCheckConstraints(w, col);
                 }
             },
