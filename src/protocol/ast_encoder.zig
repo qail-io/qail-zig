@@ -418,11 +418,19 @@ pub const AstEncoder = struct {
             },
             .listen => {
                 try writer.writeAll("LISTEN ");
-                if (cmd.channel) |ch| try writeSingleIdentifierOrError(writer, ch);
+                if (cmd.channel) |ch| {
+                    try writeRequiredSingleIdentifier(writer, ch);
+                } else {
+                    return error.InvalidIdentifier;
+                }
             },
             .notify => {
                 try writer.writeAll("NOTIFY ");
-                if (cmd.channel) |ch| try writeSingleIdentifierOrError(writer, ch);
+                if (cmd.channel) |ch| {
+                    try writeRequiredSingleIdentifier(writer, ch);
+                } else {
+                    return error.InvalidIdentifier;
+                }
                 if (cmd.payload) |p| {
                     try writer.writeAll(", '");
                     try writeEscapedSqlString(writer, p);
@@ -432,7 +440,7 @@ pub const AstEncoder = struct {
             .unlisten => {
                 try writer.writeAll("UNLISTEN ");
                 if (cmd.channel) |ch| {
-                    try writeSingleIdentifierOrError(writer, ch);
+                    try writeRequiredSingleIdentifier(writer, ch);
                 } else {
                     try writer.writeByte('*');
                 }
@@ -442,15 +450,27 @@ pub const AstEncoder = struct {
             .rollback => try writer.writeAll("ROLLBACK"),
             .savepoint => {
                 try writer.writeAll("SAVEPOINT ");
-                if (cmd.savepoint_name) |name| try writeSingleIdentifierOrError(writer, name);
+                if (cmd.savepoint_name) |name| {
+                    try writeRequiredSingleIdentifier(writer, name);
+                } else {
+                    return error.InvalidIdentifier;
+                }
             },
             .release => {
                 try writer.writeAll("RELEASE SAVEPOINT ");
-                if (cmd.savepoint_name) |name| try writeSingleIdentifierOrError(writer, name);
+                if (cmd.savepoint_name) |name| {
+                    try writeRequiredSingleIdentifier(writer, name);
+                } else {
+                    return error.InvalidIdentifier;
+                }
             },
             .rollback_to => {
                 try writer.writeAll("ROLLBACK TO SAVEPOINT ");
-                if (cmd.savepoint_name) |name| try writeSingleIdentifierOrError(writer, name);
+                if (cmd.savepoint_name) |name| {
+                    try writeRequiredSingleIdentifier(writer, name);
+                } else {
+                    return error.InvalidIdentifier;
+                }
             },
             // DDL Commands
             .make => {
@@ -2708,6 +2728,13 @@ fn writeSingleIdentifierOrError(writer: anytype, value: []const u8) !void {
     try writeIdentifierMaybeQuoted(writer, value);
 }
 
+fn writeRequiredSingleIdentifier(writer: anytype, value: []const u8) !void {
+    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) {
+        return error.InvalidIdentifier;
+    }
+    try writeIdentifierMaybeQuoted(writer, value);
+}
+
 fn writeInsertTargetColumn(writer: anytype, expr: *const Expr) !void {
     switch (expr.*) {
         .named => |name| try writeIdentifierOrError(writer, name),
@@ -4577,6 +4604,53 @@ test "ast encoder quotes pubsub channels and savepoints defensively" {
     try std.testing.expectEqualStrings(
         "SAVEPOINT \"sp; DROP TABLE users; --\"",
         savepoint_writer.getWritten(),
+    );
+}
+
+test "ast encoder rejects invalid pubsub channels and savepoints" {
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    var listen_buf: [128]u8 = undefined;
+    var listen_writer = io.FixedBufferWriter.init(&listen_buf);
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        encoder.writeAstToSql(listen_writer.writer(), &QailCmd.listen("")),
+    );
+
+    var notify_buf: [128]u8 = undefined;
+    var notify_writer = io.FixedBufferWriter.init(&notify_buf);
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        encoder.writeAstToSql(notify_writer.writer(), &QailCmd.notifyChannel("bad\x00channel", "ok")),
+    );
+
+    var unlisten_buf: [128]u8 = undefined;
+    var unlisten_writer = io.FixedBufferWriter.init(&unlisten_buf);
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        encoder.writeAstToSql(unlisten_writer.writer(), &QailCmd.unlisten("")),
+    );
+
+    var savepoint_buf: [128]u8 = undefined;
+    var savepoint_writer = io.FixedBufferWriter.init(&savepoint_buf);
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        encoder.writeAstToSql(savepoint_writer.writer(), &QailCmd.savepoint("sp\x00shadow")),
+    );
+
+    var release_buf: [128]u8 = undefined;
+    var release_writer = io.FixedBufferWriter.init(&release_buf);
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        encoder.writeAstToSql(release_writer.writer(), &QailCmd.releaseSavepoint("")),
+    );
+
+    var rollback_buf: [128]u8 = undefined;
+    var rollback_writer = io.FixedBufferWriter.init(&rollback_buf);
+    try std.testing.expectError(
+        error.InvalidIdentifier,
+        encoder.writeAstToSql(rollback_writer.writer(), &QailCmd.rollbackTo("sp\x00shadow")),
     );
 }
 
