@@ -23,7 +23,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
     } else {
         for (cmd.columns, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeExpr(writer, &col);
+            try render.writeExprWithContext(writer, &col, cmd);
         }
     }
 
@@ -58,18 +58,18 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
             try render.writeIdentifierOrError(writer, alias);
         }
         try writer.writeAll(" ON ");
-        try render.writeIdentifierOrError(writer, join.on_left);
+        try render.writeColumnReference(writer, join.on_left, cmd);
         try writer.writeAll(" = ");
-        try render.writeIdentifierOrError(writer, join.on_right);
+        try render.writeColumnReference(writer, join.on_right, cmd);
     }
 
-    try render.writeWhereClauses(writer, cmd.where_clauses);
+    try render.writeWhereClausesWithContext(writer, cmd.where_clauses, cmd);
 
     if (cmd.group_by.len > 0) {
         try writer.writeAll(" GROUP BY ");
         for (cmd.group_by, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeIdentifierOrError(writer, col);
+            try render.writeColumnReference(writer, col, cmd);
         }
     }
 
@@ -79,7 +79,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
             if (i > 0) {
                 try writer.print(" {s} ", .{clause.logical_op.toSql()});
             }
-            try render.writeCondition(writer, &clause.condition);
+            try render.writeConditionWithContext(writer, &clause.condition, cmd);
         }
     }
 
@@ -87,7 +87,7 @@ pub fn writeSelect(writer: anytype, cmd: *const QailCmd) !void {
         try writer.writeAll(" ORDER BY ");
         for (cmd.order_by, 0..) |order, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeIdentifierOrError(writer, order.column);
+            try render.writeColumnReference(writer, order.column, cmd);
             try writer.print(" {s}", .{order.order.toSql()});
         }
     }
@@ -123,22 +123,34 @@ pub fn writeUpdate(writer: anytype, cmd: *const QailCmd) !void {
         try writer.writeAll("UPDATE ");
     }
     try render.writeTableReferenceOrError(writer, cmd.table);
+    if (cmd.table_alias) |alias| {
+        try writer.writeAll(" AS ");
+        try render.writeIdentifierOrError(writer, alias);
+    }
     try writer.writeAll(" SET ");
 
     for (cmd.assignments, 0..) |assign, i| {
         if (i > 0) try writer.writeAll(", ");
         try render.writeIdentifierOrError(writer, assign.column);
         try writer.writeAll(" = ");
-        try render.writeValue(writer, &assign.value);
+        try render.writeValueWithContext(writer, &assign.value, cmd);
     }
 
-    try render.writeWhereClauses(writer, cmd.where_clauses);
+    if (cmd.from_tables.len > 0) {
+        try writer.writeAll(" FROM ");
+        for (cmd.from_tables, 0..) |table, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try render.writeTableReferenceOrError(writer, table);
+        }
+    }
+
+    try render.writeWhereClausesWithContext(writer, cmd.where_clauses, cmd);
 
     if (cmd.returning.len > 0) {
         try writer.writeAll(" RETURNING ");
         for (cmd.returning, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeExpr(writer, &col);
+            try render.writeExprWithContext(writer, &col, cmd);
         }
     }
 }
@@ -150,14 +162,26 @@ pub fn writeDelete(writer: anytype, cmd: *const QailCmd) !void {
         try writer.writeAll("DELETE FROM ");
     }
     try render.writeTableReferenceOrError(writer, cmd.table);
+    if (cmd.table_alias) |alias| {
+        try writer.writeAll(" AS ");
+        try render.writeIdentifierOrError(writer, alias);
+    }
 
-    try render.writeWhereClauses(writer, cmd.where_clauses);
+    if (cmd.using_tables.len > 0) {
+        try writer.writeAll(" USING ");
+        for (cmd.using_tables, 0..) |table, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try render.writeTableReferenceOrError(writer, table);
+        }
+    }
+
+    try render.writeWhereClausesWithContext(writer, cmd.where_clauses, cmd);
 
     if (cmd.returning.len > 0) {
         try writer.writeAll(" RETURNING ");
         for (cmd.returning, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeExpr(writer, &col);
+            try render.writeExprWithContext(writer, &col, cmd);
         }
     }
 }
@@ -201,14 +225,14 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd, include_conflict: bool)
         try writer.writeAll(" VALUES (");
         for (cmd.insert_values, 0..) |value, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeValue(writer, &value);
+            try render.writeValueWithContext(writer, &value, cmd);
         }
         try writer.writeAll(")");
     } else if (cmd.assignments.len > 0) {
         try writer.writeAll(" VALUES (");
         for (cmd.assignments, 0..) |assign, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeValue(writer, &assign.value);
+            try render.writeValueWithContext(writer, &assign.value, cmd);
         }
         try writer.writeAll(")");
     } else {
@@ -237,7 +261,7 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd, include_conflict: bool)
                         try render.writeIdentifierOrError(writer, assign.column);
                         try writer.writeAll(" = ");
                         if (conflict.update_columns.len != 0) {
-                            try render.writeValue(writer, &assign.value);
+                            try render.writeValueWithContext(writer, &assign.value, cmd);
                         } else {
                             try writer.writeAll("EXCLUDED.");
                             try render.writeIdentifierOrError(writer, assign.column);
@@ -254,7 +278,7 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd, include_conflict: bool)
         try writer.writeAll(" RETURNING ");
         for (cmd.returning, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeExpr(writer, &col);
+            try render.writeExprWithContext(writer, &col, cmd);
         }
     }
 }
@@ -393,7 +417,7 @@ pub fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
     try writeMergeSource(writer, &merge.source);
 
     try writer.writeAll(" ON ");
-    try writeConditions(writer, merge.on);
+    try writeConditions(writer, merge.on, cmd);
 
     for (merge.clauses) |clause| {
         try writer.writeAll(" WHEN ");
@@ -405,18 +429,18 @@ pub fn writeMerge(writer: anytype, cmd: *const QailCmd) !void {
 
         if (clause.condition.len > 0) {
             try writer.writeAll(" AND ");
-            try writeConditions(writer, clause.condition);
+            try writeConditions(writer, clause.condition, cmd);
         }
 
         try writer.writeAll(" THEN ");
-        try writeMergeAction(writer, &clause.action);
+        try writeMergeAction(writer, &clause.action, cmd);
     }
 
     if (cmd.returning.len > 0) {
         try writer.writeAll(" RETURNING ");
         for (cmd.returning, 0..) |col, i| {
             if (i > 0) try writer.writeAll(", ");
-            try render.writeExpr(writer, &col);
+            try render.writeExprWithContext(writer, &col, cmd);
         }
     }
 }
@@ -442,15 +466,15 @@ fn writeMergeSource(writer: anytype, source: *const ast.cmd.MergeSource) !void {
     }
 }
 
-fn writeConditions(writer: anytype, conditions: []const ast.expr.Condition) !void {
+fn writeConditions(writer: anytype, conditions: []const ast.expr.Condition, cmd: ?*const QailCmd) !void {
     if (conditions.len == 0) return error.MissingMergeCondition;
     for (conditions, 0..) |*condition, i| {
         if (i > 0) try writer.writeAll(" AND ");
-        try render.writeCondition(writer, condition);
+        try render.writeConditionWithContext(writer, condition, cmd);
     }
 }
 
-fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
+fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction, cmd: ?*const QailCmd) !void {
     switch (action.*) {
         .update => |assignments| {
             try writer.writeAll("UPDATE SET ");
@@ -459,7 +483,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
                 try render.writeIdentifierOrError(writer, assignment.column);
                 try writer.writeAll(" = ");
                 var expr = assignment.expr;
-                try render.writeExpr(writer, &expr);
+                try render.writeExprWithContext(writer, &expr, cmd);
             }
         },
         .insert => |insert| {
@@ -476,7 +500,7 @@ fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction) !void {
             for (insert.values, 0..) |value, i| {
                 if (i > 0) try writer.writeAll(", ");
                 var expr = value;
-                try render.writeExpr(writer, &expr);
+                try render.writeExprWithContext(writer, &expr, cmd);
             }
             try writer.writeByte(')');
         },

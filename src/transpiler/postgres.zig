@@ -1026,6 +1026,137 @@ test "trusted transpiler quotes column value identifiers" {
     try std.testing.expectError(error.InvalidIdentifier, toSqlTrusted(std.testing.allocator, &invalid_cmd));
 }
 
+test "trusted transpiler resolves schema-qualified aliases through context" {
+    const window_orders = [_]ast.expr.OrderByExpr{.{ .column = "public.orders.created_at", .direction = .desc }};
+    const cols = [_]Expr{
+        Expr.col("public.orders.id"),
+        .{ .aggregate = .{ .func = .sum, .column = "public.orders.total", .alias = "total" } },
+        .{ .json_access = .{
+            .column = "public.orders.payload",
+            .path = &[_]ast.expr.JsonPathSegment{.{ .key = "tier", .as_text = true }},
+            .alias = "tier",
+        } },
+        .{ .window = .{
+            .name = "rn",
+            .func = "row_number",
+            .partition = &.{"public.orders.customer_id"},
+            .order = &window_orders,
+        } },
+    };
+    const wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("public.orders.status", .eq, Value.fromColumn("public.orders.previous_status")),
+    };
+    const groups = [_][]const u8{ "public.orders.id", "public.orders.payload" };
+    const orders = [_]ast.cmd.OrderBy{.{ .column = "public.orders.created_at", .order = .desc }};
+    const joins = [_]ast.cmd.Join{.{
+        .kind = .left,
+        .table = "crm.users AS u",
+        .on_left = "public.orders.user_id",
+        .on_right = "crm.users.id",
+    }};
+    const cmd = QailCmd.get("public.orders")
+        .alias("o")
+        .select(&cols)
+        .join(&joins)
+        .where(&wheres)
+        .groupBy(&groups)
+        .orderBy(&orders);
+
+    const sql = try toSqlTrusted(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "SELECT o.id, SUM(o.total) AS total, o.payload->>'tier' AS tier, row_number() OVER (PARTITION BY o.customer_id ORDER BY o.created_at DESC) AS rn FROM public.orders AS o LEFT JOIN crm.users AS u ON o.user_id = u.id WHERE o.status = o.previous_status GROUP BY o.id, o.payload ORDER BY o.created_at DESC",
+        sql,
+    );
+}
+
+test "trusted transpiler resolves update and delete source aliases" {
+    const update_assignments = [_]ast.cmd.Assignment{.{
+        .column = "status",
+        .value = Value.fromColumn("billing.payments.status"),
+    }};
+    const update_wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("public.orders.id", .eq, Value.fromColumn("billing.payments.order_id")),
+    };
+    const update_returning = [_]Expr{Expr.col("public.orders.id")};
+    var update = QailCmd.set("public.orders")
+        .alias("o")
+        .values(&update_assignments)
+        .where(&update_wheres);
+    update.from_tables = &.{"billing.payments p"};
+    update.returning = &update_returning;
+
+    const update_sql = try toSqlTrusted(std.testing.allocator, &update);
+    defer std.testing.allocator.free(update_sql);
+    try std.testing.expectEqualStrings(
+        "UPDATE public.orders AS o SET status = p.status FROM billing.payments p WHERE o.id = p.order_id RETURNING o.id",
+        update_sql,
+    );
+
+    const delete_wheres = [_]ast.cmd.WhereClause{
+        ast.cmd.filter("public.sessions.user_id", .eq, Value.fromColumn("auth.users.id")),
+    };
+    const delete_returning = [_]Expr{Expr.col("public.sessions.id")};
+    var delete = QailCmd.del("public.sessions")
+        .alias("s")
+        .where(&delete_wheres);
+    delete.using_tables = &.{"auth.users u"};
+    delete.returning = &delete_returning;
+
+    const delete_sql = try toSqlTrusted(std.testing.allocator, &delete);
+    defer std.testing.allocator.free(delete_sql);
+    try std.testing.expectEqualStrings(
+        "DELETE FROM public.sessions AS s USING auth.users u WHERE s.user_id = u.id RETURNING s.id",
+        delete_sql,
+    );
+}
+
+test "trusted transpiler resolves merge schema-qualified aliases" {
+    const on = [_]ast.expr.Condition{.{
+        .left = Expr.col("public.orders.id"),
+        .op = .eq,
+        .value = Value.fromColumn("staging.orders.order_id"),
+    }};
+    const update_assignments = [_]ast.cmd.MergeAssignment{.{
+        .column = "status",
+        .expr = Expr.col("staging.orders.status"),
+    }};
+    const insert_values = [_]Expr{
+        Expr.col("staging.orders.id"),
+        Expr.col("staging.orders.status"),
+    };
+    const clauses = [_]ast.cmd.MergeClause{
+        .{
+            .match_kind = .matched,
+            .action = .{ .update = &update_assignments },
+        },
+        .{
+            .match_kind = .not_matched_by_target,
+            .action = .{ .insert = .{
+                .columns = &.{ "id", "status" },
+                .values = &insert_values,
+            } },
+        },
+    };
+    const returning = [_]Expr{Expr.col("public.orders.id")};
+    const merge = ast.cmd.Merge{
+        .target_alias = "o",
+        .source = ast.cmd.MergeSource.fromTableAs("staging.orders", "s"),
+        .on = &on,
+        .clauses = &clauses,
+    };
+    var cmd = QailCmd.mergeInto("public.orders").withMerge(merge);
+    cmd.returning = &returning;
+
+    const sql = try toSqlTrusted(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+    try std.testing.expectEqualStrings(
+        "MERGE INTO public.orders AS o USING staging.orders AS s ON o.id = s.order_id WHEN MATCHED THEN UPDATE SET status = s.status WHEN NOT MATCHED BY TARGET THEN INSERT (id, status) VALUES (s.id, s.status) RETURNING o.id",
+        sql,
+    );
+}
+
 test "trusted transpiler quotes expression identifiers and escapes json paths" {
     const name = Expr.col("name");
     const profile = Expr.col("profile");
