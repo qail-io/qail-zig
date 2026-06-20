@@ -1638,10 +1638,10 @@ fn extractColumnsFromChain(
 
         if (std.mem.eql(u8, name, "column")) {
             if (extractStringLiteral(allocator, first_arg)) |col| {
-                try appendUniqueOwned(&columns, allocator, col);
+                try appendSqlColumnIdentifier(&columns, allocator, col);
                 allocator.free(col);
             } else |_| {}
-        } else if (std.mem.eql(u8, name, "columns")) {
+        } else if (std.mem.eql(u8, name, "columns") or std.mem.eql(u8, name, "returning")) {
             var vals = try extractArrayStringLiterals(allocator, first_arg);
             defer {
                 for (vals.items) |v| allocator.free(v);
@@ -1650,17 +1650,15 @@ fn extractColumnsFromChain(
             if (vals.items.len == 0) {
                 if (extractLookupIdent(first_arg)) |ident| {
                     if (bindings.arrays.get(ident)) |arr| {
-                        for (arr.items) |v| try appendUniqueOwned(&columns, allocator, v);
+                        for (arr.items) |v| try appendSqlColumnIdentifier(&columns, allocator, v);
                     }
                 }
             } else {
-                for (vals.items) |v| try appendUniqueOwned(&columns, allocator, v);
+                for (vals.items) |v| try appendSqlColumnIdentifier(&columns, allocator, v);
             }
         } else if (isSingleColumnMethod(name)) {
             if (extractStringLiteral(allocator, first_arg)) |col| {
-                if (std.mem.indexOfScalar(u8, col, '.') == null) {
-                    try appendUniqueOwned(&columns, allocator, col);
-                }
+                try appendSqlColumnIdentifier(&columns, allocator, col);
                 allocator.free(col);
             } else |_| {}
         }
@@ -2010,6 +2008,41 @@ test "scanFile resolves const scalar table binding in qail builder chain" {
     const ref = scanner.refs.items[0];
     try std.testing.expectEqualStrings("users", ref.table);
     try expectHasColumn(ref.columns.items, "id");
+}
+
+test "scanFile extracts returning and qualified qail builder columns" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    const content =
+        \\const RETURNING_COLUMNS: &[&str] = &[
+        \\    "orders.id",
+        \\    "orders.created_at",
+        \\];
+        \\
+        \\fn update(status: &str) {
+        \\    let _cmd = qail_core::ast::Qail::set("orders")
+        \\        .set_value("orders.status", status)
+        \\        .eq("orders.id", "order-1")
+        \\        .returning(RETURNING_COLUMNS);
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "scan.rs", .data = content });
+
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "scan.rs", &scan_path_buf);
+    try scanner.scanFile(scan_path_buf[0..scan_path_len]);
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    const ref = scanner.refs.items[0];
+    try std.testing.expectEqualStrings("orders", ref.table);
+
+    try expectHasColumn(ref.columns.items, "status");
+    try expectHasColumn(ref.columns.items, "id");
+    try expectHasColumn(ref.columns.items, "created_at");
 }
 
 fn expectHasColumn(columns: []const []const u8, target: []const u8) !void {
