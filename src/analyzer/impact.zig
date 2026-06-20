@@ -387,3 +387,31 @@ test "impact does not treat create index opclass as column reference" {
     try std.testing.expect(impact.safe_to_run);
     try std.testing.expectEqual(@as(usize, 0), impact.breaking_changes.items.len);
 }
+
+test "impact detects dropped table from multi table grant" {
+    const allocator = std.testing.allocator;
+
+    var code_scanner = scanner.CodebaseScanner.init(allocator);
+    defer code_scanner.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "acl.sql",
+        .data = "GRANT SELECT ON TABLE users, orders TO app_role;",
+    });
+    var scan_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const scan_path_len = try tmp.dir.realPathFile(std.testing.io, "acl.sql", &scan_path_buf);
+    try code_scanner.scanFile(scan_path_buf[0..scan_path_len]);
+
+    var commands = [_]MigrationCmd{.{
+        .table = "orders",
+        .action = .drop_table,
+    }};
+
+    var impact = try MigrationImpact.analyze(allocator, &commands, code_scanner.getReferences());
+    defer impact.deinit();
+
+    try std.testing.expect(!impact.safe_to_run);
+    try std.testing.expectEqual(@as(usize, 1), impact.breaking_changes.items.len);
+}

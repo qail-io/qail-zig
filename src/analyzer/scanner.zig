@@ -593,24 +593,17 @@ pub const CodebaseScanner = struct {
         command_keyword: []const u8,
     ) !void {
         const scan_line = lineBeforeSourceComment(line);
-        const lower = try toLowerAlloc(self.allocator, scan_line);
+        const sanitized = try sanitizeSqlForReferenceScan(self.allocator, scan_line);
+        defer self.allocator.free(sanitized);
+        const lower = try toLowerAlloc(self.allocator, sanitized);
         defer self.allocator.free(lower);
 
         const command_pos = findKeyword(lower, command_keyword, 0) orelse return;
         const on_pos = findKeyword(lower, "on", command_pos + command_keyword.len) orelse return;
-        var table_start = skipSqlWs(lower, on_pos + "on".len);
-        const object_type_end = findSqlIdentifierEnd(lower, table_start);
-        if (object_type_end <= table_start) return;
-
-        const object_type = lower[table_start..object_type_end];
-        if (std.ascii.eqlIgnoreCase(object_type, "table")) {
-            table_start = skipSqlWs(lower, object_type_end);
-        } else if (isNonTablePrivilegeTarget(object_type)) {
-            return;
-        }
-
+        const table_start = sqlPrivilegeTableTargetStart(lower, on_pos + "on".len) orelse return;
         if (table_start >= lower.len or lower[table_start] == '(') return;
-        try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, &.{});
+        const table_end = minKeywordPos(lower, table_start, &.{ "to", "from", "granted" }) orelse lower.len;
+        try self.appendSqlTableListRefs(file_path, line_num, line, lower, table_start, table_end, &.{});
     }
 
     fn appendRawSqlTableRef(
@@ -1007,6 +1000,33 @@ fn isNonTablePrivilegeTarget(target: []const u8) bool {
         std.ascii.eqlIgnoreCase(target, "procedure") or
         std.ascii.eqlIgnoreCase(target, "routine") or
         std.ascii.eqlIgnoreCase(target, "type");
+}
+
+fn sqlPrivilegeTableTargetStart(lower: []const u8, start: usize) ?usize {
+    const cursor = skipSqlWs(lower, start);
+    if (keywordAt(lower, "all", cursor)) return null;
+
+    if (keywordAt(lower, "foreign", cursor)) {
+        const table_pos = skipSqlWs(lower, cursor + "foreign".len);
+        if (keywordAt(lower, "table", table_pos)) return skipSqlWs(lower, table_pos + "table".len);
+    }
+    if (keywordAt(lower, "table", cursor)) return skipSqlWs(lower, cursor + "table".len);
+
+    const object_type_end = findSqlIdentifierEnd(lower, cursor);
+    if (object_type_end <= cursor) return null;
+    if (isNonTablePrivilegeTarget(lower[cursor..object_type_end]) or
+        keywordAt(lower, "language", cursor) or
+        keywordAt(lower, "tablespace", cursor) or
+        keywordAt(lower, "server", cursor) or
+        keywordAt(lower, "parameter", cursor))
+    {
+        return null;
+    }
+    if (keywordAt(lower, "large", cursor)) {
+        const object_pos = skipSqlWs(lower, cursor + "large".len);
+        if (keywordAt(lower, "object", object_pos)) return null;
+    }
+    return cursor;
 }
 
 fn isSqlIdentifierStart(c: u8) bool {
@@ -2837,10 +2857,15 @@ test "sql scanner tracks raw table privilege references" {
     try scanner.scanLine("test.rs", 1, "sqlx::query(\"GRANT SELECT ON users TO app_role\")");
     try scanner.scanLine("test.rs", 2, "sqlx::query(\"REVOKE UPDATE ON TABLE billing.invoices FROM app_role\")");
     try scanner.scanLine("test.rs", 3, "sqlx::query(\"GRANT USAGE ON SCHEMA public TO app_role\")");
+    try scanner.scanLine("test.rs", 4, "sqlx::query(\"GRANT SELECT ON TABLE users, orders TO app_role\")");
+    try scanner.scanLine("test.rs", 5, "sqlx::query(\"GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_role\")");
+    try scanner.scanLine("test.rs", 6, "sqlx::query(\"REVOKE USAGE ON SEQUENCE users_id_seq FROM app_role\")");
 
-    try std.testing.expectEqual(@as(usize, 2), scanner.refs.items.len);
+    try std.testing.expectEqual(@as(usize, 4), scanner.refs.items.len);
     try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
     try std.testing.expectEqualStrings("billing.invoices", scanner.refs.items[1].table);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[2].table);
+    try std.testing.expectEqualStrings("orders", scanner.refs.items[3].table);
 }
 
 test "isSourceFile" {
