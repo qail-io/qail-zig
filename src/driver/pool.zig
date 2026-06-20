@@ -476,31 +476,34 @@ pub const PgPool = struct {
     /// Returns affected row count
     pub fn exec(self: *PgPool, cmd: *const @import("../ast/mod.zig").QailCmd) !u64 {
         var pooled = try self.acquire();
-        defer pooled.release();
 
         const driver_mod = @import("driver.zig");
         var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
-        return try driver.execute(cmd);
+        const result = driver.execute(cmd) catch |err| return finishDriverPoolError(&pooled, driver.conn, err);
+        releaseDriverPoolSuccess(&pooled, driver.conn);
+        return result;
     }
 
     /// Fetch all rows for a QAIL command (acquire, fetch, release)
     pub fn fetchAll(self: *PgPool, cmd: *const @import("../ast/mod.zig").QailCmd) ![]@import("row.zig").PgRow {
         var pooled = try self.acquire();
-        defer pooled.release();
 
         const driver_mod = @import("driver.zig");
         var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
-        return try driver.fetchAll(cmd);
+        const rows = driver.fetchAll(cmd) catch |err| return finishDriverPoolError(&pooled, driver.conn, err);
+        releaseDriverPoolSuccess(&pooled, driver.conn);
+        return rows;
     }
 
     /// Fetch one row for a QAIL command (acquire, fetch, release)
     pub fn fetchOne(self: *PgPool, cmd: *const @import("../ast/mod.zig").QailCmd) !?@import("row.zig").PgRow {
         var pooled = try self.acquire();
-        defer pooled.release();
 
         const driver_mod = @import("driver.zig");
         var driver = driver_mod.PgDriver.init(pooled.conn.?, self.allocator);
-        return try driver.fetchOne(cmd);
+        const row = driver.fetchOne(cmd) catch |err| return finishDriverPoolError(&pooled, driver.conn, err);
+        releaseDriverPoolSuccess(&pooled, driver.conn);
+        return row;
     }
 
     /// Create a new connection using pool config
@@ -625,6 +628,93 @@ fn executeSimpleConn(allocator: std.mem.Allocator, conn: *Connection, sql: []con
     }
 }
 
+fn releaseDriverPoolSuccess(pooled: *PooledConnection, conn: Connection) void {
+    pooled.conn = conn;
+    pooled.release();
+}
+
+fn finishDriverPoolError(pooled: *PooledConnection, conn: Connection, err: anyerror) anyerror {
+    pooled.conn = conn;
+    if (poolErrorRequiresDiscard(err)) {
+        pooled.discard();
+    } else {
+        pooled.release();
+    }
+    return err;
+}
+
+fn poolErrorRequiresDiscard(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionClosed,
+        error.EndOfStream,
+        error.ReadFailed,
+        error.ReadTimeout,
+        error.WriteTimeout,
+        error.WouldBlock,
+        error.IoUringOperationFailed,
+        error.ServerError,
+        error.UnexpectedBackendMessageType,
+        error.UnexpectedStartupMessageType,
+        error.InvalidMessageLength,
+        error.MessageTooLarge,
+        error.InvalidBackendMessagePayload,
+        error.InvalidReadyForQueryPayload,
+        error.InvalidReadyForQueryStatus,
+        error.InvalidRowDescriptionPayload,
+        error.InvalidDataRowPayload,
+        error.InvalidDataRow,
+        error.InvalidCommandCompletePayload,
+        error.InvalidCommandCompleteTag,
+        error.MalformedCommandCompleteTag,
+        error.InvalidErrorResponsePayload,
+        error.InvalidNotificationPayload,
+        error.InvalidParameterStatusPayload,
+        error.InvalidBackendKeyDataPayload,
+        error.InvalidNegotiateProtocolVersionPayload,
+        error.InvalidFormatCode,
+        error.InvalidCopyState,
+        error.InvalidCopyResponse,
+        error.InvalidCopyData,
+        error.CopyFailed,
+        error.CopyDataTooLarge,
+        error.InvalidReplicationCopyData,
+        error.UnexpectedReplicationMessage,
+        error.UnsupportedReplicationFormat,
+        error.InvalidReplicationResponse,
+        error.InvalidReplicationWalEnd,
+        error.ReplicationStreamEnded,
+        error.InvalidUtf8,
+        error.UnexpectedCompletionCount,
+        error.UnexpectedParseComplete,
+        error.DuplicateParseComplete,
+        error.ParseCompleteAfterBindComplete,
+        error.ParseCompleteAfterCompletion,
+        error.UnexpectedParameterDescription,
+        error.ParameterDescriptionBeforeParseComplete,
+        error.ParameterDescriptionAfterBindComplete,
+        error.ParameterDescriptionAfterCompletion,
+        error.DuplicateBindComplete,
+        error.BindCompleteBeforeParseComplete,
+        error.BindCompleteAfterCompletion,
+        error.RowDescriptionAfterCompletion,
+        error.RowDescriptionBeforeBindComplete,
+        error.RowDescriptionBeforeParseComplete,
+        error.NoDataAfterCompletion,
+        error.UnexpectedNoDataAfterBindComplete,
+        error.UnexpectedNoDataBeforeBindComplete,
+        error.NoDataBeforeParseComplete,
+        error.DataRowBeforeBindComplete,
+        error.DataRowAfterCompletion,
+        error.CompletionBeforeBindComplete,
+        error.DuplicateCompletionMessage,
+        error.ReadyForQueryBeforeParseComplete,
+        error.ReadyForQueryBeforeBindComplete,
+        error.ReadyForQueryBeforeCompletion,
+        => true,
+        else => false,
+    };
+}
+
 fn validatePoolConfig(config: *const PoolConfig) !void {
     if (config.host.len == 0) {
         return error.InvalidPoolConfig;
@@ -679,6 +769,17 @@ test "PoolConfig defaults" {
 test "PgPool struct" {
     _ = PgPool;
     _ = PooledConnection;
+}
+
+test "pool error classification discards protocol unsafe errors only" {
+    try std.testing.expect(poolErrorRequiresDiscard(error.UnexpectedBackendMessageType));
+    try std.testing.expect(poolErrorRequiresDiscard(error.InvalidCopyState));
+    try std.testing.expect(poolErrorRequiresDiscard(error.ConnectionClosed));
+    try std.testing.expect(poolErrorRequiresDiscard(error.ReadyForQueryBeforeCompletion));
+    try std.testing.expect(!poolErrorRequiresDiscard(error.QueryError));
+    try std.testing.expect(!poolErrorRequiresDiscard(error.ExecuteError));
+    try std.testing.expect(!poolErrorRequiresDiscard(error.InvalidIdentifier));
+    try std.testing.expect(!poolErrorRequiresDiscard(error.ParameterCountMismatch));
 }
 
 test "PgPool.init duplicates config strings for owned lifetime" {
