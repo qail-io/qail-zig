@@ -600,7 +600,7 @@ pub const AstEncoder = struct {
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
                 } else if (cmd.raw_sql) |raw| {
-                    const query = checkedReadOnlySubquerySql(raw) orelse "SELECT NULL WHERE FALSE";
+                    const query = checkedReadOnlySubquerySql(raw) orelse return error.InvalidReadOnlySubquery;
                     try writer.writeAll(query);
                 } else {
                     return error.MissingViewSourceQuery;
@@ -617,7 +617,7 @@ pub const AstEncoder = struct {
                 if (cmd.source_query) |source_query| {
                     try writeNestedQueryableCmd(writer, source_query);
                 } else if (cmd.raw_sql) |raw| {
-                    const query = checkedReadOnlySubquerySql(raw) orelse "SELECT NULL WHERE FALSE";
+                    const query = checkedReadOnlySubquerySql(raw) orelse return error.InvalidReadOnlySubquery;
                     try writer.writeAll(query);
                 } else {
                     return error.MissingMaterializedViewSourceQuery;
@@ -1563,7 +1563,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
         try writeNestedQueryableCmd(writer, source_query);
     } else if (cmd.raw_sql) |source_sql| {
         try writer.writeByte(' ');
-        const checked_source = checkedReadOnlySubquerySql(source_sql) orelse "SELECT NULL WHERE FALSE";
+        const checked_source = checkedReadOnlySubquerySql(source_sql) orelse return error.InvalidReadOnlySubquery;
         try writer.writeAll(checked_source);
     } else if (cmd.insert_values.len > 0) {
         try writer.writeAll(" VALUES (");
@@ -1978,7 +1978,7 @@ fn isAllowedIndexOpclass(token: []const u8) bool {
 }
 
 fn writeCheckedSubquerySql(writer: anytype, sql: []const u8) !void {
-    const checked = checkedReadOnlySubquerySql(sql) orelse "SELECT NULL WHERE FALSE";
+    const checked = checkedReadOnlySubquerySql(sql) orelse return error.InvalidReadOnlySubquery;
     try writer.writeAll(checked);
 }
 
@@ -3876,41 +3876,25 @@ test "ast encoder view payload fragments fail closed" {
     unsafe_view.raw_sql = "SELECT id FROM users; DROP TABLE users; --";
     var unsafe_buf: [256]u8 = undefined;
     var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
-    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_view);
-    try std.testing.expectEqualStrings(
-        "CREATE VIEW active_users AS SELECT NULL WHERE FALSE",
-        unsafe_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_view));
 
     var mutating_view = QailCmd.createView("deleted_users");
     mutating_view.raw_sql = "DELETE FROM users RETURNING id";
     var mutating_view_buf: [256]u8 = undefined;
     var mutating_view_writer = io.FixedBufferWriter.init(&mutating_view_buf);
-    try encoder.writeAstToSql(mutating_view_writer.writer(), &mutating_view);
-    try std.testing.expectEqualStrings(
-        "CREATE VIEW deleted_users AS SELECT NULL WHERE FALSE",
-        mutating_view_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(mutating_view_writer.writer(), &mutating_view));
 
     var unsafe_materialized = QailCmd.createMaterializedView("booking_stats");
     unsafe_materialized.raw_sql = "SELECT COUNT(*) FROM bookings; DROP TABLE bookings; --";
     var materialized_buf: [256]u8 = undefined;
     var materialized_writer = io.FixedBufferWriter.init(&materialized_buf);
-    try encoder.writeAstToSql(materialized_writer.writer(), &unsafe_materialized);
-    try std.testing.expectEqualStrings(
-        "CREATE MATERIALIZED VIEW booking_stats AS SELECT NULL WHERE FALSE",
-        materialized_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(materialized_writer.writer(), &unsafe_materialized));
 
     var mutating_materialized = QailCmd.createMaterializedView("deleted_booking_stats");
     mutating_materialized.raw_sql = "WITH deleted AS (DELETE FROM bookings RETURNING id) SELECT id FROM deleted";
     var mutating_materialized_buf: [256]u8 = undefined;
     var mutating_materialized_writer = io.FixedBufferWriter.init(&mutating_materialized_buf);
-    try encoder.writeAstToSql(mutating_materialized_writer.writer(), &mutating_materialized);
-    try std.testing.expectEqualStrings(
-        "CREATE MATERIALIZED VIEW deleted_booking_stats AS SELECT NULL WHERE FALSE",
-        mutating_materialized_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(mutating_materialized_writer.writer(), &mutating_materialized));
 }
 
 test "ast encoder alter expression fragments fail closed" {
@@ -4030,21 +4014,13 @@ test "ast encoder insert renders targets and raw sources defensively" {
     unsafe_source.raw_sql = "SELECT id FROM users; DROP TABLE users; --";
     var unsafe_buf: [256]u8 = undefined;
     var unsafe_writer = io.FixedBufferWriter.init(&unsafe_buf);
-    try encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_source);
-    try std.testing.expectEqualStrings(
-        "INSERT INTO events SELECT NULL WHERE FALSE",
-        unsafe_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(unsafe_writer.writer(), &unsafe_source));
 
     var mutating_source = QailCmd.add("events");
     mutating_source.raw_sql = "DELETE FROM users RETURNING id";
     var mutating_buf: [256]u8 = undefined;
     var mutating_writer = io.FixedBufferWriter.init(&mutating_buf);
-    try encoder.writeAstToSql(mutating_writer.writer(), &mutating_source);
-    try std.testing.expectEqualStrings(
-        "INSERT INTO events SELECT NULL WHERE FALSE",
-        mutating_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(mutating_writer.writer(), &mutating_source));
 }
 
 test "ast encoder insert target expressions fail closed" {
@@ -5251,11 +5227,7 @@ test "ast encoder expression fragments fail closed" {
     const subquery_cmd = QailCmd.get("users").select(&subquery_cols);
     var subquery_buf: [256]u8 = undefined;
     var subquery_writer = io.FixedBufferWriter.init(&subquery_buf);
-    try encoder.writeAstToSql(subquery_writer.writer(), &subquery_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT (SELECT NULL WHERE FALSE) AS safe_alias FROM users",
-        subquery_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(subquery_writer.writer(), &subquery_cmd));
 
     const mutating_subquery_cols = [_]Expr{.{ .subquery = .{
         .sql = "DELETE FROM users RETURNING id",
@@ -5264,11 +5236,7 @@ test "ast encoder expression fragments fail closed" {
     const mutating_subquery_cmd = QailCmd.get("users").select(&mutating_subquery_cols);
     var mutating_subquery_buf: [256]u8 = undefined;
     var mutating_subquery_writer = io.FixedBufferWriter.init(&mutating_subquery_buf);
-    try encoder.writeAstToSql(mutating_subquery_writer.writer(), &mutating_subquery_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT (SELECT NULL WHERE FALSE) AS deleted_id FROM users",
-        mutating_subquery_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(mutating_subquery_writer.writer(), &mutating_subquery_cmd));
 
     const exists_cols = [_]Expr{.{ .exists_subquery = .{
         .sql = "SELECT 1; DROP TABLE users; --",
@@ -5277,11 +5245,7 @@ test "ast encoder expression fragments fail closed" {
     const exists_cmd = QailCmd.get("users").select(&exists_cols);
     var exists_buf: [256]u8 = undefined;
     var exists_writer = io.FixedBufferWriter.init(&exists_buf);
-    try encoder.writeAstToSql(exists_writer.writer(), &exists_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_exists FROM users",
-        exists_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(exists_writer.writer(), &exists_cmd));
 
     const mutating_cte_exists_cols = [_]Expr{.{ .exists_subquery = .{
         .sql = "WITH deleted AS (DELETE FROM users RETURNING id) SELECT id FROM deleted",
@@ -5290,11 +5254,7 @@ test "ast encoder expression fragments fail closed" {
     const mutating_cte_exists_cmd = QailCmd.get("users").select(&mutating_cte_exists_cols);
     var mutating_cte_exists_buf: [256]u8 = undefined;
     var mutating_cte_exists_writer = io.FixedBufferWriter.init(&mutating_cte_exists_buf);
-    try encoder.writeAstToSql(mutating_cte_exists_writer.writer(), &mutating_cte_exists_cmd);
-    try std.testing.expectEqualStrings(
-        "SELECT EXISTS (SELECT NULL WHERE FALSE) AS safe_cte FROM users",
-        mutating_cte_exists_writer.getWritten(),
-    );
+    try std.testing.expectError(error.InvalidReadOnlySubquery, encoder.writeAstToSql(mutating_cte_exists_writer.writer(), &mutating_cte_exists_cmd));
 }
 
 test "ast encoder quotes expression identifiers and escapes json paths" {
