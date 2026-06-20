@@ -29,6 +29,7 @@ const WindowExpr = @TypeOf(@as(Expr, undefined).window);
 const FrontendMessage = wire.FrontendMessage;
 const PROTOCOL_VERSION = wire.PROTOCOL_VERSION;
 const max_wire_message_len: usize = std.math.maxInt(i32);
+const MAX_RAW_FUNCTION_VALUE_LEN: usize = 1024;
 
 const INVALID_FUNCTION_NAME = "/* ERROR: Invalid function name */";
 const INVALID_FUNCTION_KEYWORD = "/* ERROR: Invalid function keyword */";
@@ -2021,6 +2022,15 @@ fn isSafeFunctionName(name: []const u8) bool {
     return true;
 }
 
+fn isSafeRawFunctionValue(value: []const u8) bool {
+    return value.len <= MAX_RAW_FUNCTION_VALUE_LEN and
+        std.mem.indexOfScalar(u8, value, 0) == null and
+        std.mem.indexOfScalar(u8, value, ';') == null and
+        std.mem.indexOf(u8, value, "--") == null and
+        std.mem.indexOf(u8, value, "/*") == null and
+        std.mem.indexOf(u8, value, "*/") == null;
+}
+
 fn isSafeSqlKeyword(keyword: []const u8) bool {
     if (keyword.len == 0 or std.mem.indexOfScalar(u8, keyword, 0) != null) return false;
     for (keyword) |c| {
@@ -3353,6 +3363,15 @@ fn writeValue(writer: anytype, val: *const Value, cmd: ?*const QailCmd) !void {
     try val.validateFinite();
     switch (val.*) {
         .column => |column| try writeColumnReference(writer, column, cmd),
+        .named_param => return error.UnresolvedNamedParameter,
+        .function => |function| {
+            if (!isSafeRawFunctionValue(function)) return error.UnsafeSqlFragment;
+            try writer.writeAll(function);
+        },
+        .string, .uuid, .timestamp, .json => |text| {
+            if (std.mem.indexOfScalar(u8, text, 0) != null) return error.NullByte;
+            try val.format(writer);
+        },
         .array => |values| {
             try writer.writeAll("ARRAY[");
             for (values, 0..) |value, i| {
@@ -5079,22 +5098,13 @@ test "ast encoder in parameters use array operators" {
     var encoder = AstEncoder.init(std.testing.allocator);
     defer encoder.deinit();
 
-    const wheres = [_]ast.cmd.WhereClause{
-        .{
-            .condition = .{
-                .column = "id",
-                .op = .in,
-                .value = .{ .param = 1 },
-            },
+    const wheres = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "id",
+            .op = .in,
+            .value = .{ .param = 1 },
         },
-        .{
-            .condition = .{
-                .column = "role",
-                .op = .not_in,
-                .value = .{ .named_param = "roles" },
-            },
-        },
-    };
+    }};
     const cmd = QailCmd.get("users").where(&wheres);
 
     var sql_buf: [512]u8 = undefined;
@@ -5102,9 +5112,22 @@ test "ast encoder in parameters use array operators" {
     try encoder.writeAstToSql(writer.writer(), &cmd);
 
     try std.testing.expectEqualStrings(
-        "SELECT * FROM users WHERE id = ANY($1) AND role != ALL(:roles)",
+        "SELECT * FROM users WHERE id = ANY($1)",
         writer.getWritten(),
     );
+
+    const named_wheres = [_]ast.cmd.WhereClause{.{
+        .condition = .{
+            .column = "role",
+            .op = .not_in,
+            .value = .{ .named_param = "roles" },
+        },
+    }};
+    const named_cmd = QailCmd.get("users").where(&named_wheres);
+
+    var named_buf: [256]u8 = undefined;
+    var named_writer = io.FixedBufferWriter.init(&named_buf);
+    try std.testing.expectError(error.UnresolvedNamedParameter, encoder.writeAstToSql(named_writer.writer(), &named_cmd));
 }
 
 test "ast encoder malformed condition shapes fail closed" {
@@ -5195,6 +5218,18 @@ test "ast encoder expression fragments fail closed" {
         "SELECT /* ERROR: Invalid raw SQL fragment */ FROM users",
         raw_writer.getWritten(),
     );
+
+    const unsafe_value_cols = [_]Expr{.{ .literal = .{ .function = "now(); DROP TABLE users; --" } }};
+    const unsafe_value_cmd = QailCmd.get("users").select(&unsafe_value_cols);
+    var unsafe_value_buf: [256]u8 = undefined;
+    var unsafe_value_writer = io.FixedBufferWriter.init(&unsafe_value_buf);
+    try std.testing.expectError(error.UnsafeSqlFragment, encoder.writeAstToSql(unsafe_value_writer.writer(), &unsafe_value_cmd));
+
+    const nul_value_cols = [_]Expr{.{ .literal = .{ .string = "bad\x00value" } }};
+    const nul_value_cmd = QailCmd.get("users").select(&nul_value_cols);
+    var nul_value_buf: [256]u8 = undefined;
+    var nul_value_writer = io.FixedBufferWriter.init(&nul_value_buf);
+    try std.testing.expectError(error.NullByte, encoder.writeAstToSql(nul_value_writer.writer(), &nul_value_cmd));
 
     const safe_subquery_cols = [_]Expr{.{ .subquery = .{
         .sql = "SELECT count(*) FROM pg_class",
