@@ -341,7 +341,16 @@ pub const CodebaseScanner = struct {
             try appendSqlProjectionColumns(&columns, self.allocator, sanitized[select_pos + "select".len .. from_pos]);
             try appendSqlJoinPredicateColumns(&columns, self.allocator, sanitized, lower, table_end);
             if (findKeyword(lower, "where", table_end)) |where_pos| {
-                try appendSqlPredicateColumns(&columns, self.allocator, sanitized[where_pos + "where".len ..]);
+                try appendSqlWhereColumns(&columns, self.allocator, sanitized, lower, where_pos, &.{
+                    "group",
+                    "having",
+                    "order",
+                    "limit",
+                    "offset",
+                    "fetch",
+                    "union",
+                    "returning",
+                });
             }
             try appendSqlClauseColumns(&columns, self.allocator, sanitized, lower, table_end, "group", &.{
                 "having",
@@ -418,7 +427,7 @@ pub const CodebaseScanner = struct {
         defer freeStringList(self.allocator, &columns);
         try appendSqlUpdateColumns(&columns, self.allocator, sanitized, lower, set_pos);
         if (findKeyword(lower, "where", set_pos + "set".len)) |where_pos| {
-            try appendSqlPredicateColumns(&columns, self.allocator, sanitized[where_pos + "where".len ..]);
+            try appendSqlWhereColumns(&columns, self.allocator, sanitized, lower, where_pos, &.{"returning"});
         }
         try appendSqlReturningColumns(&columns, self.allocator, sanitized, lower, table_end);
 
@@ -447,7 +456,7 @@ pub const CodebaseScanner = struct {
         var columns: std.ArrayList([]const u8) = .empty;
         defer freeStringList(self.allocator, &columns);
         if (findKeyword(lower, "where", table_end)) |where_pos| {
-            try appendSqlPredicateColumns(&columns, self.allocator, sanitized[where_pos + "where".len ..]);
+            try appendSqlWhereColumns(&columns, self.allocator, sanitized, lower, where_pos, &.{"returning"});
         }
         try appendSqlReturningColumns(&columns, self.allocator, sanitized, lower, table_end);
 
@@ -1171,6 +1180,20 @@ fn appendSqlClauseColumns(
     try appendSqlExpressionColumns(columns, allocator, sql[clause_start..clause_end]);
 }
 
+fn appendSqlWhereColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    sql: []const u8,
+    lower: []const u8,
+    where_pos: usize,
+    comptime end_keywords: []const []const u8,
+) !void {
+    const where_start = where_pos + "where".len;
+    const where_end = minKeywordPos(lower, where_start, end_keywords) orelse lower.len;
+    if (where_end <= where_start) return;
+    try appendSqlExpressionColumns(columns, allocator, sql[where_start..where_end]);
+}
+
 fn appendSqlExpressionColumns(
     columns: *std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
@@ -1194,6 +1217,10 @@ fn appendSqlExpressionColumns(
 
         const ident = expr[i..ident_end];
         const next = skipSqlWs(lower, ident_end);
+        if (isSqlCastTypeStart(lower, i)) {
+            i = ident_end;
+            continue;
+        }
         if (next < lower.len and lower[next] == '(') {
             i = ident_end;
             continue;
@@ -1210,6 +1237,12 @@ fn appendSqlExpressionColumns(
         try appendSqlColumnReference(columns, allocator, ident);
         i = ident_end;
     }
+}
+
+fn isSqlCastTypeStart(lower: []const u8, idx: usize) bool {
+    var cursor = idx;
+    while (cursor > 0 and std.ascii.isWhitespace(lower[cursor - 1])) : (cursor -= 1) {}
+    return cursor >= 2 and lower[cursor - 1] == ':' and lower[cursor - 2] == ':';
 }
 
 fn previousSqlKeywordIs(lower: []const u8, idx: usize, keyword: []const u8) bool {
@@ -1716,24 +1749,24 @@ fn findTopLevelByte(s: []const u8, start: usize, target: u8) ?usize {
 
 fn isSqlReservedWord(s: []const u8) bool {
     const words = [_][]const u8{
-        "all",          "and",               "as",        "asc",         "avg",
-        "between",      "by",                "case",      "collate",     "conflict",
-        "constraint",   "count",             "cross",     "cube",        "current_date",
-        "current_time", "current_timestamp", "delete",    "desc",        "distinct",
-        "do",           "else",              "end",       "excluded",    "exists",
-        "false",        "filter",            "following", "from",        "full",
-        "group",        "grouping",          "groups",    "having",      "ilike",
-        "in",           "inner",             "insert",    "into",        "is",
-        "join",         "last",              "left",      "like",        "limit",
-        "localtime",    "localtimestamp",    "max",       "min",         "natural",
-        "not",          "nothing",           "null",      "nulls",       "offset",
-        "on",           "or",                "order",     "ordinality",  "outer",
-        "over",         "partition",         "preceding", "range",       "returning",
-        "right",        "rollup",            "row",       "rows",        "select",
-        "set",          "sets",              "sum",       "tablesample", "then",
-        "ties",         "true",              "unbounded", "union",       "update",
-        "using",        "values",            "when",      "where",       "window",
-        "with",
+        "all",          "and",               "as",             "asc",       "avg",
+        "between",      "by",                "case",           "collate",   "conflict",
+        "constraint",   "count",             "cross",          "cube",      "current_date",
+        "current_time", "current_timestamp", "delete",         "desc",      "distinct",
+        "do",           "else",              "end",            "escape",    "excluded",
+        "exists",       "false",             "filter",         "following", "from",
+        "full",         "group",             "grouping",       "groups",    "having",
+        "ilike",        "in",                "inner",          "insert",    "into",
+        "is",           "join",              "last",           "left",      "like",
+        "limit",        "localtime",         "localtimestamp", "max",       "min",
+        "natural",      "not",               "nothing",        "null",      "nulls",
+        "offset",       "on",                "or",             "order",     "ordinality",
+        "outer",        "over",              "partition",      "preceding", "range",
+        "returning",    "right",             "rollup",         "row",       "rows",
+        "select",       "set",               "sets",           "sum",       "tablesample",
+        "then",         "ties",              "true",           "unbounded", "union",
+        "update",       "using",             "values",         "when",      "where",
+        "window",       "with",
     };
     for (words) |word| {
         if (std.ascii.eqlIgnoreCase(s, word)) return true;
@@ -2703,6 +2736,52 @@ test "sql scanner extracts distinct on and grouping expression columns" {
     try expectHasColumn(scanner.refs.items[0].columns.items, "created_at");
     try expectMissingColumn(scanner.refs.items[0].columns.items, "rollup");
     try expectMissingColumn(scanner.refs.items[0].columns.items, "cube");
+}
+
+test "sql scanner extracts function predicates without schema function names" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"SELECT pg_catalog.lower(email), public.coalesce(name, email) FROM users WHERE pg_catalog.lower(users.status) = $1\")",
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "email");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "name");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "status");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "lower");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "coalesce");
+}
+
+test "sql scanner skips cast type and expression syntax identifiers" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"SELECT id::public.user_id, CAST(email AS public.email_text) FROM users WHERE status::public.status_name = $1 AND lower(name COLLATE \\\"C\\\") LIKE $2 ESCAPE '\\\\' AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 day' AND starts_at AT TIME ZONE 'UTC' > CURRENT_DATE ORDER BY EXTRACT(EPOCH FROM created_at)\")",
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "id");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "email");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "status");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "name");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "created_at");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "starts_at");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "email_text");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "status_name");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "interval");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "escape");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "epoch");
 }
 
 test "sql scanner tracks raw ddl table references" {
