@@ -103,6 +103,12 @@ pub const Decoder = struct {
         return str;
     }
 
+    fn readUtf8CString(self: *Decoder) ![]const u8 {
+        const str = try self.readCString();
+        if (!std.unicode.utf8ValidateSlice(str)) return error.InvalidUtf8;
+        return str;
+    }
+
     fn readBytes(self: *Decoder, len: usize) ![]const u8 {
         if (self.pos + len > self.data.len) return error.EndOfStream;
         const bytes = self.data[self.pos .. self.pos + len];
@@ -183,7 +189,7 @@ pub const Decoder = struct {
         defer mechs.deinit(allocator);
 
         while (true) {
-            const mechanism = try self.readCString();
+            const mechanism = self.readUtf8CString() catch return error.InvalidSaslMechanismList;
             if (mechanism.len == 0) break; // Final list terminator
             try mechs.append(allocator, mechanism);
         }
@@ -206,9 +212,9 @@ pub const Decoder = struct {
 
     /// Parse ParameterStatus message
     pub fn parseParameterStatus(self: *Decoder) !struct { name: []const u8, value: []const u8 } {
-        const name = try self.readCString();
+        const name = self.readUtf8CString() catch return error.InvalidParameterStatusPayload;
         if (name.len == 0) return error.InvalidParameterStatusPayload;
-        const value = try self.readCString();
+        const value = self.readUtf8CString() catch return error.InvalidParameterStatusPayload;
         if (self.remaining() != 0) return error.InvalidParameterStatusPayload;
         return .{ .name = name, .value = value };
     }
@@ -265,7 +271,7 @@ pub const Decoder = struct {
         var parsed: usize = 0;
         errdefer allocator.free(options);
         while (parsed < option_count) : (parsed += 1) {
-            options[parsed] = try self.readCString();
+            options[parsed] = self.readUtf8CString() catch return error.InvalidNegotiateProtocolVersionPayload;
         }
         if (self.remaining() != 0) return error.InvalidNegotiateProtocolVersionPayload;
 
@@ -296,9 +302,9 @@ pub const Decoder = struct {
     /// Payload format: i32(process_id) + cstring(channel) + cstring(payload)
     pub fn parseNotificationResponse(self: *Decoder) !struct { process_id: i32, channel: []const u8, payload: []const u8 } {
         const process_id = try self.readI32();
-        const channel = try self.readCString();
+        const channel = self.readUtf8CString() catch return error.InvalidNotificationPayload;
         if (channel.len == 0) return error.InvalidNotificationPayload;
-        const payload = try self.readCString();
+        const payload = self.readUtf8CString() catch return error.InvalidNotificationPayload;
         if (self.remaining() != 0) return error.InvalidNotificationPayload;
         return .{
             .process_id = process_id,
@@ -360,7 +366,7 @@ pub const Decoder = struct {
 
         for (0..field_count) |i| {
             fields[i] = .{
-                .name = try self.readCString(),
+                .name = self.readUtf8CString() catch return error.InvalidRowDescriptionPayload,
                 .table_oid = try self.readU32(),
                 .column_index = try self.readU16(),
                 .type_oid = try self.readU32(),
@@ -490,7 +496,7 @@ pub const Decoder = struct {
 
     /// Parse CommandComplete message
     pub fn parseCommandComplete(self: *Decoder) ![]const u8 {
-        const tag = self.readCString() catch return error.InvalidCommandCompletePayload;
+        const tag = self.readUtf8CString() catch return error.InvalidCommandCompletePayload;
         if (tag.len == 0) return error.InvalidCommandCompletePayload;
         if (self.remaining() != 0) return error.InvalidCommandCompletePayload;
         return tag;
@@ -504,7 +510,7 @@ pub const Decoder = struct {
             const field_type = try self.readByte();
             if (field_type == 0) break;
 
-            const value = try self.readCString();
+            const value = self.readUtf8CString() catch return error.InvalidErrorResponsePayload;
 
             switch (@as(ErrorField, @enumFromInt(field_type))) {
                 .severity => info.severity = value,
@@ -623,6 +629,18 @@ test "decode authentication sasl mechanisms" {
     try std.testing.expectEqualStrings("SCRAM-SHA-256-PLUS", mechs[1]);
 }
 
+test "decode authentication sasl rejects invalid utf8 mechanism" {
+    const data = [_]u8{
+        0, 0, 0, 10, // SASL auth code
+        0xff, 0, 0,
+    };
+    var decoder = Decoder.init(&data);
+
+    const auth_type = try decoder.parseAuthentication();
+    try std.testing.expectEqual(AuthType.sasl, auth_type);
+    try std.testing.expectError(error.InvalidSaslMechanismList, decoder.parseAuthenticationSaslMechanisms(std.testing.allocator));
+}
+
 test "decode authentication sasl data" {
     const data = [_]u8{ 0, 0, 0, 11, 'r', '=', 'a', ',', 's', '=', 'b' };
     var decoder = Decoder.init(&data);
@@ -659,6 +677,24 @@ test "decode notification response rejects empty channel" {
     try std.testing.expectError(error.InvalidNotificationPayload, decoder.parseNotificationResponse());
 }
 
+test "decode notification response rejects invalid utf8 channel or payload" {
+    const bad_channel = [_]u8{
+        0, 0, 0, 123, // process id
+        0xff, 0, // invalid channel
+        'h', 'e', 'l', 'l', 'o', 0, // payload
+    };
+    var channel_decoder = Decoder.init(&bad_channel);
+    try std.testing.expectError(error.InvalidNotificationPayload, channel_decoder.parseNotificationResponse());
+
+    const bad_payload = [_]u8{
+        0, 0, 0, 123, // process id
+        'c', 'h', 0, // channel
+        0xff, 0, // invalid payload
+    };
+    var payload_decoder = Decoder.init(&bad_payload);
+    try std.testing.expectError(error.InvalidNotificationPayload, payload_decoder.parseNotificationResponse());
+}
+
 test "decode parameter status rejects trailing bytes" {
     const data = [_]u8{
         'a', 0,
@@ -685,6 +721,16 @@ test "decode parameter status rejects empty name" {
     try std.testing.expectError(error.InvalidParameterStatusPayload, decoder.parseParameterStatus());
 }
 
+test "decode parameter status rejects invalid utf8 name or value" {
+    const bad_name = [_]u8{ 0xff, 0, 'v', 0 };
+    var name_decoder = Decoder.init(&bad_name);
+    try std.testing.expectError(error.InvalidParameterStatusPayload, name_decoder.parseParameterStatus());
+
+    const bad_value = [_]u8{ 'n', 0, 0xff, 0 };
+    var value_decoder = Decoder.init(&bad_value);
+    try std.testing.expectError(error.InvalidParameterStatusPayload, value_decoder.parseParameterStatus());
+}
+
 test "decode negotiate protocol version payload" {
     const data = [_]u8{
         0, 0, 0, 2, // newest minor supported
@@ -699,6 +745,19 @@ test "decode negotiate protocol version payload" {
     try std.testing.expectEqual(@as(usize, 2), negotiate.unrecognized_options.len);
     try std.testing.expectEqualStrings("a", negotiate.unrecognized_options[0]);
     try std.testing.expectEqualStrings("b", negotiate.unrecognized_options[1]);
+}
+
+test "decode negotiate protocol version rejects invalid utf8 option" {
+    const data = [_]u8{
+        0, 0, 0, 2, // newest minor supported
+        0,    0, 0, 1, // unrecognized option count
+        0xff, 0,
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(
+        error.InvalidNegotiateProtocolVersionPayload,
+        decoder.parseNegotiateProtocolVersion(std.testing.allocator),
+    );
 }
 
 test "decode negotiate protocol version rejects impossible option count" {
@@ -827,6 +886,21 @@ test "decode row description rejects invalid format code" {
         0, 4, // type len
         255, 255, 255, 255, // type modifier
         0, 2, // invalid format code
+    };
+    var decoder = Decoder.init(&data);
+    try std.testing.expectError(error.InvalidRowDescriptionPayload, decoder.parseRowDescription(std.testing.allocator));
+}
+
+test "decode row description rejects invalid utf8 field name" {
+    const data = [_]u8{
+        0, 1, // field count = 1
+        0xff, 0, // invalid field name
+        0,    0, 0, 1, // table oid
+        0, 1, // column index
+        0, 0, 0, 23, // type oid
+        0, 4, // type len
+        255, 255, 255, 255, // type modifier
+        0, 0, // format code
     };
     var decoder = Decoder.init(&data);
     try std.testing.expectError(error.InvalidRowDescriptionPayload, decoder.parseRowDescription(std.testing.allocator));
@@ -965,6 +1039,13 @@ test "decode command complete rejects trailing bytes" {
     try std.testing.expectError(error.InvalidCommandCompletePayload, decoder.parseCommandComplete());
 }
 
+test "decode command complete rejects invalid utf8 tag" {
+    const data = [_]u8{ 0xff, 0 };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidCommandCompletePayload, decoder.parseCommandComplete());
+}
+
 test "validate backend payload rejects malformed fast control frames" {
     try std.testing.expectError(
         error.InvalidCommandCompletePayload,
@@ -982,6 +1063,16 @@ test "decode command complete rejects empty tag" {
     var decoder = Decoder.init(&data);
 
     try std.testing.expectError(error.InvalidCommandCompletePayload, decoder.parseCommandComplete());
+}
+
+test "decode error response rejects invalid utf8 field" {
+    const data = [_]u8{
+        'M', 0xff, 0,
+        0,
+    };
+    var decoder = Decoder.init(&data);
+
+    try std.testing.expectError(error.InvalidErrorResponsePayload, decoder.parseErrorResponse());
 }
 
 test "decode error response rejects trailing bytes" {
