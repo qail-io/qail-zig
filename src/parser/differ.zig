@@ -1234,6 +1234,11 @@ test "diff new column renders named check constraint" {
         "ALTER TABLE players ADD COLUMN score integer CONSTRAINT players_score_min CHECK (score >= 0)",
         sql,
     );
+
+    try std.testing.expectError(
+        error.NamedCheckConstraintRequiresExplicitMigration,
+        cmds.items[0].toQailCmd(allocator),
+    );
 }
 
 test "diff new column preserves multiple check constraints" {

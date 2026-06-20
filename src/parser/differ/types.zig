@@ -97,6 +97,10 @@ pub const MigrationCmd = struct {
         const check_count = col.checkCount();
         if (check_count == 0) return &.{};
 
+        for (0..check_count) |i| {
+            if (col.checkNameAt(i) != null) return error.NamedCheckConstraintRequiresExplicitMigration;
+        }
+
         const check_values = try allocator.alloc([]const u8, check_count);
         errdefer allocator.free(check_values);
         for (0..check_count) |i| {
