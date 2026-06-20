@@ -148,12 +148,12 @@ pub const IoBuffer = struct {
     pub fn parseDataRowFast(self: *const IoBuffer, allocator: std.mem.Allocator) !?[]?[]const u8 {
         const payload = self.peekMsgPayload() orelse return null;
 
-        if (payload.len < 2) return null;
+        if (payload.len < 2) return error.InvalidDataRow;
 
         const column_count = std.mem.readInt(u16, payload[0..2], .big);
-        const min_lengths_bytes = std.math.mul(usize, column_count, 4) catch return null;
-        const min_payload_len = std.math.add(usize, 2, min_lengths_bytes) catch return null;
-        if (payload.len < min_payload_len) return null;
+        const min_lengths_bytes = std.math.mul(usize, column_count, 4) catch return error.InvalidDataRow;
+        const min_payload_len = std.math.add(usize, 2, min_lengths_bytes) catch return error.InvalidDataRow;
+        if (payload.len < min_payload_len) return error.InvalidDataRow;
 
         var columns = try allocator.alloc(?[]const u8, column_count);
         var valid = false;
@@ -162,7 +162,7 @@ pub const IoBuffer = struct {
 
         var pos: usize = 2;
         for (0..column_count) |i| {
-            if (pos + 4 > payload.len) return null;
+            if (pos + 4 > payload.len) return error.InvalidDataRow;
 
             const col_len = std.mem.readInt(i32, payload[pos..][0..4], .big);
             pos += 4;
@@ -170,17 +170,17 @@ pub const IoBuffer = struct {
             if (col_len == -1) {
                 columns[i] = null;
             } else if (col_len < -1) {
-                return null;
+                return error.InvalidDataRow;
             } else {
                 const ulen: usize = @intCast(col_len);
-                const next_pos = std.math.add(usize, pos, ulen) catch return null;
-                if (next_pos > payload.len) return null;
+                const next_pos = std.math.add(usize, pos, ulen) catch return error.InvalidDataRow;
+                if (next_pos > payload.len) return error.InvalidDataRow;
                 columns[i] = payload[pos..next_pos];
                 pos = next_pos;
             }
         }
 
-        if (pos != payload.len) return null;
+        if (pos != payload.len) return error.InvalidDataRow;
         valid = true;
         return columns;
     }
@@ -189,53 +189,53 @@ pub const IoBuffer = struct {
     ///
     /// Returns (col0, col1) slices or null if not DataRow
     /// Optimized for common SELECT id, name queries
-    pub fn parseDataRowUltra(self: *const IoBuffer) ?struct { col0: ?[]const u8, col1: ?[]const u8 } {
+    pub fn parseDataRowUltra(self: *const IoBuffer) !?struct { col0: ?[]const u8, col1: ?[]const u8 } {
         const payload = self.peekMsgPayload() orelse return null;
 
-        if (payload.len < 2) return null;
+        if (payload.len < 2) return error.InvalidDataRow;
 
         const column_count = std.mem.readInt(u16, payload[0..2], .big);
-        if (column_count != 2) return null;
+        if (column_count != 2) return error.InvalidDataRow;
 
         var pos: usize = 2;
 
         // Column 0
-        if (pos + 4 > payload.len) return null;
+        if (pos + 4 > payload.len) return error.InvalidDataRow;
         const len0 = std.mem.readInt(i32, payload[pos..][0..4], .big);
         pos += 4;
 
         const col0: ?[]const u8 = if (len0 == -1)
             null
         else if (len0 < -1)
-            return null
+            return error.InvalidDataRow
         else blk: {
             const ulen: usize = @intCast(len0);
-            const next_pos = std.math.add(usize, pos, ulen) catch return null;
-            if (next_pos > payload.len) return null;
+            const next_pos = std.math.add(usize, pos, ulen) catch return error.InvalidDataRow;
+            if (next_pos > payload.len) return error.InvalidDataRow;
             const slice = payload[pos..next_pos];
             pos = next_pos;
             break :blk slice;
         };
 
         // Column 1
-        if (pos + 4 > payload.len) return null;
+        if (pos + 4 > payload.len) return error.InvalidDataRow;
         const len1 = std.mem.readInt(i32, payload[pos..][0..4], .big);
         pos += 4;
 
         const col1: ?[]const u8 = if (len1 == -1)
             null
         else if (len1 < -1)
-            return null
+            return error.InvalidDataRow
         else blk: {
             const ulen: usize = @intCast(len1);
-            const next_pos = std.math.add(usize, pos, ulen) catch return null;
-            if (next_pos > payload.len) return null;
+            const next_pos = std.math.add(usize, pos, ulen) catch return error.InvalidDataRow;
+            if (next_pos > payload.len) return error.InvalidDataRow;
             const slice = payload[pos..next_pos];
             pos = next_pos;
             break :blk slice;
         };
 
-        if (pos != payload.len) return null;
+        if (pos != payload.len) return error.InvalidDataRow;
         return .{ .col0 = col0, .col1 = col1 };
     }
 };
@@ -380,7 +380,7 @@ test "IoBuffer parseDataRowFast rejects truncated payload" {
     @memcpy(buf.data[5 .. 5 + payload.len], &payload);
     buf.commit(5 + payload.len);
 
-    try std.testing.expectEqual(@as(?[]?[]const u8, null), try buf.parseDataRowFast(allocator));
+    try std.testing.expectError(error.InvalidDataRow, buf.parseDataRowFast(allocator));
 }
 
 test "IoBuffer parseDataRowFast rejects invalid negative column length" {
@@ -399,7 +399,7 @@ test "IoBuffer parseDataRowFast rejects invalid negative column length" {
     @memcpy(buf.data[5 .. 5 + payload.len], &payload);
     buf.commit(5 + payload.len);
 
-    try std.testing.expectEqual(@as(?[]?[]const u8, null), try buf.parseDataRowFast(allocator));
+    try std.testing.expectError(error.InvalidDataRow, buf.parseDataRowFast(allocator));
 }
 
 test "IoBuffer parseDataRowUltra rejects truncated payload" {
@@ -419,7 +419,39 @@ test "IoBuffer parseDataRowUltra rejects truncated payload" {
     @memcpy(buf.data[5 .. 5 + payload.len], &payload);
     buf.commit(5 + payload.len);
 
-    try std.testing.expect(buf.parseDataRowUltra() == null);
+    try std.testing.expectError(error.InvalidDataRow, buf.parseDataRowUltra());
+}
+
+test "IoBuffer parseDataRowFast keeps null for incomplete message only" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 1024);
+    defer buf.deinit();
+
+    buf.data[0] = 'D';
+    std.mem.writeInt(u32, buf.data[1..5], 8, .big);
+    buf.commit(4);
+
+    try std.testing.expectEqual(@as(?[]?[]const u8, null), try buf.parseDataRowFast(allocator));
+    try std.testing.expect((try buf.parseDataRowUltra()) == null);
+}
+
+test "IoBuffer parseDataRowUltra rejects wrong column count" {
+    const allocator = std.testing.allocator;
+    var buf = try IoBuffer.init(allocator, 1024);
+    defer buf.deinit();
+
+    const payload = [_]u8{
+        0, 1, // 1 column, but ultra expects exactly 2
+        0, 0, 0, 0, // empty col0
+    };
+    const msg_len: u32 = @intCast(payload.len + 4);
+
+    buf.data[0] = 'D';
+    std.mem.writeInt(u32, buf.data[1..5], msg_len, .big);
+    @memcpy(buf.data[5 .. 5 + payload.len], &payload);
+    buf.commit(5 + payload.len);
+
+    try std.testing.expectError(error.InvalidDataRow, buf.parseDataRowUltra());
 }
 
 test "WriteBuffer operations" {
