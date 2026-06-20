@@ -387,11 +387,13 @@ pub const CodebaseScanner = struct {
         const table_start = skipSqlWs(lower, into_pos + "into".len);
         const table_end = findSqlIdentifierEnd(lower, table_start);
         if (table_end <= table_start) return;
+        const insert_body_start = sqlTableRefEndAfterAlias(lower, table_end);
 
         var columns: std.ArrayList([]const u8) = .empty;
         defer freeStringList(self.allocator, &columns);
-        try appendSqlInsertColumns(&columns, self.allocator, sanitized, lower, table_end);
-        try appendSqlReturningColumns(&columns, self.allocator, sanitized, lower, table_end);
+        try appendSqlInsertColumns(&columns, self.allocator, sanitized, lower, insert_body_start);
+        try appendSqlInsertConflictColumns(&columns, self.allocator, sanitized, lower, insert_body_start);
+        try appendSqlReturningColumns(&columns, self.allocator, sanitized, lower, insert_body_start);
 
         try self.appendRawSqlTableRef(file_path, line_num, line, table_start, lower, columns.items);
     }
@@ -405,6 +407,7 @@ pub const CodebaseScanner = struct {
         defer self.allocator.free(lower);
 
         const update_pos = findKeyword(lower, "update", 0) orelse return;
+        if (previousSqlKeywordIs(lower, update_pos, "do")) return;
         const set_pos = findKeyword(lower, "set", update_pos + "update".len) orelse return;
         const table_start = skipSqlWs(lower, update_pos + "update".len);
         const table_end = findSqlIdentifierEnd(lower, table_start);
@@ -617,6 +620,11 @@ fn parseSqlOptionalTableAlias(lower: []const u8, table_end: usize) ?AliasRange {
     const alias = lower[cursor..alias_end];
     if (isSqlTableSourceBoundary(alias)) return null;
     return .{ .start = cursor, .end = alias_end };
+}
+
+fn sqlTableRefEndAfterAlias(lower: []const u8, table_end: usize) usize {
+    if (parseSqlOptionalTableAlias(lower, table_end)) |alias| return alias.end;
+    return table_end;
 }
 
 fn isSqlTableSourceBoundary(word: []const u8) bool {
@@ -1207,6 +1215,73 @@ fn appendSqlInsertColumns(
     if (open >= lower.len or lower[open] != '(') return;
     const close = findMatchingParen(lower, open) orelse return;
     try appendSqlColumnList(columns, allocator, line[open + 1 .. close]);
+}
+
+fn appendSqlInsertConflictColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    line: []const u8,
+    lower: []const u8,
+    table_end: usize,
+) !void {
+    const on_pos = findKeyword(lower, "on", table_end) orelse return;
+    var cursor = skipSqlWs(lower, on_pos + "on".len);
+    if (!keywordAt(lower, "conflict", cursor)) return;
+    cursor = skipSqlWs(lower, cursor + "conflict".len);
+
+    if (cursor < lower.len and lower[cursor] == '(') {
+        if (findMatchingParen(lower, cursor)) |close| {
+            try appendSqlConflictTargetColumns(columns, allocator, line[cursor + 1 .. close]);
+            cursor = close + 1;
+        }
+    } else if (keywordAt(lower, "on", cursor)) {
+        const constraint_pos = skipSqlWs(lower, cursor + "on".len);
+        if (keywordAt(lower, "constraint", constraint_pos)) {
+            cursor = constraint_pos + "constraint".len;
+        }
+    }
+
+    const set_pos = findSqlDoUpdateSet(lower, cursor) orelse return;
+    try appendSqlUpdateColumns(columns, allocator, line, lower, set_pos);
+
+    if (findKeyword(lower, "where", set_pos + "set".len)) |where_pos| {
+        const where_start = where_pos + "where".len;
+        const where_end = minKeywordPos(lower, where_start, &.{"returning"}) orelse lower.len;
+        try appendSqlExpressionColumns(columns, allocator, line[where_start..where_end]);
+    }
+}
+
+fn appendSqlConflictTargetColumns(
+    columns: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+) !void {
+    var start: usize = 0;
+    while (start < raw.len) {
+        const comma = findTopLevelComma(raw, start) orelse raw.len;
+        const item = std.mem.trim(u8, raw[start..comma], " \t\r\n");
+        if (item.len > 0) {
+            const lower = try toLowerAlloc(allocator, item);
+            defer allocator.free(lower);
+            if (lower[0] == '(') {
+                if (findMatchingParen(lower, 0)) |close| {
+                    try appendSqlExpressionColumns(columns, allocator, item[1..close]);
+                }
+            } else {
+                const ident_end = findSqlIdentifierEnd(lower, 0);
+                if (ident_end > 0) {
+                    try appendSqlColumnReference(columns, allocator, item[0..ident_end]);
+                }
+            }
+        }
+        start = comma + 1;
+    }
+}
+
+fn findSqlDoUpdateSet(lower: []const u8, start: usize) ?usize {
+    const do_pos = findKeyword(lower, "do", start) orelse return null;
+    const update_pos = findKeyword(lower, "update", do_pos + "do".len) orelse return null;
+    return findKeyword(lower, "set", update_pos + "update".len);
 }
 
 fn appendSqlUpdateColumns(
@@ -2310,6 +2385,43 @@ test "sql scanner extracts raw insert update delete columns" {
 
     try expectHasColumn(scanner.refs.items[2].columns.items, "id");
     try expectHasColumn(scanner.refs.items[2].columns.items, "archived_at");
+}
+
+test "sql scanner extracts insert alias and conflict columns" {
+    const allocator = std.testing.allocator;
+    var scanner = CodebaseScanner.init(allocator);
+    defer scanner.deinit();
+
+    try scanner.scanLine(
+        "test.rs",
+        1,
+        "sqlx::query(\"INSERT INTO users AS u (email, status) VALUES ($1, $2) RETURNING id AS user_id\")",
+    );
+    try scanner.scanLine(
+        "test.rs",
+        2,
+        "sqlx::query(\"INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO UPDATE SET last_seen = EXCLUDED.last_seen WHERE users.active RETURNING id\")",
+    );
+    try scanner.scanLine(
+        "test.rs",
+        3,
+        "sqlx::query(\"INSERT INTO users DEFAULT VALUES ON CONFLICT ON CONSTRAINT users_email_key DO NOTHING\")",
+    );
+
+    try std.testing.expectEqual(@as(usize, 3), scanner.refs.items.len);
+    try std.testing.expectEqualStrings("users", scanner.refs.items[0].table);
+    try expectHasColumn(scanner.refs.items[0].columns.items, "email");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "status");
+    try expectHasColumn(scanner.refs.items[0].columns.items, "id");
+    try expectMissingColumn(scanner.refs.items[0].columns.items, "user_id");
+
+    try expectHasColumn(scanner.refs.items[1].columns.items, "email");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "last_seen");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "active");
+    try expectHasColumn(scanner.refs.items[1].columns.items, "id");
+    try expectMissingColumn(scanner.refs.items[1].columns.items, "excluded");
+
+    try expectMissingColumn(scanner.refs.items[2].columns.items, "users_email_key");
 }
 
 test "sql scanner tracks update from and delete using sources" {
