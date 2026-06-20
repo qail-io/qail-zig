@@ -357,6 +357,7 @@ fn isReplicationDatabaseValue(value: []const u8) bool {
 
 fn percentDecodeAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     if (std.mem.indexOfScalar(u8, text, '%') == null) {
+        if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidDatabaseUrlPercentEncoding;
         return allocator.dupe(u8, text);
     }
 
@@ -376,7 +377,10 @@ fn percentDecodeAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
         try out.append(allocator, text[i]);
     }
 
-    return try out.toOwnedSlice(allocator);
+    const decoded = try out.toOwnedSlice(allocator);
+    errdefer allocator.free(decoded);
+    if (!std.unicode.utf8ValidateSlice(decoded)) return error.InvalidDatabaseUrlPercentEncoding;
+    return decoded;
 }
 
 test "parse sslmode aliases" {
@@ -422,6 +426,13 @@ test "percent decode rejects malformed escapes" {
     );
 }
 
+test "percent decode rejects invalid utf8" {
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        percentDecodeAlloc(std.testing.allocator, "%FF"),
+    );
+}
+
 test "parse connection url rejects malformed percent escapes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -434,6 +445,25 @@ test "parse connection url rejects malformed percent escapes" {
     try std.testing.expectError(
         error.InvalidDatabaseUrlPercentEncoding,
         parseConnectionUrl(allocator, "postgres://user:bad%@localhost/app"),
+    );
+}
+
+test "parse connection url rejects invalid percent encoded utf8" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        parseConnectionUrl(allocator, "postgres://user:%FF@localhost/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        parseConnectionUrl(allocator, "postgres://us%FFer@localhost/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidDatabaseUrlPercentEncoding,
+        parseConnectionUrl(allocator, "postgres://user@localhost/app%FF"),
     );
 }
 

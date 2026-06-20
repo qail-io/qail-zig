@@ -39,6 +39,7 @@ pub fn parseUri(uri: []const u8) !PoolConfig {
     if (std.mem.indexOfScalar(u8, body, '/')) |slash_pos| {
         authority = body[0..slash_pos];
         const db_part = body[slash_pos + 1 ..];
+        if (db_part.len == 0 and authority.len != 0) return error.InvalidUriOption;
         if (db_part.len != 0) database = db_part;
     }
 
@@ -86,6 +87,10 @@ pub fn parseUri(uri: []const u8) !PoolConfig {
         }
     }
 
+    try validatePercentEncodedUtf8(user);
+    if (password) |pw| try validatePercentEncodedUtf8(pw);
+    try validatePercentEncodedUtf8(database);
+
     var config = PoolConfig{
         .host = host,
         .port = port,
@@ -117,6 +122,8 @@ fn applyUriQueryParams(config: *PoolConfig, query: []const u8) !void {
         const key = std.mem.trim(u8, kv.next() orelse "", " \t\r\n");
         const value = std.mem.trim(u8, kv.next() orelse "", " \t\r\n");
         if (key.len == 0) continue;
+        try validatePercentEncodedUtf8(key);
+        try validatePercentEncodedUtf8(value);
 
         if (std.ascii.eqlIgnoreCase(key, "connect_timeout")) {
             const secs = parseNonNegativeI64(value) catch return error.InvalidUriOption;
@@ -244,6 +251,32 @@ fn parseBool(value: []const u8) ?bool {
     return null;
 }
 
+fn validatePercentEncodedUtf8(value: []const u8) !void {
+    if (std.mem.indexOfScalar(u8, value, '%') == null) {
+        if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUriOption;
+        return;
+    }
+
+    const allocator = std.heap.page_allocator;
+    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    defer decoded.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < value.len) : (i += 1) {
+        if (value[i] == '%') {
+            if (i + 2 >= value.len) return error.InvalidUriOption;
+            const hex = value[i + 1 .. i + 3];
+            const byte = std.fmt.parseInt(u8, hex, 16) catch return error.InvalidUriOption;
+            try decoded.append(allocator, byte);
+            i += 2;
+            continue;
+        }
+        try decoded.append(allocator, value[i]);
+    }
+
+    if (!std.unicode.utf8ValidateSlice(decoded.items)) return error.InvalidUriOption;
+}
+
 fn validateParsedConfig(config: *const PoolConfig) !void {
     if (config.host.len == 0) return error.InvalidUriOption;
     if (config.user.len == 0) return error.InvalidUriOption;
@@ -276,6 +309,29 @@ test "parseUri parses user host port database" {
     try std.testing.expectEqualStrings("app", config.database);
 }
 
+test "parseUri validates percent encoded credentials and database" {
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://alice:%FF@db.example/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://al%FFice@db.example/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://alice@db.example/app%FF"),
+    );
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://alice:bad%ZZ@db.example/app"),
+    );
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://alice:bad%@db.example/app"),
+    );
+}
+
 test "parseUri splits credentials at final at sign" {
     const config = try parseUri("postgresql://alice:sec@ret@db.example:6543/app");
     try std.testing.expectEqualStrings("alice", config.user);
@@ -303,6 +359,13 @@ test "parseUri parses host port database without auth section" {
     try std.testing.expectEqualStrings("db.example", config.host);
     try std.testing.expectEqual(@as(u16, 6543), config.port);
     try std.testing.expectEqualStrings("app", config.database);
+}
+
+test "parseUri rejects explicit empty database" {
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://db.example/"),
+    );
 }
 
 test "parseUri parses host and database without explicit port" {
@@ -380,5 +443,13 @@ test "parseUri rejects invalid pool query params" {
     try std.testing.expectError(
         error.InvalidUriOption,
         parseUri("postgresql://db.example/app?min_connections=5&max_connections=2"),
+    );
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://db.example/app?sslmode=%FF"),
+    );
+    try std.testing.expectError(
+        error.InvalidUriOption,
+        parseUri("postgresql://db.example/app?sslmode=%"),
     );
 }
