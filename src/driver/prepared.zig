@@ -6,6 +6,7 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const protocol = @import("../protocol/mod.zig");
+const param_count = @import("param_count.zig");
 const raw_policy = @import("raw_policy.zig");
 
 const QailCmd = ast.QailCmd;
@@ -47,7 +48,7 @@ pub const PreparedStatement = struct {
 
         return .{
             .name = name,
-            .param_count = countParams(sql),
+            .param_count = param_count.countSqlParams(sql),
         };
     }
 
@@ -62,19 +63,6 @@ fn hashSql(sql: []const u8) u64 {
     var hasher = std.hash.Wyhash.init(0);
     hasher.update(sql);
     return hasher.final();
-}
-
-fn countParams(sql: []const u8) usize {
-    if (sql.len < 2) return 0;
-
-    var param_count: usize = 0;
-    var i: usize = 0;
-    while (i < sql.len - 1) : (i += 1) {
-        if (sql[i] == '$' and std.ascii.isDigit(sql[i + 1])) {
-            param_count += 1;
-        }
-    }
-    return param_count;
 }
 
 // ==================== Tests ====================

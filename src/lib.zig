@@ -28,6 +28,7 @@ test {
     _ = @import("fuzz/fuzz_transpiler.zig");
     _ = @import("driver/raw_policy.zig");
     _ = @import("driver/cursor.zig");
+    _ = @import("driver/param_count.zig");
     _ = @import("cli/mod.zig");
     _ = @import("tests/protocol_fail_closed_test.zig");
     _ = @import("tests/replication_fail_closed_test.zig");

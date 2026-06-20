@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const param_count = @import("param_count.zig");
 const QailCmd = ast.QailCmd;
 const max_wire_message_len: usize = std.math.maxInt(i32);
 
@@ -195,15 +196,7 @@ pub fn sqlToStmtName(allocator: std.mem.Allocator, sql: []const u8) ![]const u8 
 
 /// Count $N parameters in SQL
 pub fn countParams(sql: []const u8) usize {
-    if (sql.len < 2) return 0;
-    var count: usize = 0;
-    var i: usize = 0;
-    while (i < sql.len - 1) : (i += 1) {
-        if (sql[i] == '$' and std.ascii.isDigit(sql[i + 1])) {
-            count += 1;
-        }
-    }
-    return count;
+    return param_count.countSqlParams(sql);
 }
 
 fn addLenChecked(total: *usize, add: usize) !void {
@@ -312,6 +305,8 @@ test "countParams" {
     try std.testing.expectEqual(@as(usize, 0), countParams("SELECT * FROM users"));
     try std.testing.expectEqual(@as(usize, 1), countParams("SELECT * FROM users WHERE id = $1"));
     try std.testing.expectEqual(@as(usize, 2), countParams("SELECT * FROM users WHERE id = $1 AND name = $2"));
+    try std.testing.expectEqual(@as(usize, 1), countParams("SELECT '$2', $1, $1"));
+    try std.testing.expectEqual(@as(usize, 0), countParams("SELECT $$ $1 $$"));
 }
 
 test "buildExtendedQuery encodes parse-bind-execute-sync" {

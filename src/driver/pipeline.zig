@@ -7,6 +7,7 @@ const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const protocol = @import("../protocol/mod.zig");
 const conn_mod = @import("connection.zig");
+const param_count_mod = @import("param_count.zig");
 const raw_policy = @import("raw_policy.zig");
 const row_mod = @import("row.zig");
 const extended_flow_mod = @import("extended_flow.zig");
@@ -189,16 +190,10 @@ pub const Pipeline = struct {
             else => return err,
         };
 
-        // Count parameters (simple $ counting)
-        var param_count: usize = 0;
-        for (sql) |c| {
-            if (c == '$') param_count += 1;
-        }
-
         return .{
             .name = name,
             .sql = sql_copy,
-            .param_count = param_count,
+            .param_count = param_count_mod.countSqlParams(sql),
             .allocator = self.allocator,
         };
     }
