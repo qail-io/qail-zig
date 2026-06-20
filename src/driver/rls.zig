@@ -146,7 +146,7 @@ fn quoteGucLiteral(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     defer allocator.free(sanitized);
 
     var idx: usize = 0;
-    while (true) : (idx += 1) {
+    while (idx <= sanitized.len) : (idx += 1) {
         const tag = if (idx == 0)
             try allocator.dupe(u8, "qail_guc")
         else
@@ -159,6 +159,24 @@ fn quoteGucLiteral(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
         if (std.mem.indexOf(u8, sanitized, delim) != null) continue;
         return try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ delim, sanitized, delim });
     }
+
+    return try quoteSingleSqlLiteral(allocator, sanitized);
+}
+
+fn quoteSingleSqlLiteral(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.append(allocator, '\'');
+    for (value) |ch| {
+        if (ch == '\'') {
+            try out.appendSlice(allocator, "''");
+        } else {
+            try out.append(allocator, ch);
+        }
+    }
+    try out.append(allocator, '\'');
+    return try out.toOwnedSlice(allocator);
 }
 
 /// Build SQL that starts a transaction and configures RLS/session GUC values.

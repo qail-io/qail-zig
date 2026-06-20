@@ -64,10 +64,7 @@ pub fn buildAlterTableRls(
 }
 
 pub fn buildDeallocatePrepared(allocator: std.mem.Allocator, stmt_name: []const u8) ![]u8 {
-    if (stmt_name.len == 0) return error.InvalidStatementName;
-    for (stmt_name) |ch| {
-        if (!isIdentifierChar(ch)) return error.InvalidStatementName;
-    }
+    validateStatementName(stmt_name) catch return error.InvalidStatementName;
     return std.fmt.allocPrint(allocator, "DEALLOCATE {s}", .{stmt_name});
 }
 
@@ -119,6 +116,14 @@ fn validateIdentifierPart(part: []const u8) !void {
     }
 }
 
+fn validateStatementName(name: []const u8) !void {
+    if (name.len == 0 or name.len > MAX_IDENT_LEN) return error.InvalidStatementName;
+    if (!std.ascii.isAlphabetic(name[0]) and name[0] != '_') return error.InvalidStatementName;
+    for (name[1..]) |ch| {
+        if (!isIdentifierChar(ch)) return error.InvalidStatementName;
+    }
+}
+
 fn isIdentifierChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
@@ -163,5 +168,8 @@ test "build deallocate prepared statement sql validates name" {
     try std.testing.expectEqualStrings("DEALLOCATE s0123abcd", sql);
 
     try std.testing.expectError(error.InvalidStatementName, buildDeallocatePrepared(std.testing.allocator, ""));
+    try std.testing.expectError(error.InvalidStatementName, buildDeallocatePrepared(std.testing.allocator, "1stmt"));
     try std.testing.expectError(error.InvalidStatementName, buildDeallocatePrepared(std.testing.allocator, "drop;all"));
+    try std.testing.expectError(error.InvalidStatementName, buildDeallocatePrepared(std.testing.allocator, "stmt.name"));
+    try std.testing.expectError(error.InvalidStatementName, buildDeallocatePrepared(std.testing.allocator, "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl"));
 }
