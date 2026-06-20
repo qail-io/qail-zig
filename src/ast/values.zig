@@ -97,24 +97,15 @@ pub const Value = union(enum) {
             },
             .param => |p| try writer.print("${d}", .{p}),
             .named_param => |name| {
-                if (!isSafeNamedParam(name)) {
-                    try writer.writeAll("/* ERROR: Invalid parameter name */");
-                    return;
-                }
+                if (!isSafeNamedParam(name)) return error.WriteFailed;
                 try writer.print(":{s}", .{name});
             },
             .function => |f| {
-                if (!isSafeRawFunctionValue(f)) {
-                    try writer.writeAll("/* ERROR: Invalid function expression */");
-                    return;
-                }
+                if (!isSafeRawFunctionValue(f)) return error.WriteFailed;
                 try writer.writeAll(f);
             },
             .column => |c| {
-                if (!isSafeIdentifier(c)) {
-                    try writer.writeAll("/* ERROR: Invalid identifier */");
-                    return;
-                }
+                if (!isSafeIdentifier(c)) return error.WriteFailed;
                 try writer.writeAll(c);
             },
             .uuid => |u| try writeSqlStringLiteral(writer, u),
@@ -235,6 +226,7 @@ fn isSafeRawFunctionValue(value: []const u8) bool {
 fn writeSqlStringLiteral(writer: anytype, value: []const u8) !void {
     try writer.writeByte('\'');
     for (value) |c| {
+        if (c == 0) return error.WriteFailed;
         if (c == '\'') {
             try writer.writeAll("''");
         } else {
@@ -259,6 +251,9 @@ test "value format string escapes quotes" {
     const v: Value = .{ .string = "it's" };
     try writer.writer().print("{f}", .{v});
     try std.testing.expectEqualStrings("'it''s'", writer.getWritten());
+
+    var nul_writer = io.FixedBufferWriter.init(&buf);
+    try std.testing.expectError(error.WriteFailed, (Value{ .string = "bad\x00value" }).format(nul_writer.writer()));
 }
 
 test "value format string-like variants escape quotes" {
@@ -293,8 +288,7 @@ test "value format validates named parameters" {
     try std.testing.expectEqualStrings(":_user_id1", ok_writer.getWritten());
 
     var bad_writer = io.FixedBufferWriter.init(&buf);
-    try (Value{ .named_param = "1bad" }).format(bad_writer.writer());
-    try std.testing.expectEqualStrings("/* ERROR: Invalid parameter name */", bad_writer.getWritten());
+    try std.testing.expectError(error.WriteFailed, (Value{ .named_param = "1bad" }).format(bad_writer.writer()));
 }
 
 test "value format validates raw function fragments" {
@@ -305,8 +299,18 @@ test "value format validates raw function fragments" {
     try std.testing.expectEqualStrings("now()", ok_writer.getWritten());
 
     var bad_writer = io.FixedBufferWriter.init(&buf);
-    try (Value{ .function = "now(); DROP TABLE users; --" }).format(bad_writer.writer());
-    try std.testing.expectEqualStrings("/* ERROR: Invalid function expression */", bad_writer.getWritten());
+    try std.testing.expectError(error.WriteFailed, (Value{ .function = "now(); DROP TABLE users; --" }).format(bad_writer.writer()));
+}
+
+test "value format validates column references" {
+    var buf: [64]u8 = undefined;
+
+    var ok_writer = io.FixedBufferWriter.init(&buf);
+    try (Value{ .column = "users.id" }).format(ok_writer.writer());
+    try std.testing.expectEqualStrings("users.id", ok_writer.getWritten());
+
+    var bad_writer = io.FixedBufferWriter.init(&buf);
+    try std.testing.expectError(error.WriteFailed, (Value{ .column = "users..id" }).format(bad_writer.writer()));
 }
 
 test "value format rejects non-finite floats and vectors" {
