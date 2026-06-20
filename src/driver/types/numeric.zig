@@ -18,6 +18,58 @@ pub const Numeric = struct {
     dscale: u16 = 0, // Display scale (decimal places)
     digits: []const u16, // Base-10000 digits
 
+    /// Decode PostgreSQL's binary NUMERIC wire format.
+    ///
+    /// The returned `digits` slice is owned by `allocator` and must be freed by
+    /// the caller. PostgreSQL stores NUMERIC as a short header followed by
+    /// base-10000 digits; malformed signs, truncated payloads, trailing bytes,
+    /// and out-of-range digits are rejected.
+    pub fn fromBinaryAlloc(allocator: std.mem.Allocator, bytes: []const u8) !Numeric {
+        if (bytes.len < 8) return error.InvalidNumericData;
+
+        const ndigits = std.mem.readInt(u16, bytes[0..2], .big);
+        const weight = std.mem.readInt(i16, bytes[2..4], .big);
+        const sign_raw = std.mem.readInt(u16, bytes[4..6], .big);
+        const dscale = std.mem.readInt(u16, bytes[6..8], .big);
+        const digits_bytes = std.math.mul(usize, @as(usize, ndigits), 2) catch return error.InvalidNumericData;
+        const expected_len = std.math.add(usize, 8, digits_bytes) catch return error.InvalidNumericData;
+        if (bytes.len != expected_len) return error.InvalidNumericData;
+
+        const sign: Sign = switch (sign_raw) {
+            0x0000 => .positive,
+            0x4000 => .negative,
+            0xC000 => .nan,
+            else => return error.InvalidNumericData,
+        };
+
+        if (sign == .nan) {
+            return .{
+                .sign = .nan,
+                .weight = weight,
+                .dscale = dscale,
+                .digits = try allocator.alloc(u16, 0),
+            };
+        }
+
+        const digits = try allocator.alloc(u16, ndigits);
+        errdefer allocator.free(digits);
+
+        var pos: usize = 8;
+        for (digits) |*digit| {
+            const value = std.mem.readInt(u16, bytes[pos .. pos + 2], .big);
+            if (value > 9999) return error.InvalidNumericData;
+            digit.* = value;
+            pos += 2;
+        }
+
+        return .{
+            .sign = sign,
+            .weight = weight,
+            .dscale = dscale,
+            .digits = digits,
+        };
+    }
+
     /// Convert to f64 (may lose precision)
     pub fn toFloat(self: Numeric) f64 {
         if (self.sign == .nan) return std.math.nan(f64);
@@ -103,4 +155,69 @@ test "Numeric tryFromFloat rejects non-finite values" {
     try std.testing.expectError(error.NonFiniteNumeric, Numeric.tryFromFloat(std.math.nan(f64)));
     try std.testing.expectError(error.NonFiniteNumeric, Numeric.tryFromFloat(std.math.inf(f64)));
     try std.testing.expectError(error.NonFiniteNumeric, Numeric.tryFromFloat(-std.math.inf(f64)));
+}
+
+test "Numeric fromBinaryAlloc decodes negative weight safely" {
+    const bytes = [_]u8{
+        0x00, 0x01, // ndigits
+        0xff, 0xfe, // weight = -2
+        0x00, 0x00, // positive
+        0x00, 0x08, // dscale
+        0x00, 0x01, // digit
+    };
+
+    const num = try Numeric.fromBinaryAlloc(std.testing.allocator, &bytes);
+    defer std.testing.allocator.free(num.digits);
+
+    try std.testing.expectEqual(Sign.positive, num.sign);
+    try std.testing.expectEqual(@as(i16, -2), num.weight);
+    try std.testing.expectEqual(@as(u16, 8), num.dscale);
+    try std.testing.expectEqualSlices(u16, &.{1}, num.digits);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.00000001), num.toFloat(), 0.0000000000001);
+}
+
+test "Numeric fromBinaryAlloc rejects malformed payloads" {
+    try std.testing.expectError(error.InvalidNumericData, Numeric.fromBinaryAlloc(std.testing.allocator, &.{ 0x00, 0x01 }));
+
+    const invalid_sign = [_]u8{
+        0x00, 0x01, // ndigits
+        0x00, 0x00, // weight
+        0x20, 0x00, // invalid sign
+        0x00, 0x00, // dscale
+        0x00, 0x01, // digit
+    };
+    try std.testing.expectError(error.InvalidNumericData, Numeric.fromBinaryAlloc(std.testing.allocator, &invalid_sign));
+
+    const invalid_digit = [_]u8{
+        0x00, 0x01, // ndigits
+        0x00, 0x00, // weight
+        0x00, 0x00, // positive
+        0x00, 0x00, // dscale
+        0x27, 0x10, // digit = 10000
+    };
+    try std.testing.expectError(error.InvalidNumericData, Numeric.fromBinaryAlloc(std.testing.allocator, &invalid_digit));
+
+    const trailing = [_]u8{
+        0x00, 0x00, // ndigits
+        0x00, 0x00, // weight
+        0x00, 0x00, // positive
+        0x00, 0x00, // dscale
+        0x00, // trailing byte
+    };
+    try std.testing.expectError(error.InvalidNumericData, Numeric.fromBinaryAlloc(std.testing.allocator, &trailing));
+}
+
+test "Numeric fromBinaryAlloc decodes NaN" {
+    const bytes = [_]u8{
+        0x00, 0x00, // ndigits
+        0x00, 0x00, // weight
+        0xc0, 0x00, // NaN
+        0x00, 0x00, // dscale
+    };
+
+    const num = try Numeric.fromBinaryAlloc(std.testing.allocator, &bytes);
+    defer std.testing.allocator.free(num.digits);
+
+    try std.testing.expectEqual(Sign.nan, num.sign);
+    try std.testing.expect(std.math.isNan(num.toFloat()));
 }
