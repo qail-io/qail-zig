@@ -36,7 +36,7 @@ pub fn main() !void {
     var driver = PgDriver.connect(allocator, "127.0.0.1", 5432, "postgres", "qail_e2e_test") catch |err| {
         std.debug.print(" ✗ FAILED: {}\n", .{err});
         std.debug.print("\n  FATAL: Cannot connect. Is PostgreSQL running?\n\n", .{});
-        return;
+        return err;
     };
     defer driver.deinit();
     std.debug.print(" ✓ Connected (PID: {d})\n", .{driver.backendProcessId()});
@@ -50,15 +50,15 @@ pub fn main() !void {
     const ddl_cols = [_]Expr{
         Expr.defWithConstraints("id", "SERIAL", &.{.primary_key}),
         Expr.defWithConstraints("name", "TEXT", &.{.not_null}),
-        Expr.defWithConstraints("price", "NUMERIC(10,2)", &.{.{ .default = "0" }}),
-        Expr.defWithConstraints("active", "BOOLEAN", &.{.{ .default = "true" }}),
-        Expr.defWithConstraints("created_at", "TIMESTAMPTZ", &.{.{ .default = "NOW()" }}),
+        Expr.def("price", "NUMERIC(10,2)"),
+        Expr.def("active", "BOOLEAN"),
+        Expr.def("created_at", "TIMESTAMPTZ"),
     };
     const create_cmd = QailCmd.make("qail_test").select(&ddl_cols);
     _ = driver.execute(&create_cmd) catch |err| {
         std.debug.print(" ✗ FAILED: {}\n", .{err});
         failed += 1;
-        return;
+        return err;
     };
     std.debug.print(" ✓ Table created\n", .{});
     passed += 1;
@@ -74,7 +74,7 @@ pub fn main() !void {
         const count = driver.execute(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
         if (count == 0) {
             // INSERT returns 0 affected rows in some protocols, check via SELECT
@@ -109,7 +109,7 @@ pub fn main() !void {
         const rows = driver.fetchAll(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
         defer {
             for (rows) |*row| {
@@ -139,7 +139,7 @@ pub fn main() !void {
         const rows = driver.fetchAll(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
         defer {
             for (rows) |*row| {
@@ -180,7 +180,7 @@ pub fn main() !void {
         const row = driver.fetchOne(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
 
         if (row) |r| {
@@ -214,7 +214,7 @@ pub fn main() !void {
         const count = driver.execute(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
         std.debug.print(" ✓ Updated {d} row(s)\n", .{count});
         passed += 1;
@@ -231,7 +231,7 @@ pub fn main() !void {
         const row = driver.fetchOne(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
 
         if (row) |r| {
@@ -261,7 +261,7 @@ pub fn main() !void {
         const count = driver.execute(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
         std.debug.print(" ✓ Deleted {d} row(s)\n", .{count});
         passed += 1;
@@ -275,7 +275,7 @@ pub fn main() !void {
         const row = driver.fetchOne(&cmd) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
 
         if (row) |r| {
@@ -301,7 +301,7 @@ pub fn main() !void {
         driver.begin() catch |err| {
             std.debug.print(" ✗ BEGIN FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
         const cmd = QailCmd.add("qail_test").values(&.{
             .{ .column = "name", .value = .{ .string = "SHOULD_NOT_EXIST" } },
@@ -311,7 +311,7 @@ pub fn main() !void {
         driver.rollback() catch |err| {
             std.debug.print(" ✗ ROLLBACK FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
 
         // Verify the row was NOT committed
@@ -322,7 +322,7 @@ pub fn main() !void {
         const rows = driver.fetchAll(&check) catch |err| {
             std.debug.print(" ✗ FAILED: {}\n", .{err});
             failed += 1;
-            return;
+            return err;
         };
         defer allocator.free(rows);
 
@@ -341,7 +341,7 @@ pub fn main() !void {
     _ = driver.execute(&cleanup_cmd) catch |err| {
         std.debug.print(" ✗ FAILED: {}\n", .{err});
         failed += 1;
-        return;
+        return err;
     };
     std.debug.print(" ✓ Cleaned up\n", .{});
     passed += 1;
@@ -353,6 +353,7 @@ pub fn main() !void {
         std.debug.print("  ✓ ALL {d} TESTS PASSED\n", .{passed});
     } else {
         std.debug.print("  ✗ {d} passed, {d} FAILED\n", .{ passed, failed });
+        return error.EndToEndTestFailed;
     }
     std.debug.print("────────────────────────────────────────────────────────\n", .{});
     std.debug.print("\n", .{});
