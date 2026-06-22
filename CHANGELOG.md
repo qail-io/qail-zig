@@ -4,6 +4,10 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 ## Unreleased
 
+No changes yet.
+
+## v0.9.0 — 2026-06-22
+
 ### Breaking
 
 - Public raw SQL inputs are no longer part of the driver API on `main`. Runtime execution and public transpilation now fail closed for raw commands and nested raw escape hatches.
@@ -15,6 +19,7 @@ This changelog tracks qail-zig releases separately from qail.rs.
 - Branch-management CLI support and codegen tooling were added after the `v0.8.3` CLI parity milestone.
 - Migration tracking now has unique version generation, full receipt fields, schema adjustments, and precise column nullability handling.
 - Public API guard tests now prevent reintroducing raw SQL helper exports on the driver/runtime path.
+- Analyzer migration-impact scanning now tracks Zig-native `QailCmd` builder chains, AST column arrays, join tables, merge sources, and nested source-query builders.
 
 ### Changed
 
@@ -26,6 +31,7 @@ This changelog tracks qail-zig releases separately from qail.rs.
 
 - The Linux `PgDriver.connect` stack-size fix and pipeline failure metadata from `v0.8.1` remain in place on `main`.
 - Public AST payload validation is hardened before driver execution.
+- Release E2E validation now uses public AST-safe DDL and exits nonzero on failed checks.
 
 ## v0.8.3 — 2026-04-23
 
