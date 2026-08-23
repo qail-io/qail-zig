@@ -233,6 +233,10 @@ pub const OnConflict = struct {
     columns: []const []const u8 = &.{},
     action: ConflictAction = .do_nothing,
     update_columns: []const Assignment = &.{},
+    /// `DO UPDATE ... WHERE <conditions>` — predicates over the EXISTING row,
+    /// joined with AND. Ignored for `do_nothing`. Parity with qail.rs
+    /// `OnConflict.where_conditions` (2.0).
+    where_conditions: []const Condition = &.{},
 };
 
 /// PostgreSQL MERGE USING source.

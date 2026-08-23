@@ -267,6 +267,13 @@ pub fn writeInsert(writer: anytype, cmd: *const QailCmd, include_conflict: bool)
                             try render.writeIdentifierOrError(writer, assign.column);
                         }
                     }
+                    if (conflict.where_conditions.len > 0) {
+                        try writer.writeAll(" WHERE ");
+                        for (conflict.where_conditions, 0..) |*condition, i| {
+                            if (i > 0) try writer.writeAll(" AND ");
+                            try render.writeConditionWithContext(writer, condition, cmd);
+                        }
+                    }
                 },
             }
         } else {

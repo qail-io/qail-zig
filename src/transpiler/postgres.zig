@@ -537,6 +537,34 @@ test "transpile insert with conflict update" {
     );
 }
 
+test "transpile conflict update renders where conditions" {
+    // Parity with qail.rs 2.0 `OnConflict.where_conditions`: the update arm
+    // of an upsert is gated by predicates over the EXISTING row.
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "email", .value = .{ .string = "alice@example.com" } },
+    };
+    const target_cols = [_][]const u8{"email"};
+    const guard = [_]ast.expr.Condition{.{
+        .left = Expr.col("tenant_id"),
+        .op = .eq,
+        .value = .{ .string = "t-1" },
+    }};
+    const conflict = ast.cmd.OnConflict{
+        .columns = &target_cols,
+        .action = .do_update,
+        .where_conditions = &guard,
+    };
+    const cmd = QailCmd.add("users").values(&assigns).onConflictDo(conflict);
+
+    const sql = try toSql(std.testing.allocator, &cmd);
+    defer std.testing.allocator.free(sql);
+
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (email) VALUES ('alice@example.com') ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email WHERE tenant_id = 't-1'",
+        sql,
+    );
+}
+
 test "transpile put defaults to conflict do nothing" {
     const assigns = [_]ast.cmd.Assignment{
         .{ .column = "email", .value = .{ .string = "alice@example.com" } },

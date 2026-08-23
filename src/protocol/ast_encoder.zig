@@ -1202,6 +1202,21 @@ fn writeConditions(writer: anytype, conditions: []const ast.expr.Condition, cmd:
     }
 }
 
+/// `DO UPDATE ... WHERE <conditions>` — predicates over the existing row,
+/// AND-joined. No-op when the clause carries none.
+fn writeConflictUpdateWhere(
+    writer: anytype,
+    conflict: ast.cmd.OnConflict,
+    cmd: *const QailCmd,
+) !void {
+    if (conflict.where_conditions.len == 0) return;
+    try writer.writeAll(" WHERE ");
+    for (conflict.where_conditions, 0..) |*condition, i| {
+        if (i > 0) try writer.writeAll(" AND ");
+        try writeCondition(writer, condition, cmd);
+    }
+}
+
 fn writeMergeAction(writer: anytype, action: *const ast.cmd.MergeAction, cmd: ?*const QailCmd) !void {
     switch (action.*) {
         .update => |assignments| {
@@ -1599,6 +1614,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
                             try writer.writeAll(" = EXCLUDED.");
                             try writeIdentifierOrError(writer, assign.column);
                         }
+                        try writeConflictUpdateWhere(writer, conflict, cmd);
                     } else {
                         try writer.writeAll(" DO UPDATE SET ");
                         for (updates, 0..) |assign, i| {
@@ -1607,6 +1623,7 @@ fn writeInsertCmd(writer: anytype, cmd: *const QailCmd, include_conflict: bool) 
                             try writer.writeAll(" = ");
                             try writeValue(writer, &assign.value, cmd);
                         }
+                        try writeConflictUpdateWhere(writer, conflict, cmd);
                     }
                 },
             }
@@ -4196,6 +4213,54 @@ test "ast encoder delete with or-filter grouping" {
         "DELETE FROM kb WHERE (topic ILIKE '%test%' OR question ILIKE '%test%')",
         sql,
     );
+}
+
+test "ast encoder conflict update renders where conditions" {
+    // Parity with the PostgreSQL transpiler and qail.rs 2.0
+    // `OnConflict.where_conditions`: both the EXCLUDED default arm and the
+    // explicit update_columns arm carry the WHERE gate.
+    var encoder = AstEncoder.init(std.testing.allocator);
+    defer encoder.deinit();
+
+    const assigns = [_]ast.cmd.Assignment{
+        .{ .column = "email", .value = Value.fromString("alice@example.com") },
+    };
+    const target_cols = [_][]const u8{"email"};
+    const guard = [_]ast.expr.Condition{.{
+        .left = Expr.col("tenant_id"),
+        .op = .eq,
+        .value = Value.fromString("t-1"),
+    }};
+
+    const excluded_arm = QailCmd.add("users").values(&assigns).onConflictDo(.{
+        .columns = &target_cols,
+        .action = .do_update,
+        .where_conditions = &guard,
+    });
+    try encoder.encodeQuery(&excluded_arm);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoder.getWritten(),
+        "DO UPDATE SET email = EXCLUDED.email WHERE tenant_id = 't-1'",
+    ) != null);
+
+    var explicit = AstEncoder.init(std.testing.allocator);
+    defer explicit.deinit();
+    const updates = [_]ast.cmd.Assignment{
+        .{ .column = "name", .value = Value.fromString("Alice") },
+    };
+    const explicit_arm = QailCmd.add("users").values(&assigns).onConflictDo(.{
+        .columns = &target_cols,
+        .action = .do_update,
+        .update_columns = &updates,
+        .where_conditions = &guard,
+    });
+    try explicit.encodeQuery(&explicit_arm);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        explicit.getWritten(),
+        "DO UPDATE SET name = 'Alice' WHERE tenant_id = 't-1'",
+    ) != null);
 }
 
 test "ast encoder put defaults to conflict do nothing" {
