@@ -1,6 +1,6 @@
 # QAIL Zig Benchmarks
 
-The current public benchmark page is published at `/zig/benchmarks` on `dev.qail.io`.
+The current public benchmark page is published at `/zig/benchmarks` on `qail.rs`.
 
 The current public Zig driver comparison is:
 

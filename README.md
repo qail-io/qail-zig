@@ -15,9 +15,9 @@
 
 > Core driver/runtime path is Zig-native and zero-GC. The Linux Kerberos/GSSENC path uses optional runtime GSSAPI loading and libc-backed dynamic linking.
 
-- Website: [dev.qail.io/zig](https://dev.qail.io/zig)
-- Docs: [dev.qail.io/zig/docs](https://dev.qail.io/zig/docs)
-- Benchmarks: [dev.qail.io/zig/benchmarks](https://dev.qail.io/zig/benchmarks)
+- Website: [qail.rs/zig](https://qail.rs/zig)
+- Docs: [qail.rs/zig/docs](https://qail.rs/zig/docs)
+- Benchmarks: [qail.rs/zig/benchmarks](https://qail.rs/zig/benchmarks)
 - Changelog: [`CHANGELOG.md`](./CHANGELOG.md)
 
 ## Highlights
@@ -35,8 +35,8 @@
 
 Published benchmark results live on the website instead of this README:
 
-- Driver benchmarks: [dev.qail.io/zig/benchmarks](https://dev.qail.io/zig/benchmarks)
-- Project overview: [dev.qail.io/zig](https://dev.qail.io/zig)
+- Driver benchmarks: [qail.rs/zig/benchmarks](https://qail.rs/zig/benchmarks)
+- Project overview: [qail.rs/zig](https://qail.rs/zig)
 
 The web pages are the canonical place for the current benchmark matrix, methodology, and interpretation. The README stays intentionally short so users do not have to parse large benchmark tables here.
 
